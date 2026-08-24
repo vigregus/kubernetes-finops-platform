@@ -11,6 +11,11 @@ spec:
     - repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
       targetRevision: HEAD
       ref: values
+    - repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
+      targetRevision: HEAD
+      path: gitops/03-finops/opencost/manifests
+      directory:
+        recurse: true
     - repoURL: https://opencost.github.io/opencost-helm-chart
       chart: opencost
       targetRevision: 2.5.29

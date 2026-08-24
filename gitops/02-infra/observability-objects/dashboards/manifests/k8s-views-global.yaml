@@ -1,0 +1,15 @@
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: k8s-views-global
+  namespace: observability
+spec:
+  instanceSelector:
+    matchLabels:
+      dashboards: "grafana-local"
+  datasources:
+    - inputName: datasource
+      datasourceName: VictoriaMetrics
+  grafanaCom:
+    id: 15757
+    revision: 43
