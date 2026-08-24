@@ -401,10 +401,10 @@ kubernetes-finops-platform/
 The repository now contains a working scaffold for the first implementation steps:
 
 - local namespace definitions for `argocd`, `observability`, `finops-system`, `governance-system`, `dev`, `stage`, and `prod`,
-- an Argo CD root application and local application split between platform and workloads,
+- an Argo CD root application and local application split between governance, observability, platform, and workloads,
 - a GitOps-managed Kyverno installation plus a Kyverno policy for required FinOps labels,
 - local entrypoints for observability and FinOps components,
-- a dedicated GitOps-managed VictoriaMetrics stack application for cluster metrics collection,
+- a dedicated GitOps-managed `observability-local` application that owns metrics, logs, traces, dashboards, and the VictoriaMetrics stack,
 - placeholder dashboards-as-code ConfigMaps,
 - sample workload manifests for `checkout` and `analytics`,
 - initial `k6` scenarios.

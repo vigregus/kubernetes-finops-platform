@@ -1,0 +1,62 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: observability-local
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  project: finops-platform
+  sources:
+    - repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
+      targetRevision: HEAD
+      path: platform/observability/local
+    - repoURL: https://victoriametrics.github.io/helm-charts/
+      chart: victoria-metrics-k8s-stack
+      targetRevision: 0.91.2
+      helm:
+        releaseName: vm-local
+        values: |
+          argocdReleaseOverride: vm-local
+          grafana:
+            enabled: true
+          alertmanager:
+            enabled: true
+          defaultDashboards:
+            enabled: true
+            grafanaOperator:
+              enabled: false
+          defaultRules:
+            enabled: true
+          vmsingle:
+            enabled: true
+            spec:
+              retentionPeriod: "7d"
+              replicaCount: 1
+              storage:
+                accessModes:
+                  - ReadWriteOnce
+                resources:
+                  requests:
+                    storage: 10Gi
+          vmagent:
+            enabled: true
+            spec:
+              selectAllByDefault: true
+              scrapeInterval: 20s
+              externalLabels:
+                cluster: local-v1
+          kube-state-metrics:
+            enabled: true
+          prometheus-node-exporter:
+            enabled: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: observability
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
