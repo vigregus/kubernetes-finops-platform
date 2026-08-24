@@ -16,7 +16,7 @@ defaultRules:
     # instead, which does carry per-container labels on this cluster.
     # cache/rss/swap have no equivalent on /metrics/resource, so they
     # stay disabled rather than silently evaluating to nothing.
-    node_namespace_pod_container:container_cpu_usage_seconds_total:sum_rate5m:
+    node_namespace_pod_container:container_cpu_usage_seconds_total:sum_irate:
       enabled: false
     node_namespace_pod_container:container_memory_working_set_bytes:
       enabled: false
