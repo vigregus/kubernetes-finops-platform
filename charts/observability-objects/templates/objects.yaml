@@ -9,3 +9,12 @@ spec:
   config:
     security:
       admin_user: {{ .Values.grafana.adminUser | quote }}
+  deployment:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: grafana
+              env:
+                - name: GF_INSTALL_PLUGINS
+                  value: {{ .Values.grafana.installPlugins | default "victoriametrics-logs-datasource" | quote }}
