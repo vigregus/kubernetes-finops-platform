@@ -1,0 +1,3 @@
+config:
+  clients:
+    - url: http://vl-local-victoria-logs-single-server.observability.svc.cluster.local:9428/insert/loki/api/v1/push
