@@ -1,0 +1,21 @@
+name: analytics
+namespace: stage
+labels:
+  app.kubernetes.io/name: analytics
+  app.kubernetes.io/component: api
+  finops.internal/product: insights
+  finops.internal/team: data-platform
+  finops.internal/environment: stage
+  finops.internal/component: application
+replicas: 1
+image: hashicorp/http-echo:1.0.0
+text: analytics
+containerPort: 5678
+servicePort: 80
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: 700m
+    memory: 768Mi

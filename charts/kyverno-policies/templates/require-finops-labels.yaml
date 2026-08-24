@@ -1,0 +1,29 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: {{ .Values.policy.name }}
+spec:
+  validationFailureAction: {{ .Values.policy.validationFailureAction }}
+  background: {{ .Values.policy.background }}
+  rules:
+    - name: {{ .Values.policy.ruleName }}
+      match:
+        any:
+          - resources:
+              kinds:
+{{ toYaml .Values.policy.matchKinds | indent 16 }}
+      validate:
+        message: "Workloads must define required FinOps ownership labels."
+        pattern:
+          metadata:
+            labels:
+{{- range .Values.policy.requiredLabels }}
+              {{ . }}: "?*"
+{{- end }}
+          spec:
+            template:
+              metadata:
+                labels:
+{{- range .Values.policy.requiredLabels }}
+                  {{ . }}: "?*"
+{{- end }}

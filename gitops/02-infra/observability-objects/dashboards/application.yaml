@@ -1,23 +1,25 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: kubernetes-finops-platform-root
+  name: grafana-dashboards
   namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
 spec:
-  project: default
+  project: finops-platform
   source:
     repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
     targetRevision: HEAD
-    path: gitops
+    path: gitops/02-infra/observability-objects/dashboards/manifests
     directory:
       recurse: true
-      include: "{**/application.yaml,01-root/project.yaml}"
   destination:
     server: https://kubernetes.default.svc
-    namespace: argocd
+    namespace: observability
   syncPolicy:
     automated:
       prune: true
       selfHeal: true
     syncOptions:
       - CreateNamespace=true
+      - ServerSideApply=true

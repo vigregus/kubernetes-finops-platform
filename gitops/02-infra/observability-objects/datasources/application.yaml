@@ -1,0 +1,37 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: grafana-operator
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  project: finops-platform
+  sources:
+    - repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
+      targetRevision: HEAD
+      ref: values
+    - repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
+      targetRevision: HEAD
+      path: gitops/02-infra/observability-objects/datasources
+      directory:
+        recurse: true
+        include: "*.yaml"
+        exclude: "{application.yaml,values.yaml}"
+    - repoURL: https://grafana.github.io/helm-charts
+      chart: grafana-operator
+      targetRevision: 5.24.0
+      helm:
+        releaseName: grafana-operator
+        valueFiles:
+          - $values/gitops/02-infra/observability-objects/datasources/values.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: observability
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

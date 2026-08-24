@@ -1,0 +1,16 @@
+policy:
+  name: require-finops-labels
+  validationFailureAction: Audit
+  background: true
+  ruleName: require-finops-workload-labels
+  matchKinds:
+    - Deployment
+    - StatefulSet
+    - DaemonSet
+  requiredLabels:
+    - app.kubernetes.io/name
+    - app.kubernetes.io/component
+    - finops.internal/product
+    - finops.internal/team
+    - finops.internal/environment
+    - finops.internal/component

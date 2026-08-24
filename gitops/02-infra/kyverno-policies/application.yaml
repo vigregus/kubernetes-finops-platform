@@ -1,0 +1,26 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kyverno-policies
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  project: finops-platform
+  sources:
+    - repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
+      targetRevision: HEAD
+      ref: values
+    - repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
+      targetRevision: HEAD
+      path: charts/kyverno-policies
+      helm:
+        valueFiles:
+          - $values/gitops/02-infra/kyverno-policies/values.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: governance-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

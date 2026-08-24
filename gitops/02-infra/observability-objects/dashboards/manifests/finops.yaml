@@ -1,0 +1,17 @@
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: finops
+  namespace: observability
+spec:
+  instanceSelector:
+    matchLabels:
+      dashboards: "grafana-local"
+  json: |
+    {
+      "title": "FinOps",
+      "description": "Placeholder dashboard for modeled cost, allocation, and cost per 1M requests.",
+      "tags": ["finops", "unit-economics"],
+      "schemaVersion": 39,
+      "version": 1
+    }

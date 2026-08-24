@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.formulas.configMapName }}
+  namespace: {{ .Values.namespace }}
+data:
+  cost_per_1m_requests: {{ .Values.formulas.costPer1MRequests | quote }}
+  notes: {{ .Values.formulas.notes | quote }}

@@ -1,0 +1,11 @@
+apiVersion: grafana.integreatly.org/v1beta1
+kind: Grafana
+metadata:
+  name: {{ .Values.grafana.name }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    dashboards: {{ .Values.grafana.instanceLabel | quote }}
+spec:
+  config:
+    security:
+      admin_user: {{ .Values.grafana.adminUser | quote }}

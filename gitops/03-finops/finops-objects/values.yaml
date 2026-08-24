@@ -1,0 +1,5 @@
+namespace: finops-system
+formulas:
+  configMapName: finops-metric-formulas
+  costPer1MRequests: (modeled_cost / request_count) * 1000000
+  notes: Modeled cost is used in Local v1. Actual cost is introduced in AWS v2.

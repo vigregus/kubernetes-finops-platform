@@ -1,0 +1,30 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: goldilocks
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  project: finops-platform
+  sources:
+    - repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
+      targetRevision: HEAD
+      ref: values
+    - repoURL: https://charts.fairwinds.com/stable
+      chart: goldilocks
+      targetRevision: 11.0.0
+      helm:
+        releaseName: goldilocks
+        valueFiles:
+          - $values/gitops/03-finops/goldilocks/values.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: finops-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

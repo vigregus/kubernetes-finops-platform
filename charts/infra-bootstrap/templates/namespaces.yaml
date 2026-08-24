@@ -1,0 +1,13 @@
+{{- range $index, $namespace := .Values.namespaces }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $namespace.name }}
+  {{- with $namespace.labels }}
+  labels:
+{{ toYaml . | indent 4 }}
+  {{- end }}
+{{- if lt (add1 $index) (len $.Values.namespaces) }}
+---
+{{- end }}
+{{- end }}

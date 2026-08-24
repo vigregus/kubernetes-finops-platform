@@ -1,0 +1,14 @@
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDatasource
+metadata:
+  name: tempo
+  namespace: observability
+spec:
+  instanceSelector:
+    matchLabels:
+      dashboards: "grafana-local"
+  datasource:
+    name: Tempo
+    type: tempo
+    access: proxy
+    url: http://tempo-local.observability.svc.cluster.local:3100

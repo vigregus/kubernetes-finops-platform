@@ -1,0 +1,17 @@
+namespaces:
+  - name: argocd
+  - name: observability
+  - name: finops-system
+  - name: governance-system
+  - name: dev
+    labels:
+      finops.internal/environment: dev
+      goldilocks.fairwinds.com/enabled: "true"
+  - name: stage
+    labels:
+      finops.internal/environment: stage
+      goldilocks.fairwinds.com/enabled: "true"
+  - name: prod
+    labels:
+      finops.internal/environment: prod
+      goldilocks.fairwinds.com/enabled: "true"

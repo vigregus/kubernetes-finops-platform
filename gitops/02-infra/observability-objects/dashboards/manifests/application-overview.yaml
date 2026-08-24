@@ -1,0 +1,17 @@
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: application-overview
+  namespace: observability
+spec:
+  instanceSelector:
+    matchLabels:
+      dashboards: "grafana-local"
+  json: |
+    {
+      "title": "Application Overview",
+      "description": "Placeholder dashboard for workload traffic, latency, errors, and resource usage.",
+      "tags": ["application-overview", "finops"],
+      "schemaVersion": 39,
+      "version": 1
+    }

@@ -1,0 +1,30 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: victoria-logs
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  project: finops-platform
+  sources:
+    - repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
+      targetRevision: HEAD
+      ref: values
+    - repoURL: https://victoriametrics.github.io/helm-charts/
+      chart: victoria-logs-single
+      targetRevision: 0.3.3
+      helm:
+        releaseName: vl-local
+        valueFiles:
+          - $values/gitops/02-infra/observability-objects/victoria-logs/values.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: observability
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

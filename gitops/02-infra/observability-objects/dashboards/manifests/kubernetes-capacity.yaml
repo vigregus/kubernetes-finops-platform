@@ -1,0 +1,17 @@
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: kubernetes-capacity
+  namespace: observability
+spec:
+  instanceSelector:
+    matchLabels:
+      dashboards: "grafana-local"
+  json: |
+    {
+      "title": "Kubernetes Capacity",
+      "description": "Placeholder dashboard for requests, limits, utilization, and saturation.",
+      "tags": ["kubernetes-capacity", "finops"],
+      "schemaVersion": 39,
+      "version": 1
+    }
