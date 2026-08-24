@@ -11,4 +11,4 @@ spec:
     name: Tempo
     type: tempo
     access: proxy
-    url: http://tempo-local.observability.svc.cluster.local:3100
+    url: http://tempo-local.observability.svc.cluster.local:3200

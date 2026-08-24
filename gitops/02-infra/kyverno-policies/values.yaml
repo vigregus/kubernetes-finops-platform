@@ -14,3 +14,12 @@ policy:
     - finops.internal/team
     - finops.internal/environment
     - finops.internal/component
+  excludeNamespaces:
+    - kube-system
+    - kube-node-lease
+    - kube-public
+    - default
+    - argocd
+    - observability
+    - governance-system
+    - finops-system
