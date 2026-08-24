@@ -7,6 +7,25 @@ alertmanager:
   enabled: true
 defaultRules:
   enabled: true
+  rules:
+    # minikube's kubelet only exposes per-container cAdvisor metrics
+    # (metrics_path=/metrics/cadvisor) at the node level, without
+    # container/image labels - the upstream rules never match any
+    # series here. cpu/memory-working-set are replaced with corrected
+    # versions in ./rules/ that read metrics_path=/metrics/resource
+    # instead, which does carry per-container labels on this cluster.
+    # cache/rss/swap have no equivalent on /metrics/resource, so they
+    # stay disabled rather than silently evaluating to nothing.
+    node_namespace_pod_container:container_cpu_usage_seconds_total:sum_rate5m:
+      enabled: false
+    node_namespace_pod_container:container_memory_working_set_bytes:
+      enabled: false
+    node_namespace_pod_container:container_memory_cache:
+      enabled: false
+    node_namespace_pod_container:container_memory_rss:
+      enabled: false
+    node_namespace_pod_container:container_memory_swap:
+      enabled: false
 vmsingle:
   enabled: true
   spec:
