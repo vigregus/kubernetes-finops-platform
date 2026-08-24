@@ -1,3 +1,10 @@
 config:
   clients:
     - url: http://vl-local-victoria-logs-single-server.observability.svc.cluster.local:9428/insert/loki/api/v1/push
+  snippets:
+    # this cluster's kubelet runs the docker (cri-dockerd) runtime, whose
+    # log files are JSON lines, not the CRI plaintext format the chart
+    # defaults to - without this override every log line lands in _msg
+    # as an unparsed JSON blob.
+    pipelineStages:
+      - docker: {}
