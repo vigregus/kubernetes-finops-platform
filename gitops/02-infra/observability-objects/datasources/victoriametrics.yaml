@@ -11,7 +11,7 @@ spec:
     name: VictoriaMetrics
     type: prometheus
     access: proxy
-    url: http://vmsingle-vm-local.observability.svc.cluster.local:8429
+    url: http://vmsingle-vm-local-victoria-metrics-k8s-stack.observability.svc.cluster.local:8428
     isDefault: true
     jsonData:
       timeInterval: "20s"

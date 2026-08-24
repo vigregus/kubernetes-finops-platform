@@ -12,6 +12,11 @@ spec:
           - resources:
               kinds:
 {{ toYaml .Values.policy.matchKinds | indent 16 }}
+      exclude:
+        any:
+          - resources:
+              namespaces:
+{{ toYaml .Values.policy.excludeNamespaces | indent 16 }}
       validate:
         message: "Workloads must define required FinOps ownership labels."
         pattern:
