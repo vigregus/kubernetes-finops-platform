@@ -360,30 +360,47 @@ That is the level of result the repository is intended to make repeatable.
 kubernetes-finops-platform/
 ├── README.md
 ├── .gitignore
+├── charts/
+│   ├── app1/
+│   ├── app2/
+│   ├── finops-objects/
+│   ├── infra-bootstrap/
+│   ├── kyverno-policies/
+│   └── observability-objects/
 ├── docs/
 ├── examples/
 ├── gitops/
 │   ├── 01-root/
+│   │   ├── project.yaml
+│   │   └── root-application.yaml
 │   ├── 02-infra/
-│   │   ├── argocd-apps/
-│   │   ├── charts/
-│   │   └── values/
+│   │   ├── infra-bootstrap/
+│   │   ├── kyverno/
+│   │   ├── kyverno-policies/
+│   │   └── observability-objects/
+│   │       ├── dashboards/
+│   │       ├── datasources/
+│   │       ├── tempo/
+│   │       └── victoria-logs/
 │   ├── 03-finops/
-│   │   ├── charts/
-│   │   └── values/
+│   │   ├── finops-objects/
+│   │   ├── goldilocks/
+│   │   └── opencost/
 │   └── 04-business-app/
-│       ├── charts/
-│       └── values/
+│       ├── app1/
+│       └── app2/
 └── tests/
     └── k6/
 ```
+
+Each leaf directory under `gitops/` holds one Argo CD `application.yaml` (plus a `values.yaml` when the source is a Helm chart). Local, chart-backed components (`charts/*`) hold only `Chart.yaml` and `templates/` — they are not self-contained for `helm template`/`helm install` outside Argo CD, since defaults are supplied entirely through the matching `gitops/**/values.yaml`.
 
 ## Implementation Assets Already Included
 
 The repository now contains a working scaffold for the first implementation steps:
 
 - namespace definitions for `argocd`, `observability`, `finops-system`, `governance-system`, `dev`, `stage`, and `prod`,
-- an Argo CD root application plus a single `argocd-apps` values file split between infra, finops, and business applications,
+- an Argo CD root application (`gitops/01-root`) that recursively discovers one `application.yaml` per component under `gitops/02-infra`, `gitops/03-finops`, and `gitops/04-business-app`,
 - a GitOps-managed Kyverno installation plus a Kyverno policy for required FinOps labels,
 - local entrypoints for observability and FinOps components,
 - a dedicated GitOps-managed `observability` application that owns metrics, logs, traces, dashboards, and the VictoriaMetrics stack,
@@ -402,8 +419,7 @@ This is still a scaffold, not a completed runtime stack, but the following are n
 
 Remaining work before Definition of Done for Local v1:
 
-- confirm the exact Service DNS names the Helm releases create and correct the `TODO`-marked datasource/OpenCost URLs accordingly,
-- verify chart-specific values keys for `victoria-logs-single`, `tempo`, and `opencost` against `helm show values` (they were set from best-effort defaults, not a live cluster),
+- verify chart-specific values keys for `victoria-logs-single` and `tempo` against `helm show values` (they were set from best-effort defaults, not a live cluster),
 - decide whether `checkout` and `analytics` should each get `dev`/`stage`/`prod` overlays, or intentionally stay one-namespace-per-app for Local v1 (currently `checkout` only runs in `prod` and `analytics` only in `stage`),
 - replace the `hashicorp/http-echo` placeholder containers with instrumented apps that expose request/latency/error metrics and OTLP traces,
 - build the real dashboard panels (the three `GrafanaDashboard` resources currently hold placeholder JSON),
@@ -450,7 +466,7 @@ The intended local path is deliberately standard:
 3. Update the repository URL in `gitops/01-root/root-application.yaml`.
 4. Apply the root Argo CD application with `kubectl`.
 5. Let Argo CD reconcile `gitops/01-root/root-application.yaml`.
-6. Let Argo CD install GitOps-managed platform dependencies such as Kyverno, then reconcile the application set defined in `gitops/02-infra/argocd-apps/values.yaml`.
+6. Let Argo CD install GitOps-managed platform dependencies such as Kyverno, then reconcile each component `application.yaml` under `gitops/02-infra`, `gitops/03-finops`, and `gitops/04-business-app`.
 7. Create any required local secrets outside Git.
 8. Deploy workloads and run `k6` scenarios.
 
@@ -462,7 +478,7 @@ Local v1 is complete when all of the following are true:
 - `dev`, `stage`, and `prod` namespaces exist,
 - Argo CD manages the repository-defined platform resources,
 - VictoriaMetrics, VictoriaLogs, Tempo, Grafana, and Grafana Operator are deployed,
-- dashboards exist as code under `gitops/02-infra/charts/observability-objects/templates/`,
+- dashboards exist as code under `gitops/02-infra/observability-objects/dashboards/manifests/`,
 - OpenCost is deployed and exposes allocation data,
 - Goldilocks and VPA provide rightsizing recommendations,
 - Kyverno validates required application labels,

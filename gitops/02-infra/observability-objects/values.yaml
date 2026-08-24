@@ -3,34 +3,3 @@ grafana:
   name: grafana-local
   instanceLabel: grafana-local
   adminUser: admin
-datasources:
-  metrics:
-    name: victoriametrics
-    displayName: VictoriaMetrics
-    type: prometheus
-    url: http://vmsingle-vm-local.observability.svc.cluster.local:8429
-    isDefault: true
-    timeInterval: 20s
-  logs:
-    name: victorialogs
-    displayName: VictoriaLogs
-    type: victoriametrics-logs-datasource
-    url: http://vl-local-victoria-logs-single-server.observability.svc.cluster.local:9428
-  traces:
-    name: tempo
-    displayName: Tempo
-    type: tempo
-    url: http://tempo-local.observability.svc.cluster.local:3100
-dashboards:
-  applicationOverview:
-    name: application-overview
-    title: Application Overview
-    description: Placeholder dashboard for workload traffic, latency, errors, and resource usage.
-  kubernetesCapacity:
-    name: kubernetes-capacity
-    title: Kubernetes Capacity
-    description: Placeholder dashboard for requests, limits, utilization, and saturation.
-  finops:
-    name: finops
-    title: FinOps
-    description: Placeholder dashboard for modeled cost, allocation, and cost per 1M requests.
