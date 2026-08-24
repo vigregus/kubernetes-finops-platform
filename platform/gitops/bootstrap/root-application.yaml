@@ -6,7 +6,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/pershinaM/kubernetes-finops-platform.git
+    repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
     targetRevision: HEAD
     path: clusters/local
   destination:
