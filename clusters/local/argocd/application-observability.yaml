@@ -10,7 +10,7 @@ spec:
   sources:
     - repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
       targetRevision: HEAD
-      path: platform/observability/local
+      path: platform/observability
     - repoURL: https://victoriametrics.github.io/helm-charts/
       chart: victoria-metrics-k8s-stack
       targetRevision: 0.91.2

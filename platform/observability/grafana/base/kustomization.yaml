@@ -3,4 +3,3 @@ kind: Kustomization
 resources:
   - operator-notes-configmap.yaml
   - datasources-configmap.yaml
-  - dashboards
