@@ -1,0 +1,14 @@
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMServiceScrape
+metadata:
+  name: opencost
+  namespace: finops-system
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: opencost
+      app.kubernetes.io/name: opencost
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s

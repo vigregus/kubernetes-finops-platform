@@ -8,6 +8,7 @@ spec:
     matchLabels:
       dashboards: "grafana-local"
   datasource:
+    uid: victoriametrics
     name: VictoriaMetrics
     type: prometheus
     access: proxy

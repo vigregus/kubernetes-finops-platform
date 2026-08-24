@@ -1,0 +1,15 @@
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: node-exporter-full
+  namespace: observability
+spec:
+  instanceSelector:
+    matchLabels:
+      dashboards: "grafana-local"
+  datasources:
+    - inputName: ds_prometheus
+      datasourceName: VictoriaMetrics
+  grafanaCom:
+    id: 1860
+    revision: 45

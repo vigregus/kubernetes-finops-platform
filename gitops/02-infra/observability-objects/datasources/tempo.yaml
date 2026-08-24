@@ -8,6 +8,7 @@ spec:
     matchLabels:
       dashboards: "grafana-local"
   datasource:
+    uid: tempo
     name: Tempo
     type: tempo
     access: proxy
