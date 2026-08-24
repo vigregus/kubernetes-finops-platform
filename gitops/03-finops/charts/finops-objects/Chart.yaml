@@ -1,0 +1,5 @@
+apiVersion: v2
+name: finops-objects
+description: Repo-owned FinOps objects for kubernetes-finops-platform
+type: application
+version: 0.1.0

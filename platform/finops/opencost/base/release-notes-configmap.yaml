@@ -1,9 +1,0 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: opencost-release-notes
-  namespace: finops-system
-data:
-  component: opencost
-  purpose: kubernetes-cost-allocation
-  next_step: wire a Helm-based install while keeping GitOps ownership in this path

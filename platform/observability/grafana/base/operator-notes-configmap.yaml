@@ -1,9 +1,0 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: grafana-operator-notes
-  namespace: observability
-data:
-  component: grafana-operator
-  purpose: dashboards-as-code-and-datasources
-  next_step: install Grafana Operator and convert notes into operator-managed CRs as the stack is wired

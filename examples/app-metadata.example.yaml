@@ -6,10 +6,10 @@ metadata:
   labels:
     app.kubernetes.io/name: checkout
     app.kubernetes.io/component: api
-    finops.openai.io/product: commerce
-    finops.openai.io/team: payments
-    finops.openai.io/environment: prod
-    finops.openai.io/component: application
+    finops.internal/product: commerce
+    finops.internal/team: payments
+    finops.internal/environment: prod
+    finops.internal/component: application
 spec:
   selector:
     matchLabels:
@@ -19,10 +19,10 @@ spec:
       labels:
         app.kubernetes.io/name: checkout
         app.kubernetes.io/component: api
-        finops.openai.io/product: commerce
-        finops.openai.io/team: payments
-        finops.openai.io/environment: prod
-        finops.openai.io/component: application
+        finops.internal/product: commerce
+        finops.internal/team: payments
+        finops.internal/environment: prod
+        finops.internal/component: application
     spec:
       containers:
         - name: checkout

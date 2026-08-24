@@ -1,0 +1,43 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: argocd
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observability
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: finops-system
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: governance-system
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dev
+  labels:
+    finops.internal/environment: dev
+    goldilocks.fairwinds.com/enabled: "true"
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: stage
+  labels:
+    finops.internal/environment: stage
+    goldilocks.fairwinds.com/enabled: "true"
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: prod
+  labels:
+    finops.internal/environment: prod
+    goldilocks.fairwinds.com/enabled: "true"

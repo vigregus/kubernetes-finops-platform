@@ -1,0 +1,31 @@
+argocdReleaseOverride: vm-local
+grafana:
+  enabled: false
+defaultDashboards:
+  enabled: false
+alertmanager:
+  enabled: true
+defaultRules:
+  enabled: true
+vmsingle:
+  enabled: true
+  spec:
+    retentionPeriod: "7d"
+    replicaCount: 1
+    storage:
+      accessModes:
+        - ReadWriteOnce
+      resources:
+        requests:
+          storage: 10Gi
+vmagent:
+  enabled: true
+  spec:
+    selectAllByDefault: true
+    scrapeInterval: 20s
+    externalLabels:
+      cluster: local-v1
+kube-state-metrics:
+  enabled: true
+prometheus-node-exporter:
+  enabled: true

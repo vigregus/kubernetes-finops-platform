@@ -1,9 +1,0 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: victorialogs-release-notes
-  namespace: observability
-data:
-  component: victorialogs
-  purpose: logs-ingestion-and-search
-  next_step: wire a Helm-based install while keeping GitOps ownership in this path

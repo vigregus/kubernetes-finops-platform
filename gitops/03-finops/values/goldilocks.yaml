@@ -1,0 +1,4 @@
+vpa:
+  enabled: true
+  updater:
+    enabled: false

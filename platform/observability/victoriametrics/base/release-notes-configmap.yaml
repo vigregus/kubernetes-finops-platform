@@ -1,9 +1,0 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: victoriametrics-release-notes
-  namespace: observability
-data:
-  component: victoriametrics
-  purpose: metrics-storage-and-query
-  next_step: wire a Helm-based install while keeping GitOps ownership in this path

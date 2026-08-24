@@ -1,0 +1,8 @@
+opencost:
+  prometheus:
+    internal:
+      enabled: true
+      serviceName: vmsingle-vm-local-victoria-metrics-k8s-stack
+      namespaceName: observability
+      port: 8428
+      path: /prometheus

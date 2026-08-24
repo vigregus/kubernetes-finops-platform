@@ -1,9 +1,0 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: tempo-release-notes
-  namespace: observability
-data:
-  component: tempo
-  purpose: traces-storage-and-query
-  next_step: wire a Helm-based install while keeping GitOps ownership in this path

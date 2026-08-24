@@ -1,8 +1,0 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: kyverno-local-notes
-data:
-  README: |
-    Install Kyverno controller separately or convert this folder to a HelmRelease/Application.
-    This local layer keeps the repository path and policies stable before chart wiring is added.

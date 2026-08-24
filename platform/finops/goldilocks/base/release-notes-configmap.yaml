@@ -1,9 +1,0 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: goldilocks-release-notes
-  namespace: finops-system
-data:
-  component: goldilocks
-  purpose: rightsizing-recommendations
-  next_step: install Goldilocks and VPA controllers while preserving this path as the source of truth
