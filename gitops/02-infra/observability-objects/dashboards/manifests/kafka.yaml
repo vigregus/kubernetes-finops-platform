@@ -1,0 +1,119 @@
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: kafka
+  namespace: observability
+spec:
+  instanceSelector:
+    matchLabels:
+      dashboards: "grafana-local"
+  json: |
+    {
+      "title": "Kafka",
+      "description": "Consumer lag and topic/partition health from Strimzi's kafka-exporter, plus cache and Redis (checkout/analytics side channels).",
+      "tags": ["kafka"],
+      "schemaVersion": 39,
+      "version": 1,
+      "editable": true,
+      "time": { "from": "now-1h", "to": "now" },
+      "panels": [
+        {
+          "id": 1,
+          "type": "timeseries",
+          "title": "Consumer group lag (queue length) by topic",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+          "targets": [
+            {
+              "expr": "sum by (topic, consumergroup) (kafka_consumergroup_lag)",
+              "legendFormat": "{{consumergroup}} / {{topic}}"
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "type": "timeseries",
+          "title": "Consumer group current offset vs topic partition offset",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+          "targets": [
+            {
+              "expr": "sum by (topic) (kafka_topic_partition_current_offset)",
+              "legendFormat": "{{topic}} produced (topic offset)"
+            },
+            {
+              "expr": "sum by (topic, consumergroup) (kafka_consumergroup_current_offset)",
+              "legendFormat": "{{consumergroup}} / {{topic}} consumed"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "type": "timeseries",
+          "title": "Consumer group members",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+          "targets": [
+            {
+              "expr": "kafka_consumergroup_members",
+              "legendFormat": "{{consumergroup}}"
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "type": "timeseries",
+          "title": "Broker publish latency (checkout producer)",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.95, sum by (job, le) (rate(kafka_publish_duration_seconds_bucket[5m])))",
+              "legendFormat": "{{job}} p95"
+            },
+            {
+              "expr": "histogram_quantile(0.5, sum by (job, le) (rate(kafka_publish_duration_seconds_bucket[5m])))",
+              "legendFormat": "{{job}} p50"
+            }
+          ]
+        },
+        {
+          "id": 5,
+          "type": "row",
+          "title": "Redis",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 16 }
+        },
+        {
+          "id": 6,
+          "type": "timeseries",
+          "title": "Redis commands/sec by instance",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 17 },
+          "targets": [
+            {
+              "expr": "sum by (namespace) (rate(redis_commands_processed_total[5m]))",
+              "legendFormat": "{{namespace}}"
+            }
+          ]
+        },
+        {
+          "id": 7,
+          "type": "timeseries",
+          "title": "Redis keyspace hit ratio (%)",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100 }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 17 },
+          "targets": [
+            {
+              "expr": "100 * sum by (namespace) (rate(redis_keyspace_hits_total[5m])) / (sum by (namespace) (rate(redis_keyspace_hits_total[5m])) + sum by (namespace) (rate(redis_keyspace_misses_total[5m])))",
+              "legendFormat": "{{namespace}}"
+            }
+          ]
+        }
+      ]
+    }

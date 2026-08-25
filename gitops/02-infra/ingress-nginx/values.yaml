@@ -29,3 +29,10 @@ controller:
     # trace_id right there in the same JSON object.
     log-format-escape-json: "true"
     log-format-upstream: '{"_msg": "$request", "time": "$time_iso8601", "remote_addr": "$remote_addr", "status": "$status", "request_time": "$request_time", "upstream_addr": "$upstream_addr", "upstream_status": "$upstream_status", "host": "$host", "trace_id": "$opentelemetry_trace_id"}'
+  # Exposes the controller's own request-rate/latency/error metrics
+  # (nginx_ingress_controller_*) on a separate :10254 service - without
+  # this the ingress hop is only visible as traces/access-log lines, with
+  # no RPS/latency/error dashboard for the entry point itself. Scraped by
+  # gitops/02-infra/ingress-nginx/manifests/service-scrape.yaml.
+  metrics:
+    enabled: true

@@ -11,6 +11,11 @@ spec:
     - repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
       targetRevision: HEAD
       ref: values
+    - repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
+      targetRevision: HEAD
+      path: gitops/02-infra/ingress-nginx/manifests
+      directory:
+        recurse: true
     - repoURL: https://kubernetes.github.io/ingress-nginx
       chart: ingress-nginx
       targetRevision: 4.15.1

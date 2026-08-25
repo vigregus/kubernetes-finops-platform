@@ -1,0 +1,13 @@
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMServiceScrape
+metadata:
+  name: orders-kafka-exporter
+  namespace: kafka
+spec:
+  selector:
+    matchLabels:
+      strimzi.io/name: orders-kafka-kafka-exporter
+  endpoints:
+    - port: tcp-prometheus
+      path: /metrics
+      interval: 15s
