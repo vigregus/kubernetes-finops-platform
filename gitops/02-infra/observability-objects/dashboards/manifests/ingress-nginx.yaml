@@ -1857,6 +1857,22 @@ spec:
             }
           ],
           "type": "table"
+        },
+        {
+          "id": 9001,
+          "type": "timeseries",
+          "title": "Requests by status code",
+          "description": "The upstream dashboard only ships a Success Rate (% non-4xx/5xx) panel, which hides what's actually failing - this breaks the same data out by status code so 400/404/500/etc are directly visible, not just an aggregate percentage.",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "fieldConfig": { "defaults": { "unit": "reqps", "min": 0 }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 39 },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "sum by (status) (rate(nginx_ingress_controller_requests{controller_pod=~\"$controller\",controller_class=~\"$controller_class\",namespace=~\"$namespace\"}[2m]))",
+              "legendFormat": "{{status}}"
+            }
+          ]
         }
       ],
       "refresh": "5s",
