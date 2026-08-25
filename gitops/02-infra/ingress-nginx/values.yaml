@@ -34,7 +34,12 @@ controller:
     # separate fields too so they're still queryable/filterable on their
     # own, not just visible in this string.
     log-format-escape-json: "true"
-    log-format-upstream: '{"_msg": "$remote_addr - \"$request\" $status $body_bytes_sent -> upstream=$upstream_addr ($upstream_status) in ${request_time}s", "time": "$time_iso8601", "remote_addr": "$remote_addr", "status": "$status", "request_time": "$request_time", "upstream_addr": "$upstream_addr", "upstream_status": "$upstream_status", "host": "$host", "trace_id": "$opentelemetry_trace_id"}'
+    # No literal quotes around $request here (even though that would read
+    # closer to a classic combined log) - nginx's escape=json modifier
+    # only JSON-escapes variable substitutions, not literal characters
+    # written into the format string, so a hand-written `"` around a
+    # variable comes out unescaped and breaks the JSON structure.
+    log-format-upstream: '{"_msg": "$remote_addr - $request $status $body_bytes_sent -> upstream=$upstream_addr ($upstream_status) in ${request_time}s", "time": "$time_iso8601", "remote_addr": "$remote_addr", "status": "$status", "request_time": "$request_time", "upstream_addr": "$upstream_addr", "upstream_status": "$upstream_status", "host": "$host", "trace_id": "$opentelemetry_trace_id"}'
   # Exposes the controller's own request-rate/latency/error metrics
   # (nginx_ingress_controller_*) on a separate :10254 service - without
   # this the ingress hop is only visible as traces/access-log lines, with
