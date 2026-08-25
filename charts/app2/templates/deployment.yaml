@@ -36,6 +36,22 @@ spec:
           env:
             - name: PORT
               value: {{ .Values.containerPort | quote }}
+            - name: SERVICE_VERSION
+              value: {{ .Chart.Version | quote }}
+            - name: DEPLOYMENT_ENVIRONMENT
+              value: {{ index .Values.labels "finops.internal/environment" | quote }}
+            # Downward API, not a hardcoded value - lets a trace/log line
+            # be pinned to the exact pod that produced it (see
+            # apps/analytics/app.py resource attributes) without a
+            # separate trip to kubectl.
+            - name: K8S_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: K8S_NAMESPACE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
 {{- range $key, $value := .Values.env }}
             - name: {{ $key }}
               value: {{ $value | quote }}
