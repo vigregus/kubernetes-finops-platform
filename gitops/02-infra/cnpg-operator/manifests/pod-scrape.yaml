@@ -1,0 +1,18 @@
+# The operator's own controller-runtime metrics (port 8080) aren't
+# behind any Service and weren't scraped at all - the official CNPG
+# Grafana dashboard's "operatorNamespace" template variable depends on
+# controller_runtime_webhook_requests_total, which only exists once this
+# is wired up.
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMPodScrape
+metadata:
+  name: cnpg-operator
+  namespace: cnpg-system
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cloudnative-pg
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: 15s
