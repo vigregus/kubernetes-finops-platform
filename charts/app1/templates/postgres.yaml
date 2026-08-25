@@ -51,4 +51,15 @@ spec:
     - port: metrics
       path: /metrics
       interval: 15s
+      # CNPG's own "cluster" label (the CNPG Cluster name, e.g.
+      # "checkout-db") collides with the "cluster" external_label every
+      # scrape target gets stamped with (our whole environment
+      # identifier, "local-v1" - see gitops/03-finops/opencost/manifests/
+      # service-scrape.yaml for the same collision with OpenCost's own
+      # metrics). Without honorLabels, VictoriaMetrics keeps the
+      # external one and renames CNPG's to exported_cluster - the
+      # official CloudNativePG dashboard's $cluster variable then finds
+      # only "local-v1", not a real CNPG cluster name, and every panel
+      # depending on it (which is most of them) comes back empty.
+      honorLabels: true
 {{- end }}
