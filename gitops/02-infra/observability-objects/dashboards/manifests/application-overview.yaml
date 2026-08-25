@@ -10,8 +10,179 @@ spec:
   json: |
     {
       "title": "Application Overview",
-      "description": "Placeholder dashboard for workload traffic, latency, errors, and resource usage.",
+      "description": "Traffic, latency, errors, resource usage, and ownership context for checkout/analytics.",
       "tags": ["application-overview", "finops"],
       "schemaVersion": 39,
-      "version": 1
+      "version": 2,
+      "editable": true,
+      "time": { "from": "now-1h", "to": "now" },
+      "templating": {
+        "list": [
+          {
+            "name": "namespace",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+            "query": "label_values(http_requests_total{job=~\"checkout|analytics\"}, namespace)",
+            "refresh": 2,
+            "includeAll": true,
+            "multi": true,
+            "current": { "text": "All", "value": "$__all" }
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1,
+          "type": "row",
+          "title": "Ownership",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+        },
+        {
+          "id": 2,
+          "type": "table",
+          "title": "Workload ownership",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "gridPos": { "h": 6, "w": 24, "x": 0, "y": 1 },
+          "targets": [
+            {
+              "expr": "kube_pod_labels{namespace=~\"$namespace\", label_app_kubernetes_io_name=~\"checkout|analytics\"}",
+              "format": "table",
+              "instant": true
+            }
+          ],
+          "transformations": [
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": { "Time": true, "Value": true, "__name__": true, "cluster": true, "container": true, "endpoint": true, "instance": true, "job": true, "prometheus": true, "service": true, "uid": true, "label_pod_template_hash": true },
+                "indexByName": {},
+                "renameByName": {
+                  "label_app_kubernetes_io_name": "workload",
+                  "label_app_kubernetes_io_component": "component",
+                  "label_finops_internal_product": "product",
+                  "label_finops_internal_team": "team",
+                  "label_finops_internal_environment": "environment",
+                  "label_finops_internal_component": "finops_component"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "type": "row",
+          "title": "Traffic and errors",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 7 }
+        },
+        {
+          "id": 4,
+          "type": "timeseries",
+          "title": "Request rate by workload and status",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+          "targets": [
+            {
+              "expr": "sum by (job, status) (rate(http_requests_total{namespace=~\"$namespace\"}[5m]))",
+              "legendFormat": "{{job}} {{status}}"
+            }
+          ]
+        },
+        {
+          "id": 5,
+          "type": "timeseries",
+          "title": "Error rate (%) by workload",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "percent", "min": 0 }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+          "targets": [
+            {
+              "expr": "100 * sum by (job) (rate(http_requests_total{namespace=~\"$namespace\", status=\"500\"}[5m])) / sum by (job) (rate(http_requests_total{namespace=~\"$namespace\"}[5m]))",
+              "legendFormat": "{{job}}"
+            }
+          ]
+        },
+        {
+          "id": 6,
+          "type": "row",
+          "title": "Latency",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 16 }
+        },
+        {
+          "id": 7,
+          "type": "timeseries",
+          "title": "p50 / p95 / p99 latency by workload",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 17 },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.5, sum by (job, le) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])))",
+              "legendFormat": "{{job}} p50"
+            },
+            {
+              "expr": "histogram_quantile(0.95, sum by (job, le) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])))",
+              "legendFormat": "{{job}} p95"
+            },
+            {
+              "expr": "histogram_quantile(0.99, sum by (job, le) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])))",
+              "legendFormat": "{{job}} p99"
+            }
+          ]
+        },
+        {
+          "id": 8,
+          "type": "row",
+          "title": "Resource usage",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 25 }
+        },
+        {
+          "id": 9,
+          "type": "timeseries",
+          "title": "CPU usage vs requested",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 26 },
+          "targets": [
+            {
+              "expr": "node_namespace_pod_container:container_cpu_usage_seconds_total:sum_irate{namespace=~\"$namespace\", pod=~\"checkout.*|analytics.*\"}",
+              "legendFormat": "{{namespace}}/{{pod}} used"
+            },
+            {
+              "expr": "sum by (namespace, pod) (kube_pod_container_resource_requests{namespace=~\"$namespace\", pod=~\"checkout.*|analytics.*\", resource=\"cpu\"})",
+              "legendFormat": "{{namespace}}/{{pod}} requested"
+            }
+          ]
+        },
+        {
+          "id": 10,
+          "type": "timeseries",
+          "title": "Memory usage vs requested",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 26 },
+          "targets": [
+            {
+              "expr": "node_namespace_pod_container:container_memory_working_set_bytes{namespace=~\"$namespace\", pod=~\"checkout.*|analytics.*\"}",
+              "legendFormat": "{{namespace}}/{{pod}} used"
+            },
+            {
+              "expr": "sum by (namespace, pod) (kube_pod_container_resource_requests{namespace=~\"$namespace\", pod=~\"checkout.*|analytics.*\", resource=\"memory\"})",
+              "legendFormat": "{{namespace}}/{{pod}} requested"
+            }
+          ]
+        },
+        {
+          "id": 11,
+          "type": "logs",
+          "title": "Recent logs",
+          "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 34 },
+          "targets": [
+            {
+              "expr": "{namespace=~\"$namespace\"} app:~\"checkout|analytics\""
+            }
+          ]
+        }
+      ]
     }
