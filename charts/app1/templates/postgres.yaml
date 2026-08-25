@@ -13,9 +13,23 @@ spec:
   # propagate down automatically. That silently drops Postgres - the
   # single most expensive component here - out of every cost-by-product/
   # cost-by-team query, which all join on kube_pod_labels.
+  #
+  # Only the finops.internal/* keys, deliberately not the full
+  # .Values.labels map: that also carries app.kubernetes.io/name
+  # (="checkout") and app.kubernetes.io/component (="api"), which are
+  # the checkout Deployment's *own* pod selector - copying them onto
+  # the Postgres pod made it match that selector too, so its own VPA
+  # recommendation silently mixed in the Postgres container's usage
+  # alongside the real checkout replicas (verified via
+  # kube_customresource_vpa_status_recommendation_cpu_cores - the
+  # goldilocks-checkout VPA had a "postgres" container entry that had
+  # no business being there).
   inheritedMetadata:
     labels:
-{{ toYaml .Values.labels | indent 6 }}
+      finops.internal/product: {{ index .Values.labels "finops.internal/product" | quote }}
+      finops.internal/team: {{ index .Values.labels "finops.internal/team" | quote }}
+      finops.internal/environment: {{ index .Values.labels "finops.internal/environment" | quote }}
+      finops.internal/component: {{ index .Values.labels "finops.internal/component" | quote }}
   instances: {{ .Values.postgres.instances }}
   storage:
     size: {{ .Values.postgres.storageSize }}
