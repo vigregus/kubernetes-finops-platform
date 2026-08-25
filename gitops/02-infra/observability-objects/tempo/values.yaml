@@ -1,5 +1,19 @@
 tempo:
   retention: 24h
+  metricsGenerator:
+    # Without this, Tempo's metrics-generator never starts - "Service Graph"
+    # and TraceQL metrics queries (`{...} | rate() by (...)`) fail with
+    # "error finding generators: empty ring", since single-binary Tempo
+    # still routes those through the generator component's ring.
+    enabled: true
+    remoteWriteUrl: "http://vmsingle-vm-local-victoria-metrics-k8s-stack.observability.svc.cluster.local:8428/api/v1/write"
+  overrides:
+    defaults:
+      metrics_generator:
+        processors:
+          - service-graphs
+          - span-metrics
+          - local-blocks
 persistence:
   enabled: true
   size: 5Gi
