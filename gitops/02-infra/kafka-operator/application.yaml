@@ -1,0 +1,30 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kafka-operator
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  project: finops-platform
+  sources:
+    - repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
+      targetRevision: HEAD
+      ref: values
+    - repoURL: https://strimzi.io/charts/
+      chart: strimzi-kafka-operator
+      targetRevision: 1.2.0
+      helm:
+        releaseName: strimzi
+        valueFiles:
+          - $values/gitops/02-infra/kafka-operator/values.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kafka
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
