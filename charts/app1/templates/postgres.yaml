@@ -10,6 +10,14 @@ spec:
   instances: {{ .Values.postgres.instances }}
   storage:
     size: {{ .Values.postgres.storageSize }}
+  postgresql:
+    parameters:
+      # Off by default in Postgres - without this, no query ever shows up
+      # in the pod's own logs regardless of how well the app's own
+      # tracing/logging is wired up. 'mod' covers the INSERT the app does
+      # per order (see apps/checkout/app.py persist_order), not read-only
+      # traffic, to keep the volume reasonable.
+      log_statement: "mod"
   bootstrap:
     initdb:
       database: {{ .Values.postgres.database }}

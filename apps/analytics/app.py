@@ -53,19 +53,19 @@ REQUEST_LATENCY = Histogram(
 CACHE_LATENCY = Histogram("cache_call_duration_seconds", "Redis call latency in seconds")
 ORDERS_CONSUMED = Counter("orders_consumed_total", "Order events consumed from Kafka")
 
-def log_json(span=None, **fields):
-    # See apps/checkout/app.py: Grafana's trace-to-logs correlation
-    # full-text searches VictoriaLogs for the trace ID, so it needs to
-    # actually appear in the log line. Pass the span explicitly when
-    # logging after its `with` block has already exited.
-    span_ctx = (span or trace.get_current_span()).get_span_context()
+
+def log_json(span, **fields):
+    # See apps/checkout/app.py: Grafana's trace-to-logs correlation looks
+    # up VictoriaLogs by the trace_id *field*, and every step needs its
+    # own log line with its own span's IDs so a specific span in Tempo
+    # (not just the request as a whole) can jump to what it actually did.
+    span_ctx = span.get_span_context()
     if span_ctx.is_valid:
         fields["trace_id"] = format(span_ctx.trace_id, "032x")
         fields["span_id"] = format(span_ctx.span_id, "016x")
-    # VictoriaLogs auto-parses JSON log lines and requires the primary
-    # text field to be named "_msg" specifically - "msg" is silently
-    # dropped with "missing _msg field" instead of falling back to the
-    # raw line.
+    # VictoriaLogs requires the primary text field to be named "_msg"
+    # specifically - "msg" is silently dropped ("missing _msg field")
+    # instead of falling back to the raw line.
     if "msg" in fields:
         fields["_msg"] = fields.pop("msg")
     print(json.dumps(fields), flush=True)
@@ -118,18 +118,30 @@ def consume_loop():
                     span.set_attribute("order.id", payload.get("order_id", ""))
                 except (json.JSONDecodeError, TypeError):
                     pass
+                order_id = payload.get("order_id") if isinstance(payload, dict) else None
 
-                with tracer.start_as_current_span("analytics.aggregate_batch"):
+                log_json(
+                    span,
+                    _msg="kafka consume",
+                    topic=msg.topic(),
+                    partition=msg.partition(),
+                    offset=msg.offset(),
+                    order_id=order_id,
+                )
+
+                with tracer.start_as_current_span("analytics.aggregate_batch") as agg_span:
                     row_count = aggregate_batch()
                     span.set_attribute("analytics.batch_rows", row_count)
+                    log_json(agg_span, _msg="aggregate batch computed", rows=row_count, order_id=order_id)
 
                 if redis_client:
                     start = time.perf_counter()
-                    with tracer.start_as_current_span("analytics.cache_update"):
-                        redis_client.incr(REDIS_KEY_PROCESSED)
+                    with tracer.start_as_current_span("analytics.cache_update") as cache_span:
+                        new_total = redis_client.incr(REDIS_KEY_PROCESSED)
+                        log_json(cache_span, _msg="redis INCR", key=REDIS_KEY_PROCESSED, new_value=new_total)
                     CACHE_LATENCY.observe(time.perf_counter() - start)
 
-                log_json(span=span, msg="order consumed", order_id=payload.get("order_id") if isinstance(payload, dict) else None)
+                log_json(span, msg="order consumed", order_id=order_id)
 
             ORDERS_CONSUMED.inc()
     finally:
@@ -148,8 +160,9 @@ def analytics():
         processed = None
         if redis_client:
             cache_start = time.perf_counter()
-            with tracer.start_as_current_span("analytics.cache_lookup"):
+            with tracer.start_as_current_span("analytics.cache_lookup") as cache_span:
                 processed = redis_client.get(REDIS_KEY_PROCESSED)
+                log_json(cache_span, _msg="redis GET", key=REDIS_KEY_PROCESSED, hit=processed is not None)
             CACHE_LATENCY.observe(time.perf_counter() - cache_start)
 
         delay_seconds = max(0.0, random.gauss(LATENCY_MS_MEAN, LATENCY_MS_JITTER)) / 1000.0
@@ -163,7 +176,7 @@ def analytics():
     REQUEST_COUNT.labels(method="GET", path="/analytics", status=str(status)).inc()
 
     log_json(
-        span=span,
+        span,
         msg="analytics request handled",
         path="/analytics",
         status=status,
