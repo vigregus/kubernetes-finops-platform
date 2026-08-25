@@ -1,4 +1,14 @@
 opencost:
+  ui:
+    # Chart-native ingress for the opencost-ui sidecar (port 9090) -
+    # the container runs by default but nothing routed to it otherwise.
+    ingress:
+      enabled: true
+      ingressClassName: nginx
+      hosts:
+        - host: opencost.finops.local
+          paths:
+            - /
   prometheus:
     internal:
       enabled: true
