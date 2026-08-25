@@ -7,6 +7,15 @@ metadata:
   labels:
 {{ toYaml .Values.labels | indent 4 }}
 spec:
+  # Without this, CNPG's operator creates the instance pods (and their
+  # PVCs) with only its own cnpg.io/* labels - none of the
+  # finops.internal/* ownership labels on this Cluster resource
+  # propagate down automatically. That silently drops Postgres - the
+  # single most expensive component here - out of every cost-by-product/
+  # cost-by-team query, which all join on kube_pod_labels.
+  inheritedMetadata:
+    labels:
+{{ toYaml .Values.labels | indent 6 }}
   instances: {{ .Values.postgres.instances }}
   storage:
     size: {{ .Values.postgres.storageSize }}
