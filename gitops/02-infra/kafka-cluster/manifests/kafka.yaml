@@ -1,0 +1,65 @@
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaNodePool
+metadata:
+  name: dual-role
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: orders-kafka
+    finops.internal/product: platform
+    finops.internal/team: platform-engineering
+    finops.internal/environment: prod
+    finops.internal/component: platform
+spec:
+  replicas: 1
+  roles:
+    - controller
+    - broker
+  storage:
+    type: ephemeral
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: Kafka
+metadata:
+  name: orders-kafka
+  namespace: kafka
+  labels:
+    finops.internal/product: platform
+    finops.internal/team: platform-engineering
+    finops.internal/environment: prod
+    finops.internal/component: platform
+spec:
+  kafka:
+    listeners:
+      - name: plain
+        port: 9092
+        type: internal
+        tls: false
+    config:
+      offsets.topic.replication.factor: 1
+      transaction.state.log.replication.factor: 1
+      transaction.state.log.min.isr: 1
+      default.replication.factor: 1
+      min.insync.replicas: 1
+  entityOperator:
+    topicOperator: {}
+    userOperator: {}
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: orders
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: orders-kafka
+    # Owned by checkout (producer) but consumed by analytics - a shared
+    # platform resource used by two products, deliberately not attributed
+    # to a single product/team. See README "Modeled cost versus actual
+    # cost" / effective cost for why this is left unsplit rather than
+    # arbitrarily assigned to one owner.
+    finops.internal/product: platform
+    finops.internal/team: platform-engineering
+    finops.internal/environment: prod
+    finops.internal/component: platform
+spec:
+  partitions: 3
+  replicas: 1
