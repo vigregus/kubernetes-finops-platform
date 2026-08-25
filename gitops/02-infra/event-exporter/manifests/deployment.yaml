@@ -41,6 +41,12 @@ data:
   config.yaml: |
     logLevel: info
     logFormat: json
+    # Default is 5s - the exporter's own client-side API throttling
+    # (visible in its logs as "Waited for Ns due to client-side
+    # throttling") routinely eats more than that on its own, so events
+    # were being discarded as "too old" even brand new, not just
+    # historical backlog from before it started.
+    maxEventAgeSeconds: 120
     # Without this the exporter tries to enrich every event by reading
     # the involved object itself (pod, deployment, ...) - which needs
     # read RBAC on every resource kind that can emit an event, not just
