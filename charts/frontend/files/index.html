@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Shop</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: -apple-system, system-ui, sans-serif; background: #0f1115; color: #e6e6e6; margin: 0; padding: 2rem; }
+  h1 { font-size: 1.25rem; margin-bottom: 0.25rem; }
+  p.sub { color: #9aa0a6; margin-top: 0; margin-bottom: 2rem; }
+  .card { background: #171a21; border: 1px solid #2a2e37; border-radius: 8px; padding: 1.25rem; margin-bottom: 1rem; max-width: 640px; }
+  .card h2 { font-size: 0.95rem; margin: 0 0 0.75rem; color: #c7cad1; }
+  button { background: #2f6fed; color: white; border: none; border-radius: 6px; padding: 0.5rem 0.9rem; cursor: pointer; font-size: 0.85rem; margin-right: 0.5rem; margin-bottom: 0.5rem; }
+  button:hover { background: #4b82f0; }
+  button.secondary { background: #2a2e37; }
+  button.secondary:hover { background: #383d49; }
+  input { background: #0f1115; border: 1px solid #2a2e37; color: #e6e6e6; border-radius: 6px; padding: 0.5rem; font-size: 0.85rem; width: 260px; margin-right: 0.5rem; }
+  .result { margin-top: 0.75rem; font-family: ui-monospace, monospace; font-size: 0.8rem; white-space: pre-wrap; word-break: break-all; padding: 0.75rem; border-radius: 6px; background: #0f1115; border: 1px solid #2a2e37; }
+  .result.ok { border-color: #2f8a4e; }
+  .result.err { border-color: #c14545; }
+  .trace-id { color: #9aa0a6; }
+  .trace-id a { color: #6ea8fe; }
+</style>
+</head>
+<body>
+  <h1>Shop (Local v1 demo storefront)</h1>
+  <p class="sub">Every button below starts a real W3C trace in this browser tab and sends it through ingress-nginx to checkout/analytics - not synthetic k6 traffic.</p>
+
+  <div class="card">
+    <h2>Place an order</h2>
+    <button onclick="call('/checkout', 'checkout-result')">Checkout</button>
+    <div id="checkout-result" class="result" style="display:none"></div>
+  </div>
+
+  <div class="card">
+    <h2>Look up an order</h2>
+    <input id="lookup-id" placeholder="order id" value="00000000-0000-0000-0000-000000000001">
+    <button onclick="call('/checkout/lookup?id=' + encodeURIComponent(document.getElementById('lookup-id').value), 'lookup-result')">Look up</button>
+    <br>
+    <button class="secondary" onclick="document.getElementById('lookup-id').value='00000000-0000-0000-0000-000000000001'">seed (found)</button>
+    <button class="secondary" onclick="document.getElementById('lookup-id').value='11111111-1111-4111-8111-111111111119'">random uuid (404)</button>
+    <button class="secondary" onclick="document.getElementById('lookup-id').value='not-a-valid-uuid'">malformed (400)</button>
+    <div id="lookup-result" class="result" style="display:none"></div>
+  </div>
+
+  <div class="card">
+    <h2>Analytics</h2>
+    <button onclick="call('/analytics', 'analytics-result')">Query analytics</button>
+    <div id="analytics-result" class="result" style="display:none"></div>
+  </div>
+
+<script>
+// No OpenTelemetry Web SDK here on purpose - pulling it in from a CDN
+// means trusting several packages' internal @opentelemetry/api instances
+// to resolve to the exact same version for context propagation to work
+// at all, which is exactly the kind of silent breakage this repo has
+// hit before (see git history: nginx JSON escaping, VictoriaLogs _msg
+// field). A traceparent header is just a fixed 55-character string
+// (see https://www.w3.org/TR/trace-context/#traceparent-header) - hand
+// building one gives ingress-nginx (which already trusts and continues
+// incoming trace context - see gitops/02-infra/ingress-nginx/values.yaml
+// opentelemetry-trust-incoming-span) a real trace that genuinely
+// originated in this tab, with none of that fragility.
+function hex(bytes) {
+  return Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+function newTraceparent() {
+  const traceId = hex(crypto.getRandomValues(new Uint8Array(16)));
+  const spanId = hex(crypto.getRandomValues(new Uint8Array(8)));
+  return { traceId, spanId, header: `00-${traceId}-${spanId}-01` };
+}
+
+async function call(path, resultId) {
+  const el = document.getElementById(resultId);
+  const { traceId, header } = newTraceparent();
+  el.style.display = "block";
+  el.className = "result";
+  el.textContent = "requesting...";
+  const start = performance.now();
+  try {
+    const res = await fetch(path, { headers: { traceparent: header } });
+    const body = await res.text();
+    const ms = (performance.now() - start).toFixed(1);
+    el.className = "result " + (res.ok ? "ok" : "err");
+    el.innerHTML =
+      `${res.status} ${res.statusText} in ${ms}ms\n${escapeHtml(body)}\n\n` +
+      `<span class="trace-id">trace_id: ${traceId}</span>`;
+  } catch (e) {
+    el.className = "result err";
+    el.textContent = "request failed: " + e;
+  }
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+}
+</script>
+</body>
+</html>
