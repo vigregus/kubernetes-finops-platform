@@ -12,7 +12,8 @@ formulas:
     (customPricing) - no real cloud billing wired up yet. OpenCost emits
     them natively as node_cpu_hourly_cost/node_ram_hourly_cost, which the
     finops Grafana dashboard joins against allocation directly rather than
-    hardcoding the prices in every panel query. request_count is not yet
-    available: checkout/analytics are uninstrumented hashicorp/http-echo
-    placeholders, so cost_per_1m_requests cannot be computed until they are
-    replaced with instrumented apps (see README "Remaining work").
+    hardcoding the prices in every panel query. checkout/analytics expose
+    http_requests_total (see apps/checkout, apps/analytics), so
+    cost_per_1m_requests is wired up as a real panel - "Cost per 1M
+    requests by workload" in the FinOps dashboard (see
+    gitops/02-infra/observability-objects/dashboards/manifests/finops.yaml).
