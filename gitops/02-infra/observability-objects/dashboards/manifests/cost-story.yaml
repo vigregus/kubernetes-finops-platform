@@ -11,11 +11,17 @@ spec:
     {
       "title": "Cost Story",
       "description": "The headline FinOps narrative: what we spend, where it goes, how efficient it is, and what levers exist to spend less. Built on OpenCost's native cost metrics + real VPA rightsizing recommendations - see each panel's description for exactly what's real vs illustrative reference pricing.",
-      "tags": ["finops", "cost-story"],
+      "tags": [
+        "finops",
+        "cost-story"
+      ],
       "schemaVersion": 39,
       "version": 1,
       "editable": true,
-      "time": { "from": "now-6h", "to": "now" },
+      "time": {
+        "from": "now-6h",
+        "to": "now"
+      },
       "templating": {
         "list": [
           {
@@ -23,7 +29,10 @@ spec:
             "type": "custom",
             "label": "Period",
             "query": "Hour : 1,Day : 24,Month (730h) : 730,Year (8760h) : 8760",
-            "current": { "text": "Month (730h)", "value": "730" },
+            "current": {
+              "text": "Month (730h)",
+              "value": "730"
+            },
             "hide": 0,
             "includeAll": false,
             "multi": false
@@ -35,79 +44,237 @@ spec:
           "id": 1,
           "type": "row",
           "title": "Headline",
-          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 0
+          }
         },
         {
           "id": 2,
           "type": "stat",
           "title": "Total full-stack cost ($period)",
           "description": "Real: OpenCost's node_cpu_hourly_cost/node_ram_hourly_cost/pv_hourly_cost x actual allocation (app+Redis+Postgres+storage), multiplied by the $period selector. Illustrative Local v1 pricing, not real cloud billing - see gitops/03-finops/opencost/values.yaml customPricing.",
-          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 2 }, "overrides": [] },
-          "gridPos": { "h": 6, "w": 8, "x": 0, "y": 1 },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "currencyUSD",
+              "decimals": 2,
+              "mappings": [],
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "rgb(31, 120, 193)"
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 8,
+            "x": 0,
+            "y": 1
+          },
           "targets": [
             {
               "expr": "$period * (sum((container_cpu_allocation{namespace=~\"dev|stage|prod\"} * on(node) group_left() node_cpu_hourly_cost + container_memory_allocation_bytes{namespace=~\"dev|stage|prod\"} / 1073741824 * on(node) group_left() node_ram_hourly_cost)) + sum(pv_hourly_cost * on(persistentvolume) group_left(namespace, persistentvolumeclaim) label_replace(kube_persistentvolumeclaim_info{job=\"kube-state-metrics\"}, \"persistentvolume\", \"$1\", \"volumename\", \"(.*)\")))"
             }
-          ]
+          ],
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "horizontal",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto",
+            "wideLayout": true
+          }
         },
         {
           "id": 3,
           "type": "stat",
           "title": "prod vs stage ($period)",
           "description": "Same full-stack cost, split by environment - shows what running a staging copy of everything actually costs.",
-          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 2 }, "overrides": [] },
-          "gridPos": { "h": 6, "w": 8, "x": 8, "y": 1 },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "currencyUSD",
+              "decimals": 2,
+              "mappings": [],
+              "color": {
+                "mode": "palette-classic"
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 8,
+            "x": 8,
+            "y": 1
+          },
           "targets": [
             {
               "expr": "$period * sum by (namespace) (container_cpu_allocation{namespace=~\"stage|prod\"} * on(node) group_left() node_cpu_hourly_cost + container_memory_allocation_bytes{namespace=~\"stage|prod\"} / 1073741824 * on(node) group_left() node_ram_hourly_cost)",
               "legendFormat": "{{namespace}}"
             }
-          ]
+          ],
+          "options": {
+            "colorMode": "none",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "horizontal",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto",
+            "wideLayout": true
+          }
         },
         {
           "id": 4,
           "type": "stat",
           "title": "Projected cost in 30 days (linear extrapolation)",
           "description": "predict_linear() over the last hour of the total full-stack cost trend, projected 30 days forward. This cluster has only run a few hours - treat as a demonstration of the mechanism, not a real forecast yet. Re-check once there's a few days of history.",
-          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 2 }, "overrides": [] },
-          "gridPos": { "h": 6, "w": 8, "x": 16, "y": 1 },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "currencyUSD",
+              "decimals": 2,
+              "mappings": [],
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "rgb(230, 138, 0)"
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 8,
+            "x": 16,
+            "y": 1
+          },
           "targets": [
             {
               "expr": "730 * clamp_min(predict_linear((sum((container_cpu_allocation{namespace=~\"dev|stage|prod\"} * on(node) group_left() node_cpu_hourly_cost + container_memory_allocation_bytes{namespace=~\"dev|stage|prod\"} / 1073741824 * on(node) group_left() node_ram_hourly_cost)) + sum(pv_hourly_cost * on(persistentvolume) group_left(namespace, persistentvolumeclaim) label_replace(kube_persistentvolumeclaim_info{job=\"kube-state-metrics\"}, \"persistentvolume\", \"$1\", \"volumename\", \"(.*)\")))[1h:5m], 86400*30), 0)"
             }
-          ]
+          ],
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "horizontal",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto",
+            "wideLayout": true
+          }
         },
         {
           "id": 5,
           "type": "row",
           "title": "Where it goes",
-          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 7 }
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 7
+          }
         },
         {
           "id": 6,
           "type": "piechart",
           "title": "Cost by product",
-          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] },
-          "gridPos": { "h": 9, "w": 12, "x": 0, "y": 8 },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "currencyUSD"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 8
+          },
           "targets": [
             {
               "expr": "(sum by (product) ((container_cpu_allocation{namespace=~\"dev|stage|prod\"} * on(node) group_left() node_cpu_hourly_cost + container_memory_allocation_bytes{namespace=~\"dev|stage|prod\"} / 1073741824 * on(node) group_left() node_ram_hourly_cost) * on(namespace,pod) group_left(product) label_replace(kube_pod_labels{label_finops_internal_product!=\"\"}, \"product\", \"$1\", \"label_finops_internal_product\", \"(.*)\"))) + (sum by (product) (pv_hourly_cost * on(persistentvolume) group_left(namespace, persistentvolumeclaim) label_replace(kube_persistentvolumeclaim_info{job=\"kube-state-metrics\"}, \"persistentvolume\", \"$1\", \"volumename\", \"(.*)\") * on(namespace, persistentvolumeclaim) group_left(product) label_replace(label_replace(kube_pod_labels{label_finops_internal_product!=\"\"}, \"persistentvolumeclaim\", \"$1\", \"pod\", \"(.*)\"), \"product\", \"$1\", \"label_finops_internal_product\", \"(.*)\")) or (sum by (product) ((container_cpu_allocation{namespace=~\"dev|stage|prod\"} * on(node) group_left() node_cpu_hourly_cost + container_memory_allocation_bytes{namespace=~\"dev|stage|prod\"} / 1073741824 * on(node) group_left() node_ram_hourly_cost) * on(namespace,pod) group_left(product) label_replace(kube_pod_labels{label_finops_internal_product!=\"\"}, \"product\", \"$1\", \"label_finops_internal_product\", \"(.*)\")) * 0))",
               "legendFormat": "{{product}}"
             }
-          ]
+          ],
+          "options": {
+            "pieType": "donut",
+            "displayLabels": [
+              "percent"
+            ],
+            "legend": {
+              "displayMode": "table",
+              "placement": "right",
+              "values": [
+                "value",
+                "percent"
+              ]
+            },
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            }
+          }
         },
         {
           "id": 7,
           "type": "piechart",
           "title": "Cost by resource type",
           "description": "CPU vs RAM vs Storage - shows structurally where the money goes, independent of which product owns it.",
-          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] },
-          "gridPos": { "h": 9, "w": 12, "x": 12, "y": 8 },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "currencyUSD"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 8
+          },
           "targets": [
             {
               "expr": "sum(container_cpu_allocation{namespace=~\"dev|stage|prod\"} * on(node) group_left() node_cpu_hourly_cost)",
@@ -121,36 +288,150 @@ spec:
               "expr": "sum(pv_hourly_cost)",
               "legendFormat": "Storage"
             }
-          ]
+          ],
+          "options": {
+            "pieType": "donut",
+            "displayLabels": [
+              "percent"
+            ],
+            "legend": {
+              "displayMode": "table",
+              "placement": "right",
+              "values": [
+                "value",
+                "percent"
+              ]
+            },
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            }
+          }
         },
         {
           "id": 8,
           "type": "row",
           "title": "What-if: alternative pricing scenarios",
-          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 17 }
-        },
-        {
-          "id": 9,
-          "type": "text",
-          "title": "What this shows",
-          "gridPos": { "h": 3, "w": 24, "x": 0, "y": 18 },
-          "options": {
-            "mode": "markdown",
-            "content": "Solid line = actual modeled cost (real allocation x our illustrative Local v1 price). Dashed lines = the *same measured CPU/RAM allocation*, repriced at illustrative on-demand rates for other providers/purchasing options - not live pricing APIs, not a specific instance-type match, just round published-ballpark $/core-hour and $/GB-hour for general-purpose compute. AWS-spot doubles as the Karpenter story: Karpenter's main real lever is picking cheaper capacity (spot, right-sized instance families) for the same workload - this is what that saves, without needing to actually run Karpenter (it needs a real cloud provisioning API, which Local v1 doesn't have)."
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 17
           }
         },
         {
           "id": 10,
           "type": "timeseries",
           "title": "Actual cost vs alternative pricing (same measured usage)",
-          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [
-            { "matcher": { "id": "byFrameRefID", "options": "B" }, "properties": [{ "id": "custom.lineStyle", "value": { "dash": [10, 10], "fill": "dash" } }] },
-            { "matcher": { "id": "byFrameRefID", "options": "C" }, "properties": [{ "id": "custom.lineStyle", "value": { "dash": [10, 10], "fill": "dash" } }] },
-            { "matcher": { "id": "byFrameRefID", "options": "D" }, "properties": [{ "id": "custom.lineStyle", "value": { "dash": [10, 10], "fill": "dash" } }] },
-            { "matcher": { "id": "byFrameRefID", "options": "E" }, "properties": [{ "id": "custom.lineStyle", "value": { "dash": [4, 4], "fill": "dash" } }] }
-          ] },
-          "gridPos": { "h": 9, "w": 24, "x": 0, "y": 21 },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "currencyUSD",
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 2,
+                "fillOpacity": 12,
+                "gradientMode": "opacity",
+                "showPoints": "never",
+                "pointSize": 5,
+                "spanNulls": true,
+                "lineInterpolation": "linear",
+                "axisPlacement": "auto",
+                "scaleDistribution": {
+                  "type": "linear"
+                }
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "B"
+                },
+                "properties": [
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "dash": [
+                        10,
+                        10
+                      ],
+                      "fill": "dash"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "C"
+                },
+                "properties": [
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "dash": [
+                        10,
+                        10
+                      ],
+                      "fill": "dash"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "D"
+                },
+                "properties": [
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "dash": [
+                        10,
+                        10
+                      ],
+                      "fill": "dash"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "E"
+                },
+                "properties": [
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "dash": [
+                        4,
+                        4
+                      ],
+                      "fill": "dash"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 9,
+            "w": 24,
+            "x": 0,
+            "y": 18
+          },
           "targets": [
             {
               "refId": "A",
@@ -177,65 +458,227 @@ spec:
               "expr": "sum(container_cpu_allocation{namespace=~\"dev|stage|prod\"}) * 0.0400 * 0.3 + sum(container_memory_allocation_bytes{namespace=~\"dev|stage|prod\"}) / 1073741824 * 0.0050 * 0.3",
               "legendFormat": "AWS Spot / Karpenter-optimized (illustrative ~70% off)"
             }
-          ]
+          ],
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "calcs": [
+                "lastNotNull",
+                "mean"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "description": "Solid line = actual modeled cost (real allocation x our illustrative Local v1 price). Dashed lines = the *same measured CPU/RAM allocation*, repriced at illustrative on-demand rates for other providers/purchasing options - not live pricing APIs, not a specific instance-type match, just round published-ballpark $/core-hour and $/GB-hour for general-purpose compute. AWS-spot doubles as the Karpenter story: Karpenter's main real lever is picking cheaper capacity (spot, right-sized instance families) for the same workload - this is what that saves, without needing to actually run Karpenter (it needs a real cloud provisioning API, which Local v1 doesn't have)."
         },
         {
           "id": 11,
           "type": "row",
           "title": "Efficiency and savings",
-          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 30 }
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 27
+          }
         },
         {
           "id": 12,
           "type": "timeseries",
           "title": "Cost per 1M requests by product (full stack: app + Redis + Postgres + storage)",
-          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 4 }, "overrides": [] },
-          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 31 },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "currencyUSD",
+              "decimals": 4,
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 2,
+                "fillOpacity": 12,
+                "gradientMode": "opacity",
+                "showPoints": "never",
+                "pointSize": 5,
+                "spanNulls": true,
+                "lineInterpolation": "linear",
+                "axisPlacement": "auto",
+                "scaleDistribution": {
+                  "type": "linear"
+                }
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 28
+          },
           "targets": [
             {
               "expr": "((sum by (product) ((container_cpu_allocation{namespace=~\"dev|stage|prod\"} * on(node) group_left() node_cpu_hourly_cost + container_memory_allocation_bytes{namespace=~\"dev|stage|prod\"} / 1073741824 * on(node) group_left() node_ram_hourly_cost) * on(namespace,pod) group_left(product) label_replace(kube_pod_labels{label_finops_internal_product!=\"\"}, \"product\", \"$1\", \"label_finops_internal_product\", \"(.*)\"))) + (sum by (product) (pv_hourly_cost * on(persistentvolume) group_left(namespace, persistentvolumeclaim) label_replace(kube_persistentvolumeclaim_info{job=\"kube-state-metrics\"}, \"persistentvolume\", \"$1\", \"volumename\", \"(.*)\") * on(namespace, persistentvolumeclaim) group_left(product) label_replace(label_replace(kube_pod_labels{label_finops_internal_product!=\"\"}, \"persistentvolumeclaim\", \"$1\", \"pod\", \"(.*)\"), \"product\", \"$1\", \"label_finops_internal_product\", \"(.*)\")) or (sum by (product) ((container_cpu_allocation{namespace=~\"dev|stage|prod\"} * on(node) group_left() node_cpu_hourly_cost + container_memory_allocation_bytes{namespace=~\"dev|stage|prod\"} / 1073741824 * on(node) group_left() node_ram_hourly_cost) * on(namespace,pod) group_left(product) label_replace(kube_pod_labels{label_finops_internal_product!=\"\"}, \"product\", \"$1\", \"label_finops_internal_product\", \"(.*)\")) * 0))) / on(product) (label_replace(label_replace(sum by (job) (rate(http_requests_total[5m])), \"product\", \"commerce\", \"job\", \"checkout\"), \"product\", \"insights\", \"job\", \"analytics\") * 3600 > 0) * 1000000",
               "legendFormat": "{{product}}"
             }
-          ]
+          ],
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "calcs": [
+                "lastNotNull",
+                "mean"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
         },
         {
           "id": 17,
           "type": "timeseries",
           "title": "Idle spend over time (paid-for but unused capacity)",
           "description": "requested_cost - actually_used_cost, cluster-wide, priced at node_cpu_hourly_cost/node_ram_hourly_cost. This is the KPI a FinOps effort should be driving toward zero over time, not a one-off snapshot - a widening gap between requested and used means growing waste regardless of what total spend is doing.",
-          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 4 }, "overrides": [] },
-          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 39 },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "currencyUSD",
+              "decimals": 4,
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 2,
+                "fillOpacity": 12,
+                "gradientMode": "opacity",
+                "showPoints": "never",
+                "pointSize": 5,
+                "spanNulls": true,
+                "lineInterpolation": "linear",
+                "axisPlacement": "auto",
+                "scaleDistribution": {
+                  "type": "linear"
+                }
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 36
+          },
           "targets": [
             {
               "expr": "(sum by (node) (container_cpu_allocation{namespace=~\"dev|stage|prod\"}) * on(node) group_left() node_cpu_hourly_cost + sum by (node) (container_memory_allocation_bytes{namespace=~\"dev|stage|prod\"}) / 1073741824 * on(node) group_left() node_ram_hourly_cost) - (sum by (node) (node_namespace_pod_container:container_cpu_usage_seconds_total:sum_irate{namespace=~\"dev|stage|prod\"}) * on(node) group_left() node_cpu_hourly_cost + sum by (node) (node_namespace_pod_container:container_memory_working_set_bytes{namespace=~\"dev|stage|prod\"}) / 1073741824 * on(node) group_left() node_ram_hourly_cost)",
               "legendFormat": "idle spend / hour"
             }
-          ]
+          ],
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "calcs": [
+                "lastNotNull",
+                "mean"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
         },
         {
           "id": 13,
           "type": "stat",
           "title": "Rightsizing savings potential (checkout + analytics, requested vs VPA-recommended)",
           "description": "Real VPA recommendations (kube_customresource_vpa_status_recommendation_cpu_cores/memory_bytes, from Goldilocks) vs actual kube_pod_container_resource_requests, both repriced at node_cpu_hourly_cost/node_ram_hourly_cost. This reflects current demo traffic levels, not necessarily a real-world-representative headroom - re-check under sustained realistic load.",
-          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 4 }, "overrides": [] },
-          "gridPos": { "h": 6, "w": 12, "x": 0, "y": 47 },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "currencyUSD",
+              "decimals": 4,
+              "mappings": [],
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "rgb(59, 168, 84)"
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 12,
+            "x": 0,
+            "y": 44
+          },
           "targets": [
             {
               "expr": "$period * ((sum(kube_pod_container_resource_requests{namespace=~\"prod|stage\", container=~\"checkout|analytics\", resource=\"cpu\"} * on(node) group_left() node_cpu_hourly_cost) + sum(kube_pod_container_resource_requests{namespace=~\"prod|stage\", container=~\"checkout|analytics\", resource=\"memory\"} / 1073741824 * on(node) group_left() node_ram_hourly_cost)) - (sum(kube_customresource_vpa_status_recommendation_cpu_cores{container=~\"checkout|analytics\"}) * (sum(node_cpu_hourly_cost)/count(node_cpu_hourly_cost)) + sum(kube_customresource_vpa_status_recommendation_memory_bytes{container=~\"checkout|analytics\"}) / 1073741824 * (sum(node_ram_hourly_cost)/count(node_ram_hourly_cost))))",
               "legendFormat": "savings"
             }
-          ]
+          ],
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "horizontal",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto",
+            "wideLayout": true
+          }
         },
         {
           "id": 14,
           "type": "stat",
           "title": "Requested vs recommended ($period)",
-          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 4 }, "overrides": [] },
-          "gridPos": { "h": 6, "w": 12, "x": 12, "y": 47 },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "currencyUSD",
+              "decimals": 4,
+              "mappings": [],
+              "color": {
+                "mode": "palette-classic"
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 12,
+            "x": 12,
+            "y": 44
+          },
           "targets": [
             {
               "expr": "$period * (sum(kube_pod_container_resource_requests{namespace=~\"prod|stage\", container=~\"checkout|analytics\", resource=\"cpu\"} * on(node) group_left() node_cpu_hourly_cost) + sum(kube_pod_container_resource_requests{namespace=~\"prod|stage\", container=~\"checkout|analytics\", resource=\"memory\"} / 1073741824 * on(node) group_left() node_ram_hourly_cost))",
@@ -245,7 +688,22 @@ spec:
               "expr": "$period * (sum(kube_customresource_vpa_status_recommendation_cpu_cores{container=~\"checkout|analytics\"}) * (sum(node_cpu_hourly_cost)/count(node_cpu_hourly_cost)) + sum(kube_customresource_vpa_status_recommendation_memory_bytes{container=~\"checkout|analytics\"}) / 1073741824 * (sum(node_ram_hourly_cost)/count(node_ram_hourly_cost)))",
               "legendFormat": "VPA-recommended"
             }
-          ]
+          ],
+          "options": {
+            "colorMode": "none",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "horizontal",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto",
+            "wideLayout": true
+          }
         }
       ]
     }
