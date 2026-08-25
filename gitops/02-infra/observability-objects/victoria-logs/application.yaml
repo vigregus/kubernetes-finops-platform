@@ -13,7 +13,7 @@ spec:
       ref: values
     - repoURL: https://victoriametrics.github.io/helm-charts/
       chart: victoria-logs-single
-      targetRevision: 0.3.3
+      targetRevision: 0.13.9
       helm:
         releaseName: vl-local
         valueFiles:

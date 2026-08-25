@@ -26,6 +26,27 @@ defaultRules:
       enabled: false
     node_namespace_pod_container:container_memory_swap:
       enabled: false
+kubelet:
+  vmScrapes:
+    resources:
+      spec:
+        # Standard dashboards (dotdc "Pods" view) query
+        # container_cpu_usage_seconds_total{image!=""} directly rather than
+        # through a recording rule. This cluster's /metrics/resource endpoint
+        # (unlike /metrics/cadvisor, see defaultRules.rules above) carries
+        # namespace/pod/container labels but never an image label, so those
+        # panels would stay empty. Stamping a constant image label onto every
+        # sample from this target satisfies the image!="" filter without
+        # fabricating a value that would be mistaken for a real image ref.
+        relabelConfigs:
+          - action: labelmap
+            regex: __meta_kubernetes_node_label_(.+)
+          - sourceLabels: [__metrics_path__]
+            targetLabel: metrics_path
+          - targetLabel: job
+            replacement: kubelet
+          - targetLabel: image
+            replacement: "unavailable (metrics_path=/metrics/resource has no image label on this cluster)"
 vmsingle:
   enabled: true
   spec:
