@@ -24,4 +24,24 @@ spec:
       owner: {{ .Values.postgres.owner }}
   resources:
 {{ toYaml .Values.postgres.resources | indent 4 }}
+---
+# CNPG runs a metrics exporter on every instance pod by default (port
+# "metrics", the cnpg-default-monitoring queries) - it just isn't scraped
+# by anything without this, so connections/cache-hit-ratio/replication
+# lag/transaction rate never reach VictoriaMetrics.
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMPodScrape
+metadata:
+  name: {{ .Values.postgres.clusterName }}-metrics
+  namespace: {{ .Values.namespace }}
+  labels:
+{{ toYaml .Values.labels | indent 4 }}
+spec:
+  selector:
+    matchLabels:
+      cnpg.io/cluster: {{ .Values.postgres.clusterName }}
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: 15s
 {{- end }}

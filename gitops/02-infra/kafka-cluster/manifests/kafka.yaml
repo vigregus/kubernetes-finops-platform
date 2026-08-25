@@ -43,6 +43,13 @@ spec:
   entityOperator:
     topicOperator: {}
     userOperator: {}
+  # Strimzi's built-in kafka-exporter sidecar deployment - without it
+  # there's no consumer-group lag metric anywhere, so a stalled/slow
+  # analytics consumer (queue building up) would be invisible until
+  # something downstream noticed stale data.
+  kafkaExporter:
+    topicRegex: ".*"
+    groupRegex: ".*"
 ---
 # One topic per environment on the shared cluster, not one shared topic -
 # otherwise stage checkout's traffic would be consumed by prod analytics

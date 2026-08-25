@@ -1,0 +1,99 @@
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: ingress-nginx
+  namespace: observability
+spec:
+  instanceSelector:
+    matchLabels:
+      dashboards: "grafana-local"
+  json: |
+    {
+      "title": "NGINX Ingress",
+      "description": "Entry-point traffic, errors, and latency from the ingress-nginx controller's own metrics.",
+      "tags": ["ingress-nginx"],
+      "schemaVersion": 39,
+      "version": 1,
+      "editable": true,
+      "time": { "from": "now-1h", "to": "now" },
+      "panels": [
+        {
+          "id": 1,
+          "type": "timeseries",
+          "title": "Request rate by ingress and status",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+          "targets": [
+            {
+              "expr": "sum by (ingress, status) (rate(nginx_ingress_controller_requests[5m]))",
+              "legendFormat": "{{ingress}} {{status}}"
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "type": "timeseries",
+          "title": "Error rate (%) by ingress (4xx/5xx)",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "percent", "min": 0 }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+          "targets": [
+            {
+              "expr": "100 * sum by (ingress) (rate(nginx_ingress_controller_requests{status=~\"4..|5..\"}[5m])) / sum by (ingress) (rate(nginx_ingress_controller_requests[5m]))",
+              "legendFormat": "{{ingress}}"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "type": "timeseries",
+          "title": "p50 / p95 / p99 request duration by ingress",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 8 },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.5, sum by (ingress, le) (rate(nginx_ingress_controller_request_duration_seconds_bucket[5m])))",
+              "legendFormat": "{{ingress}} p50"
+            },
+            {
+              "expr": "histogram_quantile(0.95, sum by (ingress, le) (rate(nginx_ingress_controller_request_duration_seconds_bucket[5m])))",
+              "legendFormat": "{{ingress}} p95"
+            },
+            {
+              "expr": "histogram_quantile(0.99, sum by (ingress, le) (rate(nginx_ingress_controller_request_duration_seconds_bucket[5m])))",
+              "legendFormat": "{{ingress}} p99"
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "type": "timeseries",
+          "title": "Upstream connections (active / reading / writing / waiting)",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+          "targets": [
+            {
+              "expr": "nginx_ingress_controller_nginx_process_connections",
+              "legendFormat": "{{state}}"
+            }
+          ]
+        },
+        {
+          "id": 5,
+          "type": "timeseries",
+          "title": "Controller config reload success",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+          "targets": [
+            {
+              "expr": "nginx_ingress_controller_success",
+              "legendFormat": "reload success"
+            }
+          ]
+        }
+      ]
+    }

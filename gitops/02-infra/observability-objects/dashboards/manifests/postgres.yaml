@@ -1,0 +1,121 @@
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: postgres
+  namespace: observability
+spec:
+  instanceSelector:
+    matchLabels:
+      dashboards: "grafana-local"
+  json: |
+    {
+      "title": "Postgres (CNPG)",
+      "description": "CloudNativePG cluster health from the built-in cnpg-default-monitoring queries. No pg_stat_statements here, so this is throughput/saturation, not per-query latency.",
+      "tags": ["postgres", "cnpg"],
+      "schemaVersion": 39,
+      "version": 1,
+      "editable": true,
+      "time": { "from": "now-1h", "to": "now" },
+      "panels": [
+        {
+          "id": 1,
+          "type": "timeseries",
+          "title": "Transaction rate (commit / rollback) by cluster",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+          "targets": [
+            {
+              "expr": "sum by (namespace, pod) (rate(cnpg_pg_stat_database_xact_commit[5m]))",
+              "legendFormat": "{{namespace}}/{{pod}} commit"
+            },
+            {
+              "expr": "sum by (namespace, pod) (rate(cnpg_pg_stat_database_xact_rollback[5m]))",
+              "legendFormat": "{{namespace}}/{{pod}} rollback"
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "type": "timeseries",
+          "title": "Active backends vs max_connections",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+          "targets": [
+            {
+              "expr": "cnpg_backends_total",
+              "legendFormat": "{{namespace}}/{{pod}} backends"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "type": "timeseries",
+          "title": "Buffer cache hit ratio (%)",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100 }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+          "targets": [
+            {
+              "expr": "100 * sum by (namespace, pod) (rate(cnpg_pg_stat_database_blks_hit[5m])) / (sum by (namespace, pod) (rate(cnpg_pg_stat_database_blks_hit[5m])) + sum by (namespace, pod) (rate(cnpg_pg_stat_database_blks_read[5m])))",
+              "legendFormat": "{{namespace}}/{{pod}}"
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "type": "timeseries",
+          "title": "Replication lag",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+          "targets": [
+            {
+              "expr": "cnpg_pg_replication_lag",
+              "legendFormat": "{{namespace}}/{{pod}}"
+            }
+          ]
+        },
+        {
+          "id": 5,
+          "type": "timeseries",
+          "title": "Rows inserted / updated / deleted",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+          "targets": [
+            {
+              "expr": "sum by (namespace, pod) (rate(cnpg_pg_stat_database_tup_inserted[5m]))",
+              "legendFormat": "{{namespace}}/{{pod}} inserted"
+            },
+            {
+              "expr": "sum by (namespace, pod) (rate(cnpg_pg_stat_database_tup_updated[5m]))",
+              "legendFormat": "{{namespace}}/{{pod}} updated"
+            },
+            {
+              "expr": "sum by (namespace, pod) (rate(cnpg_pg_stat_database_tup_deleted[5m]))",
+              "legendFormat": "{{namespace}}/{{pod}} deleted"
+            }
+          ]
+        },
+        {
+          "id": 6,
+          "type": "timeseries",
+          "title": "Deadlocks / conflicts",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+          "targets": [
+            {
+              "expr": "cnpg_pg_stat_database_deadlocks",
+              "legendFormat": "{{namespace}}/{{pod}} deadlocks"
+            },
+            {
+              "expr": "cnpg_pg_stat_database_conflicts",
+              "legendFormat": "{{namespace}}/{{pod}} conflicts"
+            }
+          ]
+        }
+      ]
+    }

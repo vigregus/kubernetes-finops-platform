@@ -25,6 +25,22 @@ spec:
               containerPort: 6379
           resources:
 {{ toYaml .Values.redis.resources | indent 12 }}
+        # redis:7-alpine exposes no metrics of its own (no INFO-over-HTTP,
+        # no built-in exporter) - without this sidecar, cache hit/miss
+        # rate, memory usage, and connected clients never reach
+        # VictoriaMetrics despite Redis being a cost-attributed component.
+        - name: redis-exporter
+          image: oliver006/redis_exporter:v1.66.0-alpine
+          ports:
+            - name: metrics
+              containerPort: 9121
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 50m
+              memory: 64Mi
 ---
 apiVersion: v1
 kind: Service
@@ -40,4 +56,23 @@ spec:
     - name: redis
       port: 6379
       targetPort: 6379
+    - name: metrics
+      port: 9121
+      targetPort: 9121
+---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMServiceScrape
+metadata:
+  name: {{ .Values.name }}-redis
+  namespace: {{ .Values.namespace }}
+  labels:
+{{ toYaml $redisLabels | indent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Values.name }}-redis
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 15s
 {{- end }}
