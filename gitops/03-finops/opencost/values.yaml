@@ -6,3 +6,17 @@ opencost:
       namespaceName: observability
       port: 8428
       path: /prometheus
+  customPricing:
+    # Without this, OpenCost never emits node_total_hourly_cost /
+    # node_cpu_hourly_cost / node_ram_hourly_cost - only the raw
+    # allocation inputs (container_cpu_allocation etc). These prices are
+    # illustrative "no real cloud billing" placeholders for Local v1, not
+    # a claim about actual cost (see README "Modeled cost versus actual
+    # cost"). Kept in sync with finops-metric-formulas
+    # (gitops/03-finops/finops-objects/values.yaml).
+    enabled: true
+    costModel:
+      description: "Local v1 illustrative pricing - no real cloud billing"
+      CPU: "0.031611"
+      RAM: "0.004237"
+      storage: "0.00005479"
