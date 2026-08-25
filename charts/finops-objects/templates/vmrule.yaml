@@ -1,0 +1,31 @@
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMRule
+metadata:
+  name: finops-cost-anomaly
+  namespace: {{ .Values.namespace }}
+  labels:
+    finops.internal/component: platform
+spec:
+  groups:
+    - name: finops-cost-anomaly
+      rules:
+        - alert: ModeledCostSpike
+          # Real allocation x OpenCost's own node_cpu_hourly_cost/
+          # node_ram_hourly_cost, compared to itself 1h ago - fires on a
+          # genuine change in what's actually running (a bad deploy
+          # requesting way more than it needs, a leak, a scale-up nobody
+          # intended), not a static budget threshold that would need
+          # manual tuning every time real traffic grows.
+          expr: |
+            (
+              (sum((container_cpu_allocation{namespace=~"dev|stage|prod"} * on(node) group_left() node_cpu_hourly_cost + container_memory_allocation_bytes{namespace=~"dev|stage|prod"} / 1073741824 * on(node) group_left() node_ram_hourly_cost)))
+              -
+              (sum((container_cpu_allocation{namespace=~"dev|stage|prod"} * on(node) group_left() node_cpu_hourly_cost + container_memory_allocation_bytes{namespace=~"dev|stage|prod"} / 1073741824 * on(node) group_left() node_ram_hourly_cost)) offset 1h)
+            ) / (sum((container_cpu_allocation{namespace=~"dev|stage|prod"} * on(node) group_left() node_cpu_hourly_cost + container_memory_allocation_bytes{namespace=~"dev|stage|prod"} / 1073741824 * on(node) group_left() node_ram_hourly_cost)) offset 1h) > 0.5
+          for: 15m
+          labels:
+            severity: warning
+            finops.internal/component: platform
+          annotations:
+            summary: "Modeled infra cost is up more than 50% vs 1 hour ago"
+            description: "Total modeled cost/hour (container_cpu_allocation + container_memory_allocation_bytes, priced via OpenCost's node_cpu_hourly_cost/node_ram_hourly_cost) has been more than 50% above its value from 1 hour ago for 15 minutes straight. Check the Cost Story dashboard's 'Cost by product' panel for which workload grew."
