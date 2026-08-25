@@ -53,6 +53,18 @@ REQUEST_LATENCY = Histogram(
 CACHE_LATENCY = Histogram("cache_call_duration_seconds", "Redis call latency in seconds")
 ORDERS_CONSUMED = Counter("orders_consumed_total", "Order events consumed from Kafka")
 
+def log_json(span=None, **fields):
+    # See apps/checkout/app.py: Grafana's trace-to-logs correlation
+    # full-text searches VictoriaLogs for the trace ID, so it needs to
+    # actually appear in the log line. Pass the span explicitly when
+    # logging after its `with` block has already exited.
+    span_ctx = (span or trace.get_current_span()).get_span_context()
+    if span_ctx.is_valid:
+        fields["trace_id"] = format(span_ctx.trace_id, "032x")
+        fields["span_id"] = format(span_ctx.span_id, "016x")
+    print(json.dumps(fields), flush=True)
+
+
 redis_client = redis_lib.from_url(REDIS_URL, socket_timeout=2) if REDIS_URL else None
 
 
@@ -94,6 +106,7 @@ def consume_loop():
             with tracer.start_as_current_span(
                 "analytics.consume_order", context=ctx, kind=SpanKind.CONSUMER
             ) as span:
+                payload = {}
                 try:
                     payload = json.loads(msg.value())
                     span.set_attribute("order.id", payload.get("order_id", ""))
@@ -109,6 +122,8 @@ def consume_loop():
                     with tracer.start_as_current_span("analytics.cache_update"):
                         redis_client.incr(REDIS_KEY_PROCESSED)
                     CACHE_LATENCY.observe(time.perf_counter() - start)
+
+                log_json(span=span, msg="order consumed", order_id=payload.get("order_id") if isinstance(payload, dict) else None)
 
             ORDERS_CONSUMED.inc()
     finally:
@@ -140,6 +155,14 @@ def analytics():
 
     REQUEST_LATENCY.labels(method="GET", path="/analytics").observe(time.perf_counter() - start)
     REQUEST_COUNT.labels(method="GET", path="/analytics", status=str(status)).inc()
+
+    log_json(
+        span=span,
+        msg="analytics request handled",
+        path="/analytics",
+        status=status,
+        duration_ms=round((time.perf_counter() - start) * 1000, 2),
+    )
 
     if failed:
         return Response("analytics query failed\n", status=500)

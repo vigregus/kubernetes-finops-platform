@@ -13,3 +13,16 @@ spec:
     type: tempo
     access: proxy
     url: http://tempo-local.observability.svc.cluster.local:3200
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: victorialogs
+        spanStartTimeShift: "-2m"
+        spanEndTimeShift: "2m"
+        filterByTraceID: false
+        filterBySpanID: false
+        customQuery: true
+        # apps/checkout and apps/analytics print a JSON line with trace_id
+        # on every request (see app.py) - full-text search for it against
+        # _msg is what actually ties a span back to its log lines, since
+        # promtail ships raw text, not a structured trace_id field.
+        query: '_time:5m "${__trace.traceId}"'

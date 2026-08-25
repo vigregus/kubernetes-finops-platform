@@ -52,6 +52,20 @@ DB_LATENCY = Histogram("db_query_duration_seconds", "Postgres query latency in s
 CACHE_LATENCY = Histogram("cache_call_duration_seconds", "Redis call latency in seconds")
 KAFKA_LATENCY = Histogram("kafka_publish_duration_seconds", "Kafka publish latency in seconds")
 
+def log_json(span=None, **fields):
+    # Grafana's trace-to-logs correlation full-text searches VictoriaLogs
+    # for the trace ID (promtail ships raw text, not a structured
+    # trace_id field - see gitops/02-infra/observability-objects/datasources/tempo.yaml),
+    # so the trace/span IDs need to actually appear in the log line.
+    # Pass the span explicitly when logging after its `with` block has
+    # already exited - trace.get_current_span() would be a no-op by then.
+    span_ctx = (span or trace.get_current_span()).get_span_context()
+    if span_ctx.is_valid:
+        fields["trace_id"] = format(span_ctx.trace_id, "032x")
+        fields["span_id"] = format(span_ctx.span_id, "016x")
+    print(json.dumps(fields), flush=True)
+
+
 redis_client = redis_lib.from_url(REDIS_URL, socket_timeout=2) if REDIS_URL else None
 kafka_producer = (
     Producer({"bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS}) if KAFKA_BOOTSTRAP_SERVERS else None
@@ -167,6 +181,15 @@ def checkout():
 
     REQUEST_LATENCY.labels(method="GET", path="/checkout").observe(time.perf_counter() - start)
     REQUEST_COUNT.labels(method="GET", path="/checkout", status=str(status)).inc()
+
+    log_json(
+        span=span,
+        msg="checkout request handled",
+        path="/checkout",
+        status=status,
+        order_id=order_id if not failed else None,
+        duration_ms=round((time.perf_counter() - start) * 1000, 2),
+    )
 
     if failed:
         return Response("checkout failed\n", status=500)
