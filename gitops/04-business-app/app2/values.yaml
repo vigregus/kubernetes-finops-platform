@@ -26,3 +26,16 @@ resources:
     cpu: 700m
     memory: 768Mi
 ingressHost: analytics-stage.finops.local
+redis:
+  image: redis:7-alpine
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+kafka:
+  bootstrapServers: orders-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092
+  topic: orders-stage
+  consumerGroup: analytics-stage

@@ -44,10 +44,14 @@ spec:
     topicOperator: {}
     userOperator: {}
 ---
+# One topic per environment on the shared cluster, not one shared topic -
+# otherwise stage checkout's traffic would be consumed by prod analytics
+# and vice versa. The cluster itself stays shared (realistic multi-tenant
+# Kafka pattern); isolation is at the topic level.
 apiVersion: kafka.strimzi.io/v1beta2
 kind: KafkaTopic
 metadata:
-  name: orders
+  name: orders-prod
   namespace: kafka
   labels:
     strimzi.io/cluster: orders-kafka
@@ -59,6 +63,21 @@ metadata:
     finops.internal/product: platform
     finops.internal/team: platform-engineering
     finops.internal/environment: prod
+    finops.internal/component: platform
+spec:
+  partitions: 3
+  replicas: 1
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: orders-stage
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: orders-kafka
+    finops.internal/product: platform
+    finops.internal/team: platform-engineering
+    finops.internal/environment: stage
     finops.internal/component: platform
 spec:
   partitions: 3

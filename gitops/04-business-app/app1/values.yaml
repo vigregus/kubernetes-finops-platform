@@ -25,3 +25,28 @@ resources:
     cpu: 500m
     memory: 512Mi
 ingressHost: checkout.finops.local
+postgres:
+  clusterName: checkout-db
+  instances: 1
+  storageSize: 1Gi
+  database: checkout
+  owner: checkout
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+redis:
+  image: redis:7-alpine
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+kafka:
+  bootstrapServers: orders-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092
+  topic: orders-prod
