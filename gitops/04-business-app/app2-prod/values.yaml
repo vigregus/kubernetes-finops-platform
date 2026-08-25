@@ -25,3 +25,4 @@ resources:
   limits:
     cpu: 700m
     memory: 768Mi
+ingressHost: analytics.finops.local
