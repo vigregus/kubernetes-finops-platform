@@ -1,0 +1,45 @@
+# One external hostname, path-routed to three backend services - the
+# frontend calls same-origin relative paths (/checkout, /checkout/lookup,
+# /analytics) so the browser never needs CORS headers from checkout/
+# analytics, matching how a real storefront-in-front-of-microservices
+# setup is actually routed rather than each backend having its own
+# public host (checkout.finops.local/analytics.finops.local still exist
+# separately for k6/direct testing - this is additive, not a replacement).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: shop
+  namespace: prod
+  labels:
+    app.kubernetes.io/name: shop
+    finops.internal/product: commerce
+    finops.internal/team: payments
+    finops.internal/environment: prod
+    finops.internal/component: application
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: shop.finops.local
+      http:
+        paths:
+          - path: /checkout
+            pathType: Prefix
+            backend:
+              service:
+                name: checkout
+                port:
+                  number: 80
+          - path: /analytics
+            pathType: Prefix
+            backend:
+              service:
+                name: analytics
+                port:
+                  number: 80
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 80
