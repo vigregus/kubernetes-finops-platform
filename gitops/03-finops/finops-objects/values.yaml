@@ -2,14 +2,17 @@ namespace: finops-system
 formulas:
   configMapName: finops-metric-formulas
   costPer1MRequests: (modeled_cost / request_count) * 1000000
-  modeledHourlyCost: (container_cpu_allocation * cpu_core_hour_price) + ((container_memory_allocation_bytes / 1073741824) * memory_gib_hour_price)
+  modeledHourlyCost: (container_cpu_allocation * on(node) group_left() node_cpu_hourly_cost) + (container_memory_allocation_bytes / 1073741824 * on(node) group_left() node_ram_hourly_cost)
   cpuCoreHourPrice: "0.031611"
   memoryGibHourPrice: "0.004237"
   notes: >-
     Modeled cost is used in Local v1. Actual cost is introduced in AWS v2.
-    cpu_core_hour_price and memory_gib_hour_price are OpenCost's built-in
-    default prices for the "custom" cloud provider (no real billing wired
-    up yet), used by the finops Grafana dashboard. request_count is not
-    yet available: checkout/analytics are uninstrumented hashicorp/http-echo
+    cpu_core_hour_price/memory_gib_hour_price are the illustrative Local v1
+    prices configured in gitops/03-finops/opencost/values.yaml
+    (customPricing) - no real cloud billing wired up yet. OpenCost emits
+    them natively as node_cpu_hourly_cost/node_ram_hourly_cost, which the
+    finops Grafana dashboard joins against allocation directly rather than
+    hardcoding the prices in every panel query. request_count is not yet
+    available: checkout/analytics are uninstrumented hashicorp/http-echo
     placeholders, so cost_per_1m_requests cannot be computed until they are
     replaced with instrumented apps (see README "Remaining work").

@@ -10,8 +10,77 @@ spec:
   json: |
     {
       "title": "Kubernetes Capacity",
-      "description": "Placeholder dashboard for requests, limits, utilization, and saturation.",
+      "description": "Rightsizing candidates from Goldilocks/VPA. Cluster/namespace requests-vs-usage capacity is covered by the standard Kubernetes / Views dashboards.",
       "tags": ["kubernetes-capacity", "finops"],
       "schemaVersion": 39,
-      "version": 1
+      "version": 2,
+      "editable": true,
+      "time": { "from": "now-6h", "to": "now" },
+      "panels": [
+        {
+          "id": 1,
+          "type": "row",
+          "title": "Goldilocks / VPA rightsizing recommendations",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+        },
+        {
+          "id": 2,
+          "type": "text",
+          "gridPos": { "h": 2, "w": 24, "x": 0, "y": 1 },
+          "options": {
+            "mode": "markdown",
+            "content": "Recommended requests from the VPA recommender (deployed via Goldilocks), read directly off the VerticalPodAutoscaler objects via kube-state-metrics `customResourceState` (see `gitops/02-infra/observability-objects/victoria-stack/values.yaml`). Goldilocks' own web UI (richer, with under/over-provisioned highlighting) is reachable via `kubectl port-forward -n finops-system svc/goldilocks-dashboard 8080:80`."
+          }
+        },
+        {
+          "id": 3,
+          "type": "table",
+          "title": "Recommended vs current CPU request",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": {}, "overrides": [] },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 3 },
+          "targets": [
+            {
+              "expr": "vpa_status_recommendation_cpu_cores{namespace=~\"dev|stage|prod\"}",
+              "format": "table",
+              "instant": true,
+              "legendFormat": "recommended"
+            },
+            {
+              "expr": "sum by (namespace, container) (kube_pod_container_resource_requests{namespace=~\"dev|stage|prod\", resource=\"cpu\"})",
+              "format": "table",
+              "instant": true,
+              "legendFormat": "current"
+            }
+          ],
+          "transformations": [
+            { "id": "organize", "options": { "excludeByName": { "Time": true, "verticalpodautoscaler": false } } }
+          ]
+        },
+        {
+          "id": 4,
+          "type": "table",
+          "title": "Recommended vs current memory request",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 3 },
+          "targets": [
+            {
+              "expr": "vpa_status_recommendation_memory_bytes{namespace=~\"dev|stage|prod\"}",
+              "format": "table",
+              "instant": true,
+              "legendFormat": "recommended"
+            },
+            {
+              "expr": "sum by (namespace, container) (kube_pod_container_resource_requests{namespace=~\"dev|stage|prod\", resource=\"memory\"})",
+              "format": "table",
+              "instant": true,
+              "legendFormat": "current"
+            }
+          ],
+          "transformations": [
+            { "id": "organize", "options": { "excludeByName": { "Time": true, "verticalpodautoscaler": false } } }
+          ]
+        }
+      ]
     }
