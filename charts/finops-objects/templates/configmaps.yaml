@@ -5,4 +5,7 @@ metadata:
   namespace: {{ .Values.namespace }}
 data:
   cost_per_1m_requests: {{ .Values.formulas.costPer1MRequests | quote }}
+  modeled_hourly_cost: {{ .Values.formulas.modeledHourlyCost | quote }}
+  cpu_core_hour_price: {{ .Values.formulas.cpuCoreHourPrice | quote }}
+  memory_gib_hour_price: {{ .Values.formulas.memoryGibHourPrice | quote }}
   notes: {{ .Values.formulas.notes | quote }}
