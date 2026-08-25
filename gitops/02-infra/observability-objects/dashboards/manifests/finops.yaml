@@ -10,8 +10,123 @@ spec:
   json: |
     {
       "title": "FinOps",
-      "description": "Placeholder dashboard for modeled cost, allocation, and cost per 1M requests.",
+      "description": "Modeled cost from OpenCost allocation data, split by product/team/environment, and unit economics.",
       "tags": ["finops", "unit-economics"],
       "schemaVersion": 39,
-      "version": 1
+      "version": 1,
+      "editable": true,
+      "time": { "from": "now-6h", "to": "now" },
+      "panels": [
+        {
+          "id": 1,
+          "type": "row",
+          "title": "Modeled cost",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+        },
+        {
+          "id": 2,
+          "type": "text",
+          "title": "How this is calculated",
+          "gridPos": { "h": 3, "w": 24, "x": 0, "y": 1 },
+          "options": {
+            "mode": "markdown",
+            "content": "modeled_hourly_cost = (container_cpu_allocation * cpu_core_hour_price) + (container_memory_allocation_bytes / 1GiB * memory_gib_hour_price). Prices are OpenCost's default \"custom provider\" rates (no real cloud billing wired up in Local v1) - see the `finops-metric-formulas` ConfigMap in `finops-system` for the exact values. This is `modeled cost`, not `actual cost` (see README \"Modeled cost versus actual cost\")."
+          }
+        },
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "Total modeled cost / hour",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 4 }, "overrides": [] },
+          "gridPos": { "h": 5, "w": 8, "x": 0, "y": 4 },
+          "targets": [
+            {
+              "expr": "sum(container_cpu_allocation{namespace=~\"dev|stage|prod\"} * 0.031611) + sum(container_memory_allocation_bytes{namespace=~\"dev|stage|prod\"} / 1073741824 * 0.004237)"
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "type": "bargauge",
+          "title": "Modeled cost / hour by product",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 4 }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 8, "x": 8, "y": 4 },
+          "targets": [
+            {
+              "expr": "sum by (product) ((container_cpu_allocation{namespace=~\"dev|stage|prod\"} * 0.031611 + container_memory_allocation_bytes{namespace=~\"dev|stage|prod\"} / 1073741824 * 0.004237) * on(namespace,pod) group_left(product) label_replace(kube_pod_labels{label_finops_internal_product!=\"\"}, \"product\", \"$1\", \"label_finops_internal_product\", \"(.*)\"))",
+              "legendFormat": "{{product}}"
+            }
+          ]
+        },
+        {
+          "id": 5,
+          "type": "bargauge",
+          "title": "Modeled cost / hour by team",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 4 }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 8, "x": 16, "y": 4 },
+          "targets": [
+            {
+              "expr": "sum by (team) ((container_cpu_allocation{namespace=~\"dev|stage|prod\"} * 0.031611 + container_memory_allocation_bytes{namespace=~\"dev|stage|prod\"} / 1073741824 * 0.004237) * on(namespace,pod) group_left(team) label_replace(kube_pod_labels{label_finops_internal_team!=\"\"}, \"team\", \"$1\", \"label_finops_internal_team\", \"(.*)\"))",
+              "legendFormat": "{{team}}"
+            }
+          ]
+        },
+        {
+          "id": 6,
+          "type": "timeseries",
+          "title": "Modeled cost / hour by environment",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 12 },
+          "targets": [
+            {
+              "expr": "sum by (namespace) (container_cpu_allocation{namespace=~\"dev|stage|prod\"} * 0.031611 + container_memory_allocation_bytes{namespace=~\"dev|stage|prod\"} / 1073741824 * 0.004237)",
+              "legendFormat": "{{namespace}}"
+            }
+          ]
+        },
+        {
+          "id": 7,
+          "type": "row",
+          "title": "Allocation detail",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 20 }
+        },
+        {
+          "id": 8,
+          "type": "table",
+          "title": "Modeled cost / hour by pod",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 4 }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 21 },
+          "targets": [
+            {
+              "expr": "sum by (namespace, pod) (container_cpu_allocation{namespace=~\"dev|stage|prod\"} * 0.031611 + container_memory_allocation_bytes{namespace=~\"dev|stage|prod\"} / 1073741824 * 0.004237)",
+              "format": "table",
+              "instant": true
+            }
+          ],
+          "transformations": [
+            { "id": "organize", "options": { "excludeByName": { "Time": true } } }
+          ]
+        },
+        {
+          "id": 9,
+          "type": "row",
+          "title": "Unit economics",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 29 }
+        },
+        {
+          "id": 10,
+          "type": "text",
+          "title": "Cost per 1M requests",
+          "gridPos": { "h": 5, "w": 24, "x": 0, "y": 30 },
+          "options": {
+            "mode": "markdown",
+            "content": "`cost_per_1m_requests = (modeled_cost / request_count) * 1000000` cannot be computed yet: `checkout` and `analytics` are still uninstrumented `hashicorp/http-echo` placeholders that expose no request-count metric. Once they are replaced with instrumented apps (README \"Remaining work\"), add a request-rate panel here and divide the modeled cost panels above by it."
+          }
+        }
+      ]
     }

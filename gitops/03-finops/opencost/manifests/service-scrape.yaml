@@ -12,3 +12,9 @@ spec:
     - port: http
       path: /metrics
       interval: 30s
+      # Without this, OpenCost's own namespace/pod labels (one per
+      # workload it tracks) collide with the scrape target's namespace/pod
+      # (the opencost pod itself) and lose - VictoriaMetrics keeps the
+      # scrape target's value and renames OpenCost's to exported_namespace/
+      # exported_pod, which breaks every join on namespace/pod.
+      honorLabels: true
