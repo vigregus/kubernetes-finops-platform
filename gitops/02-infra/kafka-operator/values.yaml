@@ -1,0 +1,4 @@
+# Deployed into the "kafka" namespace (see application.yaml destination);
+# with watchAnyNamespace/watchNamespaces left at their defaults the
+# operator watches only its own namespace, which is exactly where the
+# Kafka cluster/topic CRs live too - no cross-namespace RBAC needed.
