@@ -23,5 +23,9 @@ controller:
     # same as apps/checkout and apps/analytics's own JSON log lines -
     # otherwise this would only be full-text searchable, not field-matchable
     # by the query in gitops/02-infra/observability-objects/datasources/tempo.yaml.
+    # VictoriaLogs' JSON auto-parser requires the primary text field to be
+    # named "_msg" specifically (see apps/*/app.py log_json) - without it,
+    # every line here was dropped as "missing _msg field" despite having
+    # trace_id right there in the same JSON object.
     log-format-escape-json: "true"
-    log-format-upstream: '{"time": "$time_iso8601", "remote_addr": "$remote_addr", "request": "$request", "status": "$status", "request_time": "$request_time", "upstream_addr": "$upstream_addr", "upstream_status": "$upstream_status", "host": "$host", "trace_id": "$opentelemetry_trace_id"}'
+    log-format-upstream: '{"_msg": "$request", "time": "$time_iso8601", "remote_addr": "$remote_addr", "status": "$status", "request_time": "$request_time", "upstream_addr": "$upstream_addr", "upstream_status": "$upstream_status", "host": "$host", "trace_id": "$opentelemetry_trace_id"}'
