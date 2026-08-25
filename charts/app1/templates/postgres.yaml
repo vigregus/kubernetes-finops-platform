@@ -1,0 +1,19 @@
+{{- if .Values.postgres }}
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: {{ .Values.postgres.clusterName }}
+  namespace: {{ .Values.namespace }}
+  labels:
+{{ toYaml .Values.labels | indent 4 }}
+spec:
+  instances: {{ .Values.postgres.instances }}
+  storage:
+    size: {{ .Values.postgres.storageSize }}
+  bootstrap:
+    initdb:
+      database: {{ .Values.postgres.database }}
+      owner: {{ .Values.postgres.owner }}
+  resources:
+{{ toYaml .Values.postgres.resources | indent 4 }}
+{{- end }}

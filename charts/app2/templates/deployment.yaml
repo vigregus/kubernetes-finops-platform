@@ -40,6 +40,18 @@ spec:
             - name: {{ $key }}
               value: {{ $value | quote }}
 {{- end }}
+{{- if .Values.redis }}
+            - name: REDIS_URL
+              value: "redis://{{ .Values.name }}-redis.{{ .Values.namespace }}.svc.cluster.local:6379/0"
+{{- end }}
+{{- if .Values.kafka }}
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: {{ .Values.kafka.bootstrapServers | quote }}
+            - name: KAFKA_TOPIC
+              value: {{ .Values.kafka.topic | quote }}
+            - name: KAFKA_CONSUMER_GROUP
+              value: {{ .Values.kafka.consumerGroup | quote }}
+{{- end }}
           readinessProbe:
             httpGet:
               path: /healthz
