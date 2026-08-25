@@ -27,8 +27,14 @@ controller:
     # named "_msg" specifically (see apps/*/app.py log_json) - without it,
     # every line here was dropped as "missing _msg field" despite having
     # trace_id right there in the same JSON object.
+    # _msg is a full combined-log-style line (client IP, request, status,
+    # which upstream pod it was proxied to, timing) so it reads like a
+    # real access log at a glance in the Logs panel, which only renders
+    # _msg inline - remote_addr/upstream_addr etc. below are kept as
+    # separate fields too so they're still queryable/filterable on their
+    # own, not just visible in this string.
     log-format-escape-json: "true"
-    log-format-upstream: '{"_msg": "$request", "time": "$time_iso8601", "remote_addr": "$remote_addr", "status": "$status", "request_time": "$request_time", "upstream_addr": "$upstream_addr", "upstream_status": "$upstream_status", "host": "$host", "trace_id": "$opentelemetry_trace_id"}'
+    log-format-upstream: '{"_msg": "$remote_addr - \"$request\" $status $body_bytes_sent -> upstream=$upstream_addr ($upstream_status) in ${request_time}s", "time": "$time_iso8601", "remote_addr": "$remote_addr", "status": "$status", "request_time": "$request_time", "upstream_addr": "$upstream_addr", "upstream_status": "$upstream_status", "host": "$host", "trace_id": "$opentelemetry_trace_id"}'
   # Exposes the controller's own request-rate/latency/error metrics
   # (nginx_ingress_controller_*) on a separate :10254 service - without
   # this the ingress hop is only visible as traces/access-log lines, with

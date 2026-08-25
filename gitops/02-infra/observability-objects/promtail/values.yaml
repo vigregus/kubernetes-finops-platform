@@ -8,3 +8,32 @@ config:
     # as an unparsed JSON blob.
     pipelineStages:
       - docker: {}
+      # CNPG's instance manager already wraps every Postgres log line
+      # (including the log_statement/log_min_duration_statement output
+      # from charts/app1/templates/postgres.yaml) as JSON on stdout - but
+      # its top-level field is "msg":"record", not "_msg", so VictoriaLogs
+      # was dropping every line as "missing _msg field", and the real SQL
+      # plus the trace_id SQL comment were buried unindexed inside the
+      # nested record.message string. This rewrites the shipped line to
+      # the actual SQL text (so it reads like a log, not a JSON dump) and
+      # promotes trace_id/duration_ms out of that string into real fields,
+      # matching how the app's own JSON logs already work.
+      - match:
+          selector: '{app="postgresql"}'
+          stages:
+            - json:
+                expressions:
+                  record_message: record.message
+                  severity: record.error_severity
+            - regex:
+                source: record_message
+                expression: '^(?:duration: (?P<duration_ms>[0-9.]+) ms\s+)?statement: (?:/\* trace_id=(?P<trace_id>[a-f0-9]{32}) \*/ )?(?P<sql>.*)$'
+            - template:
+                source: level
+                template: '{{ ToLower .severity }}'
+            - labels:
+                trace_id:
+                duration_ms:
+                level:
+            - output:
+                source: record_message
