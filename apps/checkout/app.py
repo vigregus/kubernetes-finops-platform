@@ -63,6 +63,12 @@ def log_json(span=None, **fields):
     if span_ctx.is_valid:
         fields["trace_id"] = format(span_ctx.trace_id, "032x")
         fields["span_id"] = format(span_ctx.span_id, "016x")
+    # VictoriaLogs auto-parses JSON log lines and requires the primary
+    # text field to be named "_msg" specifically - "msg" is silently
+    # dropped with "missing _msg field" instead of falling back to the
+    # raw line.
+    if "msg" in fields:
+        fields["_msg"] = fields.pop("msg")
     print(json.dumps(fields), flush=True)
 
 
