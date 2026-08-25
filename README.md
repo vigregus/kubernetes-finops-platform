@@ -61,7 +61,7 @@ Expected outcomes for AWS v2:
 
 ### Local v1
 
-Local v1 is intentionally constrained to one local `k3s` cluster with three namespaces representing `dev`, `stage`, and `prod`.
+Local v1 is intentionally constrained to one local `minikube` cluster with three namespaces representing `dev`, `stage`, and `prod`.
 
 Included components:
 
@@ -218,7 +218,7 @@ Cloud phases should map the same ownership concepts to provider-native tags wher
 
 ## Environments
 
-Local v1 uses one `k3s` cluster with three namespaces:
+Local v1 uses one `minikube` cluster with three namespaces:
 
 - `dev`
 - `stage`
@@ -243,14 +243,15 @@ Two sample workloads are included to keep the platform concrete:
 
 Both run in `stage` and `prod` (`gitops/04-business-app/app1`+`app1-stage` for checkout, `app2`+`app2-prod` for analytics), so environment-split cost/capacity comparisons have real data on both sides. `dev` intentionally stays empty in Local v1 - nothing in the roadmap depends on a third copy of the same placeholder workload.
 
-They should be intentionally simple but instrumented enough to expose:
+Both are Flask apps (`apps/checkout`, `apps/analytics`), instrumented enough to expose:
 
-- request volume,
-- latency,
-- error rate,
+- request volume, latency, error rate (`http_requests_total`/`http_request_duration_seconds`),
 - resource usage,
-- trace spans,
+- OpenTelemetry trace spans with real semantic-convention attributes (`db.*`, `messaging.*`) and genuine error status on failure - not just a status-code attribute,
+- structured JSON logs with a real `level` field, correlated to their span via `trace_id`,
 - ownership labels.
+
+`checkout` writes to CloudNativePG (Postgres), Redis, and Kafka (`orders-{prod,stage}` topics on one shared Strimzi cluster); `analytics` consumes from Kafka and reads/writes Redis. `checkout` also exposes `/checkout/lookup` - a real Postgres `SELECT` with three genuinely distinct outcomes (row found, valid-but-absent id, malformed id that Postgres itself rejects), not a simulated coin flip. A static storefront (`charts/frontend`) fronts both services through one path-routed ingress host, so traces can originate in a real browser tab instead of only from `k6`/`curl`.
 
 `k6` scenarios generate repeatable traffic so that dashboards and modeled cost outputs can be compared across tuning changes.
 
@@ -324,7 +325,7 @@ That is the level of result the repository is intended to make repeatable.
 
 ### Phase 2: Local cluster baseline
 
-- Bootstrap one `k3s` cluster.
+- Bootstrap one `minikube` cluster.
 - Create `dev`, `stage`, and `prod` namespaces.
 - Install Argo CD and define the initial application layout.
 - Install Kyverno and validate required labels.
@@ -362,35 +363,46 @@ That is the level of result the repository is intended to make repeatable.
 kubernetes-finops-platform/
 ├── README.md
 ├── .gitignore
+├── apps/
+│   ├── checkout/          # Flask app: HTTP + Postgres + Redis + Kafka producer
+│   └── analytics/         # Flask app: HTTP + Redis + Kafka consumer
 ├── charts/
-│   ├── app1/
-│   ├── app2/
+│   ├── app1/               # checkout (+ Postgres/Redis/Kafka wiring)
+│   ├── app2/               # analytics (+ Redis/Kafka wiring)
+│   ├── frontend/            # static storefront UI
 │   ├── finops-objects/
 │   ├── infra-bootstrap/
 │   ├── kyverno-policies/
 │   └── observability-objects/
 ├── docs/
-├── examples/
+│   └── ADR/
 ├── gitops/
 │   ├── 01-root/
-│   │   ├── project.yaml
-│   │   └── root-application.yaml
 │   ├── 02-infra/
-│   │   ├── infra-bootstrap/
+│   │   ├── cnpg-operator/
+│   │   ├── ingress-nginx/
+│   │   ├── kafka-cluster/
+│   │   ├── kafka-operator/
 │   │   ├── kyverno/
 │   │   ├── kyverno-policies/
+│   │   ├── infra-bootstrap/
 │   │   └── observability-objects/
 │   │       ├── dashboards/
 │   │       ├── datasources/
+│   │       ├── promtail/
 │   │       ├── tempo/
-│   │       └── victoria-logs/
+│   │       ├── victoria-logs/
+│   │       └── victoria-stack/
 │   ├── 03-finops/
 │   │   ├── finops-objects/
 │   │   ├── goldilocks/
 │   │   └── opencost/
 │   └── 04-business-app/
-│       ├── app1/
-│       └── app2/
+│       ├── app1/           # checkout, prod
+│       ├── app1-stage/     # checkout, stage
+│       ├── app2/           # analytics, stage
+│       ├── app2-prod/      # analytics, prod
+│       └── frontend/       # prod only, path-routes to both
 └── tests/
     └── k6/
 ```
@@ -419,12 +431,11 @@ This is still a scaffold, not a completed runtime stack, but the following are n
 - Grafana Operator plus one `Grafana` instance, `GrafanaDatasource` resources for VictoriaMetrics/VictoriaLogs/Tempo, and the three dashboards as `GrafanaDashboard` resources (see ADR 0002),
 - OpenCost, VPA (recommender only), and Goldilocks.
 
-Remaining work before Definition of Done for Local v1:
+Definition of Done for Local v1 (below) is met. Known, deliberate gaps that remain open:
 
-- verify chart-specific values keys for `victoria-logs-single` and `tempo` against `helm show values` (they were set from best-effort defaults, not a live cluster),
-- replace the `hashicorp/http-echo` placeholder containers with instrumented apps that expose request/latency/error metrics and OTLP traces,
-- build the real dashboard panels (the three `GrafanaDashboard` resources currently hold placeholder JSON),
-- wire the `finops-metric-formulas` ConfigMap's `cost_per_1m_requests` formula into an actual Grafana/OpenCost query.
+- the frontend (`charts/frontend`) generates a fresh trace per fetch call, even when several fetches happen as one user action (e.g. loading a summary view that calls both `/checkout/lookup` and `/analytics`) - each currently gets its own trace_id rather than sharing one parent trace with fan-out child spans. Left as-is by request; would need the frontend to build one `traceparent` per logical action and reuse it across that action's fetch calls.
+- Redis and the Kafka broker's own logs are collected (see `gitops/02-infra/observability-objects/promtail`) but not trace-correlatable: Redis's wire protocol has nowhere to carry an arbitrary trace_id, and Kafka broker logs are about partitions/replicas/controller state, not individual messages - the message-to-trace link already exists at the right layer, in checkout/analytics's own produce/consume log lines (partition + offset), not in the broker's own logs.
+- AWS v2 (CUR/FOCUS/Athena reconciliation) is out of scope for Local v1 - see "AWS v2" under Scope Overview.
 
 ## Security and Secrets Policy
 
@@ -448,7 +459,7 @@ Recommended approach:
 
 Local v1 assumes:
 
-- a workstation capable of running one local `k3s` cluster,
+- a workstation capable of running one local `minikube` cluster,
 - `kubectl`,
 - `helm`,
 - `argocd` CLI or UI access for validation,
@@ -462,7 +473,7 @@ Tooling details can evolve, but the repository should not depend on hidden manua
 
 The intended local path is deliberately standard:
 
-1. Create a local `k3s` cluster.
+1. Create a local `minikube` cluster.
 2. Install Argo CD with `kubectl` and `helm` according to the chosen local workflow.
 3. Update the repository URL in `gitops/01-root/root-application.yaml`.
 4. Apply the root Argo CD application with `kubectl`.
@@ -475,7 +486,7 @@ The intended local path is deliberately standard:
 
 Local v1 is complete when all of the following are true:
 
-- one local `k3s` cluster is running,
+- one local `minikube` cluster is running,
 - `dev`, `stage`, and `prod` namespaces exist,
 - Argo CD manages the repository-defined platform resources,
 - VictoriaMetrics, VictoriaLogs, Tempo, Grafana, and Grafana Operator are deployed,
