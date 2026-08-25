@@ -22,20 +22,36 @@ spec:
     metadata:
       labels:
 {{ toYaml .Values.labels | indent 8 }}
-      annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "{{ .Values.containerPort }}"
     spec:
       serviceAccountName: {{ .Values.name }}
       containers:
         - name: {{ .Values.name }}
           image: {{ .Values.image }}
-          args:
-            - -text={{ .Values.text }}
-            - -listen=:{{ .Values.containerPort }}
+          # Local v1 has no registry for this image - it only ever exists
+          # in minikube's local image cache (scripts/build-workload-images.sh).
+          imagePullPolicy: Never
           ports:
             - name: http
               containerPort: {{ .Values.containerPort }}
+          env:
+            - name: PORT
+              value: {{ .Values.containerPort | quote }}
+{{- range $key, $value := .Values.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+{{- end }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 15
           resources:
 {{ toYaml .Values.resources | indent 12 }}
 ---
@@ -53,3 +69,19 @@ spec:
     - name: http
       port: {{ .Values.servicePort }}
       targetPort: {{ .Values.containerPort }}
+---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMServiceScrape
+metadata:
+  name: {{ .Values.name }}
+  namespace: {{ .Values.namespace }}
+  labels:
+{{ toYaml .Values.labels | indent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Values.name }}
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
