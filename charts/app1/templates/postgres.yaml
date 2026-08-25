@@ -18,6 +18,13 @@ spec:
       # per order (see apps/checkout/app.py persist_order), not read-only
       # traffic, to keep the volume reasonable.
       log_statement: "mod"
+      # A real prod Postgres doesn't log_statement=all/mod at scale - it
+      # flags *slow* queries instead. Both coexist here: log_statement
+      # keeps every write greppable by trace_id for this demo's traffic
+      # volume, log_min_duration_statement is the actual prod pattern
+      # (statements over 200ms get a duration-tagged log line regardless
+      # of log_statement, so a real slow query wouldn't just blend in).
+      log_min_duration_statement: "200"
   bootstrap:
     initdb:
       database: {{ .Values.postgres.database }}
