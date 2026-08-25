@@ -8,10 +8,15 @@ labels:
   finops.internal/environment: stage
   finops.internal/component: application
 replicas: 1
-image: hashicorp/http-echo:1.0.0
-text: checkout
-containerPort: 5678
+image: checkout:local
+containerPort: 8080
 servicePort: 80
+env:
+  OTEL_SERVICE_NAME: checkout
+  LATENCY_MS_MEAN: "40"
+  LATENCY_MS_JITTER: "15"
+  ERROR_RATE: "0.02"
+  WORK_ITERATIONS: "150000"
 resources:
   requests:
     cpu: 150m

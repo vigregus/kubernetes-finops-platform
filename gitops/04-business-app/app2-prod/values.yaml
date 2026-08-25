@@ -8,10 +8,16 @@ labels:
   finops.internal/environment: prod
   finops.internal/component: application
 replicas: 2
-image: hashicorp/http-echo:1.0.0
-text: analytics
-containerPort: 5678
+image: analytics:local
+containerPort: 8080
 servicePort: 80
+env:
+  OTEL_SERVICE_NAME: analytics
+  LATENCY_MS_MEAN: "90"
+  LATENCY_MS_JITTER: "30"
+  ERROR_RATE: "0.01"
+  WORK_ITERATIONS: "300000"
+  BATCH_ROWS: "5000"
 resources:
   requests:
     cpu: 250m
