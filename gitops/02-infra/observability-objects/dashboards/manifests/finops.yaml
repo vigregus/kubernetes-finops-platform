@@ -143,23 +143,67 @@ spec:
           ]
         },
         {
+          "id": 13,
+          "type": "row",
+          "title": "Full-stack cost (compute + storage)",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 35 }
+        },
+        {
+          "id": 14,
+          "type": "text",
+          "title": "What's included",
+          "gridPos": { "h": 3, "w": 24, "x": 0, "y": 36 },
+          "options": {
+            "mode": "markdown",
+            "content": "Everything attributed to a product's pods (app + Redis + Postgres - CNPG's instance pods/PVCs now carry finops.internal/* labels via inheritedMetadata, see charts/app1/templates/postgres.yaml) plus that product's PV storage (pv_hourly_cost, joined pv -> PVC -> pod -> product). **Not included**, and not modelable in Local v1: LoadBalancer/egress traffic cost - there's no real cloud LB (NodePort only) or billing signal for it here. That needs AWS v2 (CUR/FOCUS)."
+          }
+        },
+        {
+          "id": 15,
+          "type": "stat",
+          "title": "Full-stack cost / hour by product (current)",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 4 }, "overrides": [] },
+          "gridPos": { "h": 6, "w": 24, "x": 0, "y": 39 },
+          "targets": [
+            {
+              "expr": "(sum by (product) ((container_cpu_allocation{namespace=~\"dev|stage|prod\"} * on(node) group_left() node_cpu_hourly_cost + container_memory_allocation_bytes{namespace=~\"dev|stage|prod\"} / 1073741824 * on(node) group_left() node_ram_hourly_cost) * on(namespace,pod) group_left(product) label_replace(kube_pod_labels{label_finops_internal_product!=\"\"}, \"product\", \"$1\", \"label_finops_internal_product\", \"(.*)\"))) + (sum by (product) (pv_hourly_cost * on(persistentvolume) group_left(namespace, persistentvolumeclaim) label_replace(kube_persistentvolumeclaim_info{job=\"kube-state-metrics\"}, \"persistentvolume\", \"$1\", \"volumename\", \"(.*)\") * on(namespace, persistentvolumeclaim) group_left(product) label_replace(label_replace(kube_pod_labels{label_finops_internal_product!=\"\"}, \"persistentvolumeclaim\", \"$1\", \"pod\", \"(.*)\"), \"product\", \"$1\", \"label_finops_internal_product\", \"(.*)\")) or (sum by (product) ((container_cpu_allocation{namespace=~\"dev|stage|prod\"} * on(node) group_left() node_cpu_hourly_cost + container_memory_allocation_bytes{namespace=~\"dev|stage|prod\"} / 1073741824 * on(node) group_left() node_ram_hourly_cost) * on(namespace,pod) group_left(product) label_replace(kube_pod_labels{label_finops_internal_product!=\"\"}, \"product\", \"$1\", \"label_finops_internal_product\", \"(.*)\")) * 0))",
+              "legendFormat": "{{product}}"
+            }
+          ]
+        },
+        {
+          "id": 16,
+          "type": "timeseries",
+          "title": "Full-stack cost / hour by product (historical)",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 45 },
+          "targets": [
+            {
+              "expr": "(sum by (product) ((container_cpu_allocation{namespace=~\"dev|stage|prod\"} * on(node) group_left() node_cpu_hourly_cost + container_memory_allocation_bytes{namespace=~\"dev|stage|prod\"} / 1073741824 * on(node) group_left() node_ram_hourly_cost) * on(namespace,pod) group_left(product) label_replace(kube_pod_labels{label_finops_internal_product!=\"\"}, \"product\", \"$1\", \"label_finops_internal_product\", \"(.*)\"))) + (sum by (product) (pv_hourly_cost * on(persistentvolume) group_left(namespace, persistentvolumeclaim) label_replace(kube_persistentvolumeclaim_info{job=\"kube-state-metrics\"}, \"persistentvolume\", \"$1\", \"volumename\", \"(.*)\") * on(namespace, persistentvolumeclaim) group_left(product) label_replace(label_replace(kube_pod_labels{label_finops_internal_product!=\"\"}, \"persistentvolumeclaim\", \"$1\", \"pod\", \"(.*)\"), \"product\", \"$1\", \"label_finops_internal_product\", \"(.*)\")) or (sum by (product) ((container_cpu_allocation{namespace=~\"dev|stage|prod\"} * on(node) group_left() node_cpu_hourly_cost + container_memory_allocation_bytes{namespace=~\"dev|stage|prod\"} / 1073741824 * on(node) group_left() node_ram_hourly_cost) * on(namespace,pod) group_left(product) label_replace(kube_pod_labels{label_finops_internal_product!=\"\"}, \"product\", \"$1\", \"label_finops_internal_product\", \"(.*)\")) * 0))",
+              "legendFormat": "{{product}}"
+            }
+          ]
+        },
+        {
           "id": 9,
           "type": "row",
           "title": "Unit economics",
-          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 35 }
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 53 }
         },
         {
           "id": 10,
           "type": "timeseries",
-          "title": "Cost per 1M requests by workload",
-          "description": "modeled_cost / request_rate * 1e6 - checkout/analytics expose http_requests_total (see apps/checkout, apps/analytics), so this divides each workload's modeled cost/hour by its own request rate.",
+          "title": "Cost per 1M requests by product (full stack: app + Redis + Postgres + storage)",
+          "description": "full_stack_modeled_cost / request_rate * 1e6 - checkout/analytics expose http_requests_total (see apps/checkout, apps/analytics). product<->job mapping is a fixed label_replace (commerce=checkout, insights=analytics) since there's no shared label between the two today.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 4 }, "overrides": [] },
-          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 36 },
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 54 },
           "targets": [
             {
-              "expr": "sum by (job) ((container_cpu_allocation{namespace=~\"dev|stage|prod\"} * on(node) group_left() node_cpu_hourly_cost + container_memory_allocation_bytes{namespace=~\"dev|stage|prod\"} / 1073741824 * on(node) group_left() node_ram_hourly_cost) * on(namespace,pod) group_left(job) label_replace(kube_pod_labels{label_app_kubernetes_io_name=~\"checkout|analytics\"}, \"job\", \"$1\", \"label_app_kubernetes_io_name\", \"(.*)\")) / (sum by (job) (rate(http_requests_total[5m])) * 3600 > 0) * 1000000",
-              "legendFormat": "{{job}}"
+              "expr": "((sum by (product) ((container_cpu_allocation{namespace=~\"dev|stage|prod\"} * on(node) group_left() node_cpu_hourly_cost + container_memory_allocation_bytes{namespace=~\"dev|stage|prod\"} / 1073741824 * on(node) group_left() node_ram_hourly_cost) * on(namespace,pod) group_left(product) label_replace(kube_pod_labels{label_finops_internal_product!=\"\"}, \"product\", \"$1\", \"label_finops_internal_product\", \"(.*)\"))) + (sum by (product) (pv_hourly_cost * on(persistentvolume) group_left(namespace, persistentvolumeclaim) label_replace(kube_persistentvolumeclaim_info{job=\"kube-state-metrics\"}, \"persistentvolume\", \"$1\", \"volumename\", \"(.*)\") * on(namespace, persistentvolumeclaim) group_left(product) label_replace(label_replace(kube_pod_labels{label_finops_internal_product!=\"\"}, \"persistentvolumeclaim\", \"$1\", \"pod\", \"(.*)\"), \"product\", \"$1\", \"label_finops_internal_product\", \"(.*)\")) or (sum by (product) ((container_cpu_allocation{namespace=~\"dev|stage|prod\"} * on(node) group_left() node_cpu_hourly_cost + container_memory_allocation_bytes{namespace=~\"dev|stage|prod\"} / 1073741824 * on(node) group_left() node_ram_hourly_cost) * on(namespace,pod) group_left(product) label_replace(kube_pod_labels{label_finops_internal_product!=\"\"}, \"product\", \"$1\", \"label_finops_internal_product\", \"(.*)\")) * 0))) / on(product) (label_replace(label_replace(sum by (job) (rate(http_requests_total[5m])), \"product\", \"commerce\", \"job\", \"checkout\"), \"product\", \"insights\", \"job\", \"analytics\") * 3600 > 0) * 1000000",
+              "legendFormat": "{{product}}"
             }
           ]
         }
