@@ -11,6 +11,11 @@ spec:
     - repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
       targetRevision: HEAD
       ref: values
+    - repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
+      targetRevision: HEAD
+      path: gitops/02-infra/cnpg-operator/manifests
+      directory:
+        recurse: true
     - repoURL: https://cloudnative-pg.github.io/charts
       chart: cloudnative-pg
       targetRevision: 0.29.0
