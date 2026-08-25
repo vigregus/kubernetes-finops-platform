@@ -52,21 +52,21 @@ DB_LATENCY = Histogram("db_query_duration_seconds", "Postgres query latency in s
 CACHE_LATENCY = Histogram("cache_call_duration_seconds", "Redis call latency in seconds")
 KAFKA_LATENCY = Histogram("kafka_publish_duration_seconds", "Kafka publish latency in seconds")
 
-def log_json(span=None, **fields):
-    # Grafana's trace-to-logs correlation full-text searches VictoriaLogs
-    # for the trace ID (promtail ships raw text, not a structured
-    # trace_id field - see gitops/02-infra/observability-objects/datasources/tempo.yaml),
-    # so the trace/span IDs need to actually appear in the log line.
-    # Pass the span explicitly when logging after its `with` block has
-    # already exited - trace.get_current_span() would be a no-op by then.
-    span_ctx = (span or trace.get_current_span()).get_span_context()
+
+def log_json(span, **fields):
+    # Grafana's trace-to-logs correlation looks up VictoriaLogs by the
+    # trace_id *field* (VictoriaLogs auto-parses JSON lines and promotes
+    # top-level keys to real fields), so every step needs its own log line
+    # with its own span's trace/span ID - one summary line at the end of
+    # the request doesn't let you jump from a specific span (e.g.
+    # checkout.persist_order) to what that step actually did.
+    span_ctx = span.get_span_context()
     if span_ctx.is_valid:
         fields["trace_id"] = format(span_ctx.trace_id, "032x")
         fields["span_id"] = format(span_ctx.span_id, "016x")
-    # VictoriaLogs auto-parses JSON log lines and requires the primary
-    # text field to be named "_msg" specifically - "msg" is silently
-    # dropped with "missing _msg field" instead of falling back to the
-    # raw line.
+    # VictoriaLogs requires the primary text field to be named "_msg"
+    # specifically - "msg" is silently dropped ("missing _msg field")
+    # instead of falling back to the raw line.
     if "msg" in fields:
         fields["_msg"] = fields.pop("msg")
     print(json.dumps(fields), flush=True)
@@ -99,8 +99,9 @@ def cache_lookup(idempotency_key):
     if not redis_client:
         return None
     start = time.perf_counter()
-    with tracer.start_as_current_span("checkout.cache_lookup"):
+    with tracer.start_as_current_span("checkout.cache_lookup") as span:
         value = redis_client.get(idempotency_key)
+        log_json(span, _msg="redis GET", key=idempotency_key, hit=value is not None)
     CACHE_LATENCY.observe(time.perf_counter() - start)
     return value
 
@@ -109,22 +110,30 @@ def cache_store(idempotency_key, order_id):
     if not redis_client:
         return
     start = time.perf_counter()
-    with tracer.start_as_current_span("checkout.cache_store"):
+    with tracer.start_as_current_span("checkout.cache_store") as span:
         redis_client.set(idempotency_key, order_id, ex=300)
+        log_json(span, _msg="redis SET", key=idempotency_key, ttl_seconds=300)
     CACHE_LATENCY.observe(time.perf_counter() - start)
 
 
-def persist_order(order_id):
+def persist_order(order_id, span_ctx_for_sql):
     if not DATABASE_URL:
         return
     start = time.perf_counter()
-    with tracer.start_as_current_span("checkout.persist_order"):
+    with tracer.start_as_current_span("checkout.persist_order") as span:
+        # A SQL comment carrying the trace ID is what makes Postgres's own
+        # log_statement output (see charts/app1/templates/postgres.yaml)
+        # greppable by trace_id - without it, the query shows up in
+        # Postgres's log with zero link back to the request that ran it.
+        sql = (
+            f"/* trace_id={span_ctx_for_sql} */ "
+            "INSERT INTO orders (id, status) VALUES (%s, %s)"
+        )
         with psycopg2.connect(DATABASE_URL) as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    "INSERT INTO orders (id, status) VALUES (%s, %s)", (order_id, "placed")
-                )
+                cur.execute(sql, (order_id, "placed"))
             conn.commit()
+        log_json(span, _msg="postgres INSERT", table="orders", order_id=order_id)
     DB_LATENCY.observe(time.perf_counter() - start)
 
 
@@ -132,16 +141,38 @@ def publish_order_event(order_id):
     if not kafka_producer:
         return
     start = time.perf_counter()
-    with tracer.start_as_current_span("checkout.publish_event", kind=SpanKind.PRODUCER):
+    with tracer.start_as_current_span("checkout.publish_event", kind=SpanKind.PRODUCER) as span:
         headers = {}
         propagate.inject(headers)
         kafka_headers = [(k, v.encode("utf-8")) for k, v in headers.items()]
+
+        delivery = {}
+
+        def on_delivery(err, msg):
+            if err is not None:
+                delivery["error"] = str(err)
+            else:
+                delivery["partition"] = msg.partition()
+                delivery["offset"] = msg.offset()
+
         kafka_producer.produce(
             KAFKA_TOPIC,
             value=json.dumps({"order_id": order_id}).encode("utf-8"),
             headers=kafka_headers,
+            on_delivery=on_delivery,
         )
-        kafka_producer.poll(0)
+        # Blocks until the broker acks (or the 2s timeout) so the delivery
+        # report (partition/offset, or the error) is available to log
+        # immediately - poll(0) alone doesn't guarantee the callback has
+        # fired yet.
+        kafka_producer.flush(2.0)
+        log_json(
+            span,
+            _msg="kafka produce",
+            topic=KAFKA_TOPIC,
+            order_id=order_id,
+            **delivery,
+        )
     KAFKA_LATENCY.observe(time.perf_counter() - start)
 
 
@@ -165,6 +196,7 @@ def checkout():
     # continuing whatever called us (e.g. ingress-nginx).
     ctx = propagate.extract({k.lower(): v for k, v in request.headers.items()})
     with tracer.start_as_current_span("checkout.process", context=ctx, kind=SpanKind.SERVER) as span:
+        trace_id_hex = format(span.get_span_context().trace_id, "032x")
         idempotency_key = f"checkout:idem:{request.args.get('key', uuid.uuid4().hex)}"
         cached_order_id = cache_lookup(idempotency_key)
 
@@ -181,7 +213,7 @@ def checkout():
         if not failed:
             order_id = cached_order_id.decode() if cached_order_id else str(uuid.uuid4())
             if not cached_order_id:
-                persist_order(order_id)
+                persist_order(order_id, trace_id_hex)
                 publish_order_event(order_id)
                 cache_store(idempotency_key, order_id)
 
@@ -189,7 +221,7 @@ def checkout():
     REQUEST_COUNT.labels(method="GET", path="/checkout", status=str(status)).inc()
 
     log_json(
-        span=span,
+        span,
         msg="checkout request handled",
         path="/checkout",
         status=status,

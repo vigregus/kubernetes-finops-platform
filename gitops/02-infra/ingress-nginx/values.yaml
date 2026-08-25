@@ -17,3 +17,11 @@ controller:
     otlp-collector-host: "tempo-local.observability.svc.cluster.local"
     otlp-collector-port: "4317"
     otel-service-name: "ingress-nginx"
+    # Default access log format has no trace_id at all, so the ingress hop
+    # was invisible to trace-to-logs correlation. JSON (not plain text) so
+    # VictoriaLogs auto-parses it and promotes trace_id to a real field,
+    # same as apps/checkout and apps/analytics's own JSON log lines -
+    # otherwise this would only be full-text searchable, not field-matchable
+    # by the query in gitops/02-infra/observability-objects/datasources/tempo.yaml.
+    log-format-escape-json: "true"
+    log-format-upstream: '{"time": "$time_iso8601", "remote_addr": "$remote_addr", "request": "$request", "status": "$status", "request_time": "$request_time", "upstream_addr": "$upstream_addr", "upstream_status": "$upstream_status", "host": "$host", "trace_id": "$opentelemetry_trace_id"}'
