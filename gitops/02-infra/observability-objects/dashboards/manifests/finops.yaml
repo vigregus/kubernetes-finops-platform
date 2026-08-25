@@ -10,10 +10,10 @@ spec:
   json: |
     {
       "title": "FinOps",
-      "description": "Modeled cost from OpenCost allocation data, split by product/team/environment, and unit economics.",
+      "description": "Modeled cost from OpenCost's native cost metrics, split by product/team/environment, and unit economics.",
       "tags": ["finops", "unit-economics"],
       "schemaVersion": 39,
-      "version": 1,
+      "version": 2,
       "editable": true,
       "time": { "from": "now-6h", "to": "now" },
       "panels": [
@@ -30,20 +30,32 @@ spec:
           "gridPos": { "h": 3, "w": 24, "x": 0, "y": 1 },
           "options": {
             "mode": "markdown",
-            "content": "modeled_hourly_cost = (container_cpu_allocation * cpu_core_hour_price) + (container_memory_allocation_bytes / 1GiB * memory_gib_hour_price). Prices are OpenCost's default \"custom provider\" rates (no real cloud billing wired up in Local v1) - see the `finops-metric-formulas` ConfigMap in `finops-system` for the exact values. This is `modeled cost`, not `actual cost` (see README \"Modeled cost versus actual cost\")."
+            "content": "modeled_hourly_cost = (container_cpu_allocation * node_cpu_hourly_cost) + (container_memory_allocation_bytes / 1GiB * node_ram_hourly_cost). node_cpu_hourly_cost/node_ram_hourly_cost are emitted natively by OpenCost (customPricing enabled in gitops/03-finops/opencost/values.yaml with illustrative Local v1 prices - no real cloud billing wired up). This is `modeled cost`, not `actual cost` (see README \"Modeled cost versus actual cost\")."
           }
         },
         {
           "id": 3,
           "type": "stat",
-          "title": "Total modeled cost / hour",
+          "title": "Total modeled cost / hour (allocated to dev/stage/prod)",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 4 }, "overrides": [] },
-          "gridPos": { "h": 5, "w": 8, "x": 0, "y": 4 },
+          "gridPos": { "h": 5, "w": 6, "x": 0, "y": 4 },
           "targets": [
             {
-              "expr": "sum(container_cpu_allocation{namespace=~\"dev|stage|prod\"} * 0.031611) + sum(container_memory_allocation_bytes{namespace=~\"dev|stage|prod\"} / 1073741824 * 0.004237)"
+              "expr": "sum(container_cpu_allocation{namespace=~\"dev|stage|prod\"} * on(node) group_left() node_cpu_hourly_cost) + sum(container_memory_allocation_bytes{namespace=~\"dev|stage|prod\"} / 1073741824 * on(node) group_left() node_ram_hourly_cost)"
             }
+          ]
+        },
+        {
+          "id": 11,
+          "type": "stat",
+          "title": "Total node capacity cost / hour",
+          "description": "node_total_hourly_cost summed across all nodes - the ceiling. Compare against the allocated total to see how much of paid-for capacity is actually attributed to owned workloads vs system/unlabeled overhead.",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 4 }, "overrides": [] },
+          "gridPos": { "h": 5, "w": 6, "x": 6, "y": 4 },
+          "targets": [
+            { "expr": "sum(node_total_hourly_cost)" }
           ]
         },
         {
@@ -52,10 +64,10 @@ spec:
           "title": "Modeled cost / hour by product",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 4 }, "overrides": [] },
-          "gridPos": { "h": 8, "w": 8, "x": 8, "y": 4 },
+          "gridPos": { "h": 8, "w": 6, "x": 12, "y": 4 },
           "targets": [
             {
-              "expr": "sum by (product) ((container_cpu_allocation{namespace=~\"dev|stage|prod\"} * 0.031611 + container_memory_allocation_bytes{namespace=~\"dev|stage|prod\"} / 1073741824 * 0.004237) * on(namespace,pod) group_left(product) label_replace(kube_pod_labels{label_finops_internal_product!=\"\"}, \"product\", \"$1\", \"label_finops_internal_product\", \"(.*)\"))",
+              "expr": "sum by (product) ((container_cpu_allocation{namespace=~\"dev|stage|prod\"} * on(node) group_left() node_cpu_hourly_cost + container_memory_allocation_bytes{namespace=~\"dev|stage|prod\"} / 1073741824 * on(node) group_left() node_ram_hourly_cost) * on(namespace,pod) group_left(product) label_replace(kube_pod_labels{label_finops_internal_product!=\"\"}, \"product\", \"$1\", \"label_finops_internal_product\", \"(.*)\"))",
               "legendFormat": "{{product}}"
             }
           ]
@@ -66,10 +78,10 @@ spec:
           "title": "Modeled cost / hour by team",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 4 }, "overrides": [] },
-          "gridPos": { "h": 8, "w": 8, "x": 16, "y": 4 },
+          "gridPos": { "h": 8, "w": 6, "x": 18, "y": 4 },
           "targets": [
             {
-              "expr": "sum by (team) ((container_cpu_allocation{namespace=~\"dev|stage|prod\"} * 0.031611 + container_memory_allocation_bytes{namespace=~\"dev|stage|prod\"} / 1073741824 * 0.004237) * on(namespace,pod) group_left(team) label_replace(kube_pod_labels{label_finops_internal_team!=\"\"}, \"team\", \"$1\", \"label_finops_internal_team\", \"(.*)\"))",
+              "expr": "sum by (team) ((container_cpu_allocation{namespace=~\"dev|stage|prod\"} * on(node) group_left() node_cpu_hourly_cost + container_memory_allocation_bytes{namespace=~\"dev|stage|prod\"} / 1073741824 * on(node) group_left() node_ram_hourly_cost) * on(namespace,pod) group_left(team) label_replace(kube_pod_labels{label_finops_internal_team!=\"\"}, \"team\", \"$1\", \"label_finops_internal_team\", \"(.*)\"))",
               "legendFormat": "{{team}}"
             }
           ]
@@ -83,7 +95,7 @@ spec:
           "gridPos": { "h": 8, "w": 24, "x": 0, "y": 12 },
           "targets": [
             {
-              "expr": "sum by (namespace) (container_cpu_allocation{namespace=~\"dev|stage|prod\"} * 0.031611 + container_memory_allocation_bytes{namespace=~\"dev|stage|prod\"} / 1073741824 * 0.004237)",
+              "expr": "sum by (namespace) (container_cpu_allocation{namespace=~\"dev|stage|prod\"} * on(node) group_left() node_cpu_hourly_cost + container_memory_allocation_bytes{namespace=~\"dev|stage|prod\"} / 1073741824 * on(node) group_left() node_ram_hourly_cost)",
               "legendFormat": "{{namespace}}"
             }
           ]
@@ -103,7 +115,25 @@ spec:
           "gridPos": { "h": 8, "w": 24, "x": 0, "y": 21 },
           "targets": [
             {
-              "expr": "sum by (namespace, pod) (container_cpu_allocation{namespace=~\"dev|stage|prod\"} * 0.031611 + container_memory_allocation_bytes{namespace=~\"dev|stage|prod\"} / 1073741824 * 0.004237)",
+              "expr": "sum by (namespace, pod) (container_cpu_allocation{namespace=~\"dev|stage|prod\"} * on(node) group_left() node_cpu_hourly_cost + container_memory_allocation_bytes{namespace=~\"dev|stage|prod\"} / 1073741824 * on(node) group_left() node_ram_hourly_cost)",
+              "format": "table",
+              "instant": true
+            }
+          ],
+          "transformations": [
+            { "id": "organize", "options": { "excludeByName": { "Time": true } } }
+          ]
+        },
+        {
+          "id": 12,
+          "type": "table",
+          "title": "Persistent volume cost / hour",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 6 }, "overrides": [] },
+          "gridPos": { "h": 6, "w": 24, "x": 0, "y": 29 },
+          "targets": [
+            {
+              "expr": "pv_hourly_cost",
               "format": "table",
               "instant": true
             }
@@ -116,13 +146,13 @@ spec:
           "id": 9,
           "type": "row",
           "title": "Unit economics",
-          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 29 }
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 35 }
         },
         {
           "id": 10,
           "type": "text",
           "title": "Cost per 1M requests",
-          "gridPos": { "h": 5, "w": 24, "x": 0, "y": 30 },
+          "gridPos": { "h": 5, "w": 24, "x": 0, "y": 36 },
           "options": {
             "mode": "markdown",
             "content": "`cost_per_1m_requests = (modeled_cost / request_count) * 1000000` cannot be computed yet: `checkout` and `analytics` are still uninstrumented `hashicorp/http-echo` placeholders that expose no request-count metric. Once they are replaced with instrumented apps (README \"Remaining work\"), add a request-rate panel here and divide the modeled cost panels above by it."
