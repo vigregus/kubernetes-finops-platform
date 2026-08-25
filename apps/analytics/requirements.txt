@@ -2,3 +2,5 @@ flask==3.0.3
 prometheus-client==0.20.0
 opentelemetry-sdk==1.25.0
 opentelemetry-exporter-otlp-proto-http==1.25.0
+redis==5.0.8
+confluent-kafka==2.15.0
