@@ -11,8 +11,16 @@ spec:
   # https://github.com/cloudnative-pg/grafana-dashboards (charts/cluster/grafana-dashboard.json)
   # - only the datasource input is remapped, no hand-rolled panels.
   datasources:
+    # datasourceName is substituted literally into the JSON wherever
+    # ${inputName} appears - this dashboard uses the object-style
+    # {"type": "prometheus", "uid": "${DS_PROMETHEUS}"} references, so
+    # this has to be the datasource's *uid* (victoriametrics), not its
+    # display name (VictoriaMetrics) - the latter silently resolves to
+    # no datasource at all and blanks every panel + template variable.
     - inputName: "DS_PROMETHEUS"
-      datasourceName: "VictoriaMetrics"
+      datasourceName: "victoriametrics"
+    - inputName: "DS_EXPRESSION"
+      datasourceName: "__expr__"
   json: |
     {
       "__inputs": [

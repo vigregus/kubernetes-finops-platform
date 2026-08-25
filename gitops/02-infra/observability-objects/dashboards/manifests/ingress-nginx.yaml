@@ -11,8 +11,10 @@ spec:
   # https://github.com/kubernetes/ingress-nginx (deploy/grafana/dashboards/nginx.json)
   # - the project's own official ingress-nginx dashboard.
   datasources:
+    # See postgres.yaml for why this has to be the datasource uid
+    # (victoriametrics), not its display name.
     - inputName: "DS_PROMETHEUS"
-      datasourceName: "VictoriaMetrics"
+      datasourceName: "victoriametrics"
   json: |
     {
       "__inputs": [
