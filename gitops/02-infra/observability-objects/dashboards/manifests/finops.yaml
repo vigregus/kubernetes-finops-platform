@@ -150,13 +150,18 @@ spec:
         },
         {
           "id": 10,
-          "type": "text",
-          "title": "Cost per 1M requests",
-          "gridPos": { "h": 5, "w": 24, "x": 0, "y": 36 },
-          "options": {
-            "mode": "markdown",
-            "content": "`cost_per_1m_requests = (modeled_cost / request_count) * 1000000` cannot be computed yet: `checkout` and `analytics` are still uninstrumented `hashicorp/http-echo` placeholders that expose no request-count metric. Once they are replaced with instrumented apps (README \"Remaining work\"), add a request-rate panel here and divide the modeled cost panels above by it."
-          }
+          "type": "timeseries",
+          "title": "Cost per 1M requests by workload",
+          "description": "modeled_cost / request_rate * 1e6 - checkout/analytics expose http_requests_total (see apps/checkout, apps/analytics), so this divides each workload's modeled cost/hour by its own request rate.",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 4 }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 36 },
+          "targets": [
+            {
+              "expr": "sum by (job) ((container_cpu_allocation{namespace=~\"dev|stage|prod\"} * on(node) group_left() node_cpu_hourly_cost + container_memory_allocation_bytes{namespace=~\"dev|stage|prod\"} / 1073741824 * on(node) group_left() node_ram_hourly_cost) * on(namespace,pod) group_left(job) label_replace(kube_pod_labels{label_app_kubernetes_io_name=~\"checkout|analytics\"}, \"job\", \"$1\", \"label_app_kubernetes_io_name\", \"(.*)\")) / (sum by (job) (rate(http_requests_total[5m])) * 3600 > 0) * 1000000",
+              "legendFormat": "{{job}}"
+            }
+          ]
         }
       ]
     }
