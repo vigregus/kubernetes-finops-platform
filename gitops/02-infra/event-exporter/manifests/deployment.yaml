@@ -41,6 +41,12 @@ data:
   config.yaml: |
     logLevel: info
     logFormat: json
+    # Without this the exporter tries to enrich every event by reading
+    # the involved object itself (pod, deployment, ...) - which needs
+    # read RBAC on every resource kind that can emit an event, not just
+    # "events". None of our routing rules match on the involved object's
+    # labels, so there's nothing to enrich for.
+    omitLookup: true
     receivers:
       # One JSON line per event on stdout - Promtail already ships every
       # pod's stdout (see gitops/02-infra/observability-objects/
