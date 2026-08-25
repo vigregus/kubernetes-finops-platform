@@ -1,4 +1,4 @@
-apiVersion: kafka.strimzi.io/v1beta2
+apiVersion: kafka.strimzi.io/v1
 kind: KafkaNodePool
 metadata:
   name: dual-role
@@ -17,7 +17,7 @@ spec:
   storage:
     type: ephemeral
 ---
-apiVersion: kafka.strimzi.io/v1beta2
+apiVersion: kafka.strimzi.io/v1
 kind: Kafka
 metadata:
   name: orders-kafka
@@ -48,7 +48,7 @@ spec:
 # otherwise stage checkout's traffic would be consumed by prod analytics
 # and vice versa. The cluster itself stays shared (realistic multi-tenant
 # Kafka pattern); isolation is at the topic level.
-apiVersion: kafka.strimzi.io/v1beta2
+apiVersion: kafka.strimzi.io/v1
 kind: KafkaTopic
 metadata:
   name: orders-prod
@@ -68,7 +68,7 @@ spec:
   partitions: 3
   replicas: 1
 ---
-apiVersion: kafka.strimzi.io/v1beta2
+apiVersion: kafka.strimzi.io/v1
 kind: KafkaTopic
 metadata:
   name: orders-stage
