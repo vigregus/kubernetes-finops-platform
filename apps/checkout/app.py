@@ -138,7 +138,12 @@ def validate_payment():
 @app.route("/checkout", methods=["GET"])
 def checkout():
     start = time.perf_counter()
-    ctx = propagate.extract(dict(request.headers))
+    # Werkzeug reconstructs header names title-cased ("Traceparent"), but
+    # the W3C propagator's default getter does a case-sensitive lookup for
+    # the literal lowercase "traceparent" - without lowering the keys this
+    # silently finds nothing and always starts a new root span instead of
+    # continuing whatever called us (e.g. ingress-nginx).
+    ctx = propagate.extract({k.lower(): v for k, v in request.headers.items()})
     with tracer.start_as_current_span("checkout.process", context=ctx, kind=SpanKind.SERVER) as span:
         idempotency_key = f"checkout:idem:{request.args.get('key', uuid.uuid4().hex)}"
         cached_order_id = cache_lookup(idempotency_key)

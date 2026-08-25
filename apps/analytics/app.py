@@ -119,7 +119,10 @@ def consume_loop():
 @app.route("/analytics", methods=["GET"])
 def analytics():
     start = time.perf_counter()
-    ctx = propagate.extract(dict(request.headers))
+    # See apps/checkout/app.py: Werkzeug title-cases header names, which
+    # breaks the propagator's case-sensitive "traceparent" lookup unless
+    # the keys are lowered first.
+    ctx = propagate.extract({k.lower(): v for k, v in request.headers.items()})
     with tracer.start_as_current_span("analytics.query", context=ctx, kind=SpanKind.SERVER) as span:
         processed = None
         if redis_client:
