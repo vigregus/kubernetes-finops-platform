@@ -1,0 +1,111 @@
+# Plain manifests, not the Bitnami Helm chart - Broadcom has been
+# restricting free access to most Bitnami chart/image versions behind a
+# paid tier, which is exactly the kind of dependency that would quietly
+# break this repo for anyone who isn't us. ghcr.io/resmoio is the
+# current (post opsgenie/kubernetes-event-exporter deprecation)
+# upstream, published directly by the project, not repackaged.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: event-exporter
+  namespace: governance-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: event-exporter
+rules:
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "watch", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: event-exporter
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: event-exporter
+subjects:
+  - kind: ServiceAccount
+    name: event-exporter
+    namespace: governance-system
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: event-exporter-config
+  namespace: governance-system
+data:
+  config.yaml: |
+    logLevel: info
+    logFormat: json
+    receivers:
+      # One JSON line per event on stdout - Promtail already ships every
+      # pod's stdout (see gitops/02-infra/observability-objects/
+      # promtail), so this is the only piece missing to get Events (like
+      # Kyverno's PolicyViolation warnings, which otherwise only exist
+      # as an ephemeral ~1h Event and a PolicyReport CRD - neither
+      # queryable in Grafana) into VictoriaLogs. _msg (not "message") is
+      # required - see gitops/02-infra/ingress-nginx/values.yaml for why
+      # VictoriaLogs silently drops lines without it.
+      - name: dump
+        file:
+          path: "/dev/stdout"
+          layout:
+            _msg: "{{ .Message }}"
+            event_type: "{{ .Type }}"
+            reason: "{{ .Reason }}"
+            kind: "{{ .InvolvedObject.Kind }}"
+            name: "{{ .InvolvedObject.Name }}"
+            namespace: "{{ .Namespace }}"
+            count: "{{ .Count }}"
+    route:
+      routes:
+        # Normal events (Scheduled/Pulled/Created/Started, one set per
+        # pod per rollout) would drown out the signal on a cluster this
+        # busy - Warning is where the actual audit/ops value is
+        # (PolicyViolation, BackOff, FailedScheduling, OOMKilled, etc).
+        - drop:
+            - type: "Normal"
+          match:
+            - receiver: "dump"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: event-exporter
+  namespace: governance-system
+  labels:
+    app.kubernetes.io/name: event-exporter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: event-exporter
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: event-exporter
+    spec:
+      serviceAccountName: event-exporter
+      containers:
+        - name: event-exporter
+          image: ghcr.io/resmoio/kubernetes-event-exporter:v1.7.0
+          args:
+            - -conf=/data/config.yaml
+          volumeMounts:
+            - name: config
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+      volumes:
+        - name: config
+          configMap:
+            name: event-exporter-config
