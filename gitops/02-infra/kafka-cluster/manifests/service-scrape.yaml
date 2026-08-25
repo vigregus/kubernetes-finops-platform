@@ -1,5 +1,8 @@
+# Strimzi's kafka-exporter deployment has no Service in front of it
+# (unlike the broker/bootstrap ones) - it's meant to be scraped from the
+# pod directly, so this has to be a VMPodScrape, not VMServiceScrape.
 apiVersion: operator.victoriametrics.com/v1beta1
-kind: VMServiceScrape
+kind: VMPodScrape
 metadata:
   name: orders-kafka-exporter
   namespace: kafka
@@ -7,7 +10,7 @@ spec:
   selector:
     matchLabels:
       strimzi.io/name: orders-kafka-kafka-exporter
-  endpoints:
+  podMetricsEndpoints:
     - port: tcp-prometheus
       path: /metrics
       interval: 15s
