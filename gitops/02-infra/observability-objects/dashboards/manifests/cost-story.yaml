@@ -200,13 +200,28 @@ spec:
           ]
         },
         {
+          "id": 17,
+          "type": "timeseries",
+          "title": "Idle spend over time (paid-for but unused capacity)",
+          "description": "requested_cost - actually_used_cost, cluster-wide, priced at node_cpu_hourly_cost/node_ram_hourly_cost. This is the KPI a FinOps effort should be driving toward zero over time, not a one-off snapshot - a widening gap between requested and used means growing waste regardless of what total spend is doing.",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 4 }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 39 },
+          "targets": [
+            {
+              "expr": "(sum by (node) (container_cpu_allocation{namespace=~\"dev|stage|prod\"}) * on(node) group_left() node_cpu_hourly_cost + sum by (node) (container_memory_allocation_bytes{namespace=~\"dev|stage|prod\"}) / 1073741824 * on(node) group_left() node_ram_hourly_cost) - (sum by (node) (node_namespace_pod_container:container_cpu_usage_seconds_total:sum_irate{namespace=~\"dev|stage|prod\"}) * on(node) group_left() node_cpu_hourly_cost + sum by (node) (node_namespace_pod_container:container_memory_working_set_bytes{namespace=~\"dev|stage|prod\"}) / 1073741824 * on(node) group_left() node_ram_hourly_cost)",
+              "legendFormat": "idle spend / hour"
+            }
+          ]
+        },
+        {
           "id": 13,
           "type": "stat",
           "title": "Rightsizing savings potential (checkout + analytics, requested vs VPA-recommended)",
           "description": "Real VPA recommendations (kube_customresource_vpa_status_recommendation_cpu_cores/memory_bytes, from Goldilocks) vs actual kube_pod_container_resource_requests, both repriced at node_cpu_hourly_cost/node_ram_hourly_cost. This reflects current demo traffic levels, not necessarily a real-world-representative headroom - re-check under sustained realistic load.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 4 }, "overrides": [] },
-          "gridPos": { "h": 6, "w": 12, "x": 0, "y": 39 },
+          "gridPos": { "h": 6, "w": 12, "x": 0, "y": 47 },
           "targets": [
             {
               "expr": "$period * ((sum(kube_pod_container_resource_requests{namespace=~\"prod|stage\", container=~\"checkout|analytics\", resource=\"cpu\"} * on(node) group_left() node_cpu_hourly_cost) + sum(kube_pod_container_resource_requests{namespace=~\"prod|stage\", container=~\"checkout|analytics\", resource=\"memory\"} / 1073741824 * on(node) group_left() node_ram_hourly_cost)) - (sum(kube_customresource_vpa_status_recommendation_cpu_cores{container=~\"checkout|analytics\"}) * (sum(node_cpu_hourly_cost)/count(node_cpu_hourly_cost)) + sum(kube_customresource_vpa_status_recommendation_memory_bytes{container=~\"checkout|analytics\"}) / 1073741824 * (sum(node_ram_hourly_cost)/count(node_ram_hourly_cost))))",
@@ -220,7 +235,7 @@ spec:
           "title": "Requested vs recommended ($period)",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 4 }, "overrides": [] },
-          "gridPos": { "h": 6, "w": 12, "x": 12, "y": 39 },
+          "gridPos": { "h": 6, "w": 12, "x": 12, "y": 47 },
           "targets": [
             {
               "expr": "$period * (sum(kube_pod_container_resource_requests{namespace=~\"prod|stage\", container=~\"checkout|analytics\", resource=\"cpu\"} * on(node) group_left() node_cpu_hourly_cost) + sum(kube_pod_container_resource_requests{namespace=~\"prod|stage\", container=~\"checkout|analytics\", resource=\"memory\"} / 1073741824 * on(node) group_left() node_ram_hourly_cost))",
