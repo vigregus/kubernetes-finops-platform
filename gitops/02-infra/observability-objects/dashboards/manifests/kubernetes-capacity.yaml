@@ -41,7 +41,7 @@ spec:
           "gridPos": { "h": 8, "w": 12, "x": 0, "y": 3 },
           "targets": [
             {
-              "expr": "vpa_status_recommendation_cpu_cores{namespace=~\"dev|stage|prod\"}",
+              "expr": "kube_customresource_vpa_status_recommendation_cpu_cores{namespace=~\"dev|stage|prod\"}",
               "format": "table",
               "instant": true,
               "legendFormat": "recommended"
@@ -66,7 +66,7 @@ spec:
           "gridPos": { "h": 8, "w": 12, "x": 12, "y": 3 },
           "targets": [
             {
-              "expr": "vpa_status_recommendation_memory_bytes{namespace=~\"dev|stage|prod\"}",
+              "expr": "kube_customresource_vpa_status_recommendation_memory_bytes{namespace=~\"dev|stage|prod\"}",
               "format": "table",
               "instant": true,
               "legendFormat": "recommended"
