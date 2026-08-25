@@ -1,0 +1,19 @@
+controller:
+  # LoadBalancer would need `minikube tunnel` running in the background -
+  # NodePort keeps this reproducible with just `kubectl`/Argo CD, no extra
+  # standing process. Reach it via `minikube service -n ingress-nginx
+  # ingress-nginx-controller --url` or `kubectl port-forward`.
+  service:
+    type: NodePort
+  config:
+    # ingress-nginx bundles the nginx OpenTelemetry module - this makes it
+    # the actual trace origin for anything hitting it without an existing
+    # traceparent header (e.g. k6), and forwards/continues one for anything
+    # that already has it. See apps/checkout and apps/analytics: both
+    # extract() the incoming context instead of always starting a new root
+    # span, so this is picked up automatically once wired.
+    enable-opentelemetry: "true"
+    opentelemetry-trust-incoming-span: "true"
+    otlp-collector-host: "tempo-local.observability.svc.cluster.local"
+    otlp-collector-port: "4317"
+    otel-service-name: "ingress-nginx"
