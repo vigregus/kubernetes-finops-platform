@@ -116,6 +116,12 @@ kafka_producer = (
 )
 
 
+
+# Always present after init_db() - gives /checkout/lookup a real row to
+# find without depending on request ordering or cross-request state.
+SEED_ORDER_ID = "00000000-0000-0000-0000-000000000001"
+
+
 def init_db():
     if not DATABASE_URL:
         return
@@ -129,6 +135,10 @@ def init_db():
                     status TEXT NOT NULL
                 )
                 """
+            )
+            cur.execute(
+                "INSERT INTO orders (id, status) VALUES (%s, %s) ON CONFLICT (id) DO NOTHING",
+                (SEED_ORDER_ID, "placed"),
             )
         conn.commit()
 
@@ -190,6 +200,61 @@ def persist_order(order_id, span_ctx_for_sql):
             raise
         log_json(span, _msg="postgres INSERT", table="orders", order_id=order_id)
     DB_LATENCY.observe(time.perf_counter() - start)
+
+
+def lookup_order(order_id_str, span_ctx_for_sql, slow=False):
+    # A real read path, not just the write path persist_order covers -
+    # three genuinely distinct outcomes, not simulated with a coin flip:
+    # (1) found - a real row comes back, (2) valid UUID but no such row -
+    # a real empty result, not an error, (3) not a UUID at all - Postgres
+    # itself rejects the value (invalid input syntax for type uuid), a
+    # real driver-level exception, not an app-level check we chose to add.
+    if not DATABASE_URL:
+        return None
+    start = time.perf_counter()
+    with tracer.start_as_current_span("checkout.lookup_order") as span:
+        sql = f"/* trace_id={span_ctx_for_sql} */ SELECT id, status, created_at FROM orders WHERE id = %s"
+        span.set_attribute("db.system", "postgresql")
+        span.set_attribute("db.name", DATABASE_NAME)
+        span.set_attribute("db.operation", "SELECT")
+        span.set_attribute("db.sql.table", "orders")
+        span.set_attribute("db.statement", sql)
+        try:
+            with psycopg2.connect(DATABASE_URL) as conn:
+                with conn.cursor() as cur:
+                    if slow:
+                        # Deliberately crosses Postgres's own 200ms
+                        # log_min_duration_statement threshold (see
+                        # charts/app1/templates/postgres.yaml) so a real
+                        # slow-query log line - not just a fast SELECT -
+                        # shows up on the Postgres side too, distinct
+                        # from the always-logged writes.
+                        cur.execute(f"/* trace_id={span_ctx_for_sql} */ SELECT pg_sleep(0.25)")
+                    cur.execute(sql, (order_id_str,))
+                    row = cur.fetchone()
+        except Exception as e:
+            span.record_exception(e)
+            span.set_status(Status(StatusCode.ERROR, str(e)))
+            log_json(
+                span,
+                level="error",
+                _msg="postgres SELECT failed",
+                table="orders",
+                order_id=order_id_str,
+                error_type=type(e).__name__,
+                error=str(e),
+            )
+            DB_LATENCY.observe(time.perf_counter() - start)
+            raise
+
+        if row is None:
+            span.set_attribute("db.rows_returned", 0)
+            log_json(span, level="warning", _msg="postgres SELECT no rows", table="orders", order_id=order_id_str)
+        else:
+            span.set_attribute("db.rows_returned", 1)
+            log_json(span, _msg="postgres SELECT", table="orders", order_id=order_id_str, status=row[1])
+    DB_LATENCY.observe(time.perf_counter() - start)
+    return row
 
 
 def publish_order_event(order_id):
@@ -309,6 +374,61 @@ def checkout():
     if status == 500:
         return Response("checkout failed\n", status=500)
     return Response(f"checkout ok order_id={order_id}\n", status=200)
+
+
+@app.route("/checkout/lookup", methods=["GET"])
+def checkout_lookup():
+    start = time.perf_counter()
+    ctx = propagate.extract({k.lower(): v for k, v in request.headers.items()})
+    order_id_str = request.args.get("id", SEED_ORDER_ID)
+    slow = request.args.get("slow") == "1"
+    with tracer.start_as_current_span(
+        "checkout.lookup_order_request", context=ctx, kind=SpanKind.SERVER
+    ) as span:
+        span.set_attribute("http.method", "GET")
+        span.set_attribute("http.route", "/checkout/lookup")
+        span.set_attribute("http.target", request.path)
+        span.set_attribute("http.scheme", request.scheme)
+        trace_id_hex = format(span.get_span_context().trace_id, "032x")
+
+        row = None
+        try:
+            row = lookup_order(order_id_str, trace_id_hex, slow=slow)
+            status = 200 if row is not None else 404
+        except Exception as e:
+            status = 400
+            span.record_exception(e)
+            span.set_status(Status(StatusCode.ERROR, str(e)))
+            log_json(
+                span,
+                level="error",
+                _msg="checkout lookup failed",
+                path="/checkout/lookup",
+                order_id=order_id_str,
+                error_type=type(e).__name__,
+                error=str(e),
+            )
+
+        span.set_attribute("http.status_code", status)
+
+    REQUEST_LATENCY.labels(method="GET", path="/checkout/lookup").observe(time.perf_counter() - start)
+    REQUEST_COUNT.labels(method="GET", path="/checkout/lookup", status=str(status)).inc()
+
+    log_json(
+        span,
+        level="error" if status == 400 else ("warning" if status == 404 else "info"),
+        msg="checkout lookup request handled",
+        path="/checkout/lookup",
+        order_id=order_id_str,
+        status=status,
+        duration_ms=round((time.perf_counter() - start) * 1000, 2),
+    )
+
+    if status == 400:
+        return Response(f"invalid order id: {order_id_str}\n", status=400)
+    if status == 404:
+        return Response(f"order not found: {order_id_str}\n", status=404)
+    return Response(f"order {row[0]} status={row[1]} created_at={row[2]}\n", status=200)
 
 
 @app.route("/metrics")
