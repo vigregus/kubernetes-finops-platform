@@ -34,11 +34,34 @@ spec:
           }
         },
         {
+          "id": 7,
+          "type": "timeseries",
+          "title": "Warning events over time: PolicyViolation vs everything else",
+          "description": "queryType: hits - VictoriaLogs' dedicated count-over-time endpoint (/select/logsql/hits), not a raw log query - see gitops/02-infra/observability-objects/dashboards for why a plain `stats` LogsQL query doesn't render as a real timeseries through this datasource.",
+          "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+          "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 4 },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "job:\"governance-system/event-exporter\" AND reason:\"PolicyViolation\"",
+              "queryType": "hits",
+              "legendFormat": "PolicyViolation"
+            },
+            {
+              "refId": "B",
+              "expr": "job:\"governance-system/event-exporter\" AND NOT reason:\"PolicyViolation\"",
+              "queryType": "hits",
+              "legendFormat": "other Warning reasons"
+            }
+          ]
+        },
+        {
           "id": 3,
           "type": "logs",
           "title": "Recent PolicyViolation events",
           "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
-          "gridPos": { "h": 10, "w": 24, "x": 0, "y": 4 },
+          "gridPos": { "h": 10, "w": 24, "x": 0, "y": 12 },
           "targets": [
             {
               "expr": "job:\"governance-system/event-exporter\" AND reason:\"PolicyViolation\""
@@ -49,13 +72,13 @@ spec:
           "id": 4,
           "type": "row",
           "title": "All other Warning events",
-          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 }
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 22 }
         },
         {
           "id": 5,
           "type": "text",
           "title": "What this shows",
-          "gridPos": { "h": 2, "w": 24, "x": 0, "y": 15 },
+          "gridPos": { "h": 2, "w": 24, "x": 0, "y": 23 },
           "options": {
             "mode": "markdown",
             "content": "Every Kubernetes Warning event cluster-wide, not just Kyverno's - BackOff, FailedScheduling, OOMKilled, FailedMount, and so on. Normal events (Scheduled/Pulled/Created/Started) are dropped before they ever reach this stack - see gitops/02-infra/event-exporter."
@@ -66,7 +89,7 @@ spec:
           "type": "logs",
           "title": "Recent Warning events (all reasons)",
           "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
-          "gridPos": { "h": 12, "w": 24, "x": 0, "y": 17 },
+          "gridPos": { "h": 12, "w": 24, "x": 0, "y": 25 },
           "targets": [
             {
               "expr": "job:\"governance-system/event-exporter\""
