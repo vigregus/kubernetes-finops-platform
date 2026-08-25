@@ -22,7 +22,8 @@ spec:
         filterBySpanID: false
         customQuery: true
         # apps/checkout and apps/analytics print a JSON line with trace_id
-        # on every request (see app.py) - full-text search for it against
-        # _msg is what actually ties a span back to its log lines, since
-        # promtail ships raw text, not a structured trace_id field.
-        query: '_time:5m "${__trace.traceId}"'
+        # on every request (see app.py). VictoriaLogs auto-parses JSON log
+        # lines and promotes trace_id to a real field (confirmed via
+        # `trace_id:"<id>"` matching entries from both services), so this
+        # queries the field directly rather than full-text searching _msg.
+        query: '_time:5m trace_id:"${__trace.traceId}"'
