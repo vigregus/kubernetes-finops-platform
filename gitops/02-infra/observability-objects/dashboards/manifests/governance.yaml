@@ -1,0 +1,77 @@
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: governance
+  namespace: observability
+spec:
+  instanceSelector:
+    matchLabels:
+      dashboards: "grafana-local"
+  json: |
+    {
+      "title": "Governance & Policy Audit",
+      "description": "Kubernetes Warning events (Kyverno PolicyViolation and everything else - BackOff, FailedScheduling, OOMKilled) shipped by gitops/02-infra/event-exporter. Normal events are dropped at source - see that app's config for why.",
+      "tags": ["governance", "kyverno", "audit"],
+      "schemaVersion": 39,
+      "version": 1,
+      "editable": true,
+      "time": { "from": "now-6h", "to": "now" },
+      "panels": [
+        {
+          "id": 1,
+          "type": "row",
+          "title": "Kyverno policy violations",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+        },
+        {
+          "id": 2,
+          "type": "text",
+          "title": "What this shows",
+          "gridPos": { "h": 3, "w": 24, "x": 0, "y": 1 },
+          "options": {
+            "mode": "markdown",
+            "content": "Every resource create/update Kyverno's `require-finops-labels` ClusterPolicy (charts/kyverno-policies) evaluated as failing required FinOps ownership labels - currently in Audit mode, so nothing here is blocked, only recorded. Workloads missing labels here are either genuinely missing ownership metadata, or platform/infra components deliberately out of the FinOps ownership model (see README \"Labels and Tags\")."
+          }
+        },
+        {
+          "id": 3,
+          "type": "logs",
+          "title": "Recent PolicyViolation events",
+          "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+          "gridPos": { "h": 10, "w": 24, "x": 0, "y": 4 },
+          "targets": [
+            {
+              "expr": "job:\"governance-system/event-exporter\" AND reason:\"PolicyViolation\""
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "type": "row",
+          "title": "All other Warning events",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 }
+        },
+        {
+          "id": 5,
+          "type": "text",
+          "title": "What this shows",
+          "gridPos": { "h": 2, "w": 24, "x": 0, "y": 15 },
+          "options": {
+            "mode": "markdown",
+            "content": "Every Kubernetes Warning event cluster-wide, not just Kyverno's - BackOff, FailedScheduling, OOMKilled, FailedMount, and so on. Normal events (Scheduled/Pulled/Created/Started) are dropped before they ever reach this stack - see gitops/02-infra/event-exporter."
+          }
+        },
+        {
+          "id": 6,
+          "type": "logs",
+          "title": "Recent Warning events (all reasons)",
+          "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+          "gridPos": { "h": 12, "w": 24, "x": 0, "y": 17 },
+          "targets": [
+            {
+              "expr": "job:\"governance-system/event-exporter\""
+            }
+          ]
+        }
+      ]
+    }
