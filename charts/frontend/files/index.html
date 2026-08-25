@@ -49,6 +49,23 @@
     <div id="analytics-result" class="result" style="display:none"></div>
   </div>
 
+  <div class="card">
+    <h2>Order summary (fan-out: one action, two backends, one trace)</h2>
+    <p class="sub" style="margin-bottom:0.75rem">The button below calls /checkout/lookup and /analytics as two parallel requests belonging to the *same* trace_id, with the same parent span - unlike the buttons above, where every click is its own independent trace.</p>
+    <button onclick="loadSummary()">Load summary</button>
+    <div id="summary-trace" class="result" style="display:none"></div>
+    <div style="display:flex; gap:0.75rem; margin-top:0.5rem">
+      <div style="flex:1">
+        <div style="color:#9aa0a6; font-size:0.75rem; margin-bottom:0.25rem">lookup</div>
+        <div id="summary-lookup-result" class="result" style="display:none"></div>
+      </div>
+      <div style="flex:1">
+        <div style="color:#9aa0a6; font-size:0.75rem; margin-bottom:0.25rem">analytics</div>
+        <div id="summary-analytics-result" class="result" style="display:none"></div>
+      </div>
+    </div>
+  </div>
+
 <script>
 // No OpenTelemetry Web SDK here on purpose - pulling it in from a CDN
 // means trusting several packages' internal @opentelemetry/api instances
@@ -71,9 +88,17 @@ function newTraceparent() {
   return { traceId, spanId, header: `00-${traceId}-${spanId}-01` };
 }
 
-async function call(path, resultId) {
+async function call(path, resultId, shared) {
   const el = document.getElementById(resultId);
-  const { traceId, header } = newTraceparent();
+  // Reusing one traceparent (trace_id *and* parent span_id) across
+  // several fetch calls is what makes them siblings in the same trace -
+  // each receiving server treats the header's span_id as its own
+  // parent, so two calls sent with the identical header become two
+  // children of the same parent span, not two separate traces. See
+  // loadSummary() below for the fan-out case; every other button still
+  // calls this with no `shared` arg, so it gets its own fresh trace -
+  // correct for an independent user action, not a bug.
+  const { traceId, header } = shared || newTraceparent();
   el.style.display = "block";
   el.className = "result";
   el.textContent = "requesting...";
@@ -90,6 +115,18 @@ async function call(path, resultId) {
     el.className = "result err";
     el.textContent = "request failed: " + e;
   }
+}
+
+async function loadSummary() {
+  const traceEl = document.getElementById("summary-trace");
+  const action = newTraceparent();
+  traceEl.style.display = "block";
+  traceEl.className = "result";
+  traceEl.innerHTML = `<span class="trace-id">shared trace_id: ${action.traceId}</span>`;
+  await Promise.all([
+    call("/checkout/lookup?id=00000000-0000-0000-0000-000000000001", "summary-lookup-result", action),
+    call("/analytics", "summary-analytics-result", action),
+  ]);
 }
 
 function escapeHtml(s) {
