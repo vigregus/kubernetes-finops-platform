@@ -241,6 +241,8 @@ Two sample workloads are included to keep the platform concrete:
 - `checkout`
 - `analytics`
 
+Both run in `stage` and `prod` (`gitops/04-business-app/app1`+`app1-stage` for checkout, `app2`+`app2-prod` for analytics), so environment-split cost/capacity comparisons have real data on both sides. `dev` intentionally stays empty in Local v1 - nothing in the roadmap depends on a third copy of the same placeholder workload.
+
 They should be intentionally simple but instrumented enough to expose:
 
 - request volume,
@@ -420,7 +422,6 @@ This is still a scaffold, not a completed runtime stack, but the following are n
 Remaining work before Definition of Done for Local v1:
 
 - verify chart-specific values keys for `victoria-logs-single` and `tempo` against `helm show values` (they were set from best-effort defaults, not a live cluster),
-- decide whether `checkout` and `analytics` should each get `dev`/`stage`/`prod` overlays, or intentionally stay one-namespace-per-app for Local v1 (currently `checkout` only runs in `prod` and `analytics` only in `stage`),
 - replace the `hashicorp/http-echo` placeholder containers with instrumented apps that expose request/latency/error metrics and OTLP traces,
 - build the real dashboard panels (the three `GrafanaDashboard` resources currently hold placeholder JSON),
 - wire the `finops-metric-formulas` ConfigMap's `cost_per_1m_requests` formula into an actual Grafana/OpenCost query.

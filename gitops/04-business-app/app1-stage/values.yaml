@@ -1,0 +1,21 @@
+name: checkout
+namespace: stage
+labels:
+  app.kubernetes.io/name: checkout
+  app.kubernetes.io/component: api
+  finops.internal/product: commerce
+  finops.internal/team: payments
+  finops.internal/environment: stage
+  finops.internal/component: application
+replicas: 1
+image: hashicorp/http-echo:1.0.0
+text: checkout
+containerPort: 5678
+servicePort: 80
+resources:
+  requests:
+    cpu: 150m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
