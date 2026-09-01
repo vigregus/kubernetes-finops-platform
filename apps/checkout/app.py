@@ -17,7 +17,8 @@ from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.trace import SpanKind, Status, StatusCode
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
+from prometheus_client import Counter, Histogram
+from prometheus_client.openmetrics.exposition import CONTENT_TYPE_LATEST, generate_latest
 
 SERVICE_NAME = os.environ.get("OTEL_SERVICE_NAME", "checkout")
 SERVICE_VERSION = os.environ.get("SERVICE_VERSION", "0.1.0")
@@ -358,7 +359,15 @@ def checkout():
 
         span.set_attribute("http.status_code", status)
 
-    REQUEST_LATENCY.labels(method="GET", path="/checkout").observe(time.perf_counter() - start)
+    # exemplar: OpenMetrics lets a histogram observation carry one sample
+    # (trace_id here) alongside the value it fell into that bucket - each
+    # bucket keeps whichever exemplar was freshest as of the last scrape.
+    # That's what lets Grafana show a *different*, actually representative
+    # trace for the p50 point vs the p99 point on the same graph, instead
+    # of only being able to jump to "some trace from this time range."
+    REQUEST_LATENCY.labels(method="GET", path="/checkout").observe(
+        time.perf_counter() - start, exemplar={"trace_id": trace_id_hex}
+    )
     REQUEST_COUNT.labels(method="GET", path="/checkout", status=str(status)).inc()
 
     log_json(
@@ -411,7 +420,9 @@ def checkout_lookup():
 
         span.set_attribute("http.status_code", status)
 
-    REQUEST_LATENCY.labels(method="GET", path="/checkout/lookup").observe(time.perf_counter() - start)
+    REQUEST_LATENCY.labels(method="GET", path="/checkout/lookup").observe(
+        time.perf_counter() - start, exemplar={"trace_id": trace_id_hex}
+    )
     REQUEST_COUNT.labels(method="GET", path="/checkout/lookup", status=str(status)).inc()
 
     log_json(
