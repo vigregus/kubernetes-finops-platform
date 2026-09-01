@@ -16,7 +16,8 @@ from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.trace import SpanKind, Status, StatusCode
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
+from prometheus_client import Counter, Histogram
+from prometheus_client.openmetrics.exposition import CONTENT_TYPE_LATEST, generate_latest
 
 SERVICE_NAME = os.environ.get("OTEL_SERVICE_NAME", "analytics")
 SERVICE_VERSION = os.environ.get("SERVICE_VERSION", "0.1.0")
@@ -215,6 +216,7 @@ def analytics():
         span.set_attribute("http.route", "/analytics")
         span.set_attribute("http.target", request.path)
         span.set_attribute("http.scheme", request.scheme)
+        trace_id_hex = format(span.get_span_context().trace_id, "032x")
 
         processed = None
         try:
@@ -249,7 +251,12 @@ def analytics():
 
         span.set_attribute("http.status_code", status)
 
-    REQUEST_LATENCY.labels(method="GET", path="/analytics").observe(time.perf_counter() - start)
+    # exemplar: see apps/checkout/app.py for why this is what lets Grafana
+    # show a different, representative trace per percentile point (p50 vs
+    # p99) instead of only "some trace from this time range."
+    REQUEST_LATENCY.labels(method="GET", path="/analytics").observe(
+        time.perf_counter() - start, exemplar={"trace_id": trace_id_hex}
+    )
     REQUEST_COUNT.labels(method="GET", path="/analytics", status=str(status)).inc()
 
     log_json(
