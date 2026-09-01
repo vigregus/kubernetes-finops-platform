@@ -16,7 +16,7 @@ from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.trace import SpanKind, Status, StatusCode
-from prometheus_client import Counter, Histogram
+from prometheus_client import REGISTRY, Counter, Histogram
 from prometheus_client.openmetrics.exposition import CONTENT_TYPE_LATEST, generate_latest
 
 SERVICE_NAME = os.environ.get("OTEL_SERVICE_NAME", "analytics")
@@ -276,7 +276,7 @@ def analytics():
 
 @app.route("/metrics")
 def metrics():
-    return Response(generate_latest(), mimetype=CONTENT_TYPE_LATEST)
+    return Response(generate_latest(REGISTRY), mimetype=CONTENT_TYPE_LATEST)
 
 
 @app.route("/healthz")
