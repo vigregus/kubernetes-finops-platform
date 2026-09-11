@@ -79,28 +79,30 @@ spec:
           "type": "timeseries",
           "title": "Request rate by workload and status",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+          "fieldConfig": { "defaults": { "unit": "reqps", "links": [{"title":"View logs (+/-5m)","url":"/explore?schemaVersion=1&panes=%7B%22e1w%22%3A%7B%22datasource%22%3A%22victorialogs%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22expr%22%3A%22%7Bnamespace%3D%5C%22${__field.labels.namespace}%5C%22%7D%20app%3A~%5C%22${__field.labels.job}%5C%22%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22${__data.fields.window_start}%22%2C%22to%22%3A%22${__data.fields.window_end}%22%7D%7D%7D&orgId=1","targetBlank":true}] }, "overrides": [] },
           "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
           "targets": [
             {
-              "expr": "sum by (job, status) (rate(http_requests_total{namespace=~\"$namespace\"}[5m]))",
+              "expr": "sum by (job, status, namespace) (rate(http_requests_total{namespace=~\"$namespace\"}[5m]))",
               "legendFormat": "{{job}} {{status}}"
             }
-          ]
+          ],
+          "transformations": [{"id":"calculateField","options":{"mode":"binary","binary":{"left":"Time","operator":"-","right":"300000"},"alias":"window_start","replaceFields":false}},{"id":"calculateField","options":{"mode":"binary","binary":{"left":"Time","operator":"+","right":"300000"},"alias":"window_end","replaceFields":false}}]
         },
         {
           "id": 5,
           "type": "timeseries",
           "title": "Error rate (%) by workload",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "percent", "min": 0 }, "overrides": [] },
+          "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "links": [{"title":"View logs (+/-5m)","url":"/explore?schemaVersion=1&panes=%7B%22e1w%22%3A%7B%22datasource%22%3A%22victorialogs%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22expr%22%3A%22%7Bnamespace%3D%5C%22${__field.labels.namespace}%5C%22%7D%20app%3A~%5C%22${__field.labels.job}%5C%22%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22${__data.fields.window_start}%22%2C%22to%22%3A%22${__data.fields.window_end}%22%7D%7D%7D&orgId=1","targetBlank":true}, {"title":"View traces (+/-5m)","url":"/explore?schemaVersion=1&panes=%7B%22e1w%22%3A%7B%22datasource%22%3A%22tempo%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22queryType%22%3A%22traceql%22%2C%22query%22%3A%22%7Bresource.service.name%3D%5C%22${__field.labels.job}%5C%22%7D%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22${__data.fields.window_start}%22%2C%22to%22%3A%22${__data.fields.window_end}%22%7D%7D%7D&orgId=1","targetBlank":true}] }, "overrides": [] },
           "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
           "targets": [
             {
-              "expr": "100 * sum by (job) (rate(http_requests_total{namespace=~\"$namespace\", status=\"500\"}[5m])) / sum by (job) (rate(http_requests_total{namespace=~\"$namespace\"}[5m]))",
+              "expr": "100 * sum by (job, namespace) (rate(http_requests_total{namespace=~\"$namespace\", status=\"500\"}[5m])) / sum by (job, namespace) (rate(http_requests_total{namespace=~\"$namespace\"}[5m]))",
               "legendFormat": "{{job}}"
             }
-          ]
+          ],
+          "transformations": [{"id":"calculateField","options":{"mode":"binary","binary":{"left":"Time","operator":"-","right":"300000"},"alias":"window_start","replaceFields":false}},{"id":"calculateField","options":{"mode":"binary","binary":{"left":"Time","operator":"+","right":"300000"},"alias":"window_end","replaceFields":false}}]
         },
         {
           "id": 6,
@@ -113,22 +115,23 @@ spec:
           "type": "timeseries",
           "title": "p50 / p95 / p99 latency by workload",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+          "fieldConfig": { "defaults": { "unit": "s", "links": [{"title":"View logs (+/-5m)","url":"/explore?schemaVersion=1&panes=%7B%22e1w%22%3A%7B%22datasource%22%3A%22victorialogs%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22expr%22%3A%22%7Bnamespace%3D%5C%22${__field.labels.namespace}%5C%22%7D%20app%3A~%5C%22${__field.labels.job}%5C%22%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22${__data.fields.window_start}%22%2C%22to%22%3A%22${__data.fields.window_end}%22%7D%7D%7D&orgId=1","targetBlank":true}, {"title":"View traces (+/-5m)","url":"/explore?schemaVersion=1&panes=%7B%22e1w%22%3A%7B%22datasource%22%3A%22tempo%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22queryType%22%3A%22traceql%22%2C%22query%22%3A%22%7Bresource.service.name%3D%5C%22${__field.labels.job}%5C%22%7D%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22${__data.fields.window_start}%22%2C%22to%22%3A%22${__data.fields.window_end}%22%7D%7D%7D&orgId=1","targetBlank":true}] }, "overrides": [] },
           "gridPos": { "h": 8, "w": 24, "x": 0, "y": 17 },
           "targets": [
             {
-              "expr": "histogram_quantile(0.5, sum by (job, le) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])))",
+              "expr": "histogram_quantile(0.5, sum by (job, namespace, le) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])))",
               "legendFormat": "{{job}} p50"
             },
             {
-              "expr": "histogram_quantile(0.95, sum by (job, le) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])))",
+              "expr": "histogram_quantile(0.95, sum by (job, namespace, le) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])))",
               "legendFormat": "{{job}} p95"
             },
             {
-              "expr": "histogram_quantile(0.99, sum by (job, le) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])))",
+              "expr": "histogram_quantile(0.99, sum by (job, namespace, le) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])))",
               "legendFormat": "{{job}} p99"
             }
-          ]
+          ],
+          "transformations": [{"id":"calculateField","options":{"mode":"binary","binary":{"left":"Time","operator":"-","right":"300000"},"alias":"window_start","replaceFields":false}},{"id":"calculateField","options":{"mode":"binary","binary":{"left":"Time","operator":"+","right":"300000"},"alias":"window_end","replaceFields":false}}]
         },
         {
           "id": 8,
@@ -141,7 +144,7 @@ spec:
           "type": "timeseries",
           "title": "CPU usage vs requested",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "fieldConfig": { "defaults": { "unit": "short", "links": [{"title":"View logs (+/-5m)","url":"/explore?schemaVersion=1&panes=%7B%22e1w%22%3A%7B%22datasource%22%3A%22victorialogs%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22expr%22%3A%22%7Bnamespace%3D%5C%22${__field.labels.namespace}%5C%22%2Cpod%3D~%5C%22${__field.labels.pod}%5C%22%7D%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22${__data.fields.window_start}%22%2C%22to%22%3A%22${__data.fields.window_end}%22%7D%7D%7D&orgId=1","targetBlank":true}] }, "overrides": [] },
           "gridPos": { "h": 8, "w": 12, "x": 0, "y": 26 },
           "targets": [
             {
@@ -152,14 +155,15 @@ spec:
               "expr": "sum by (namespace, pod) (kube_pod_container_resource_requests{namespace=~\"$namespace\", pod=~\"checkout.*|analytics.*\", resource=\"cpu\"})",
               "legendFormat": "{{namespace}}/{{pod}} requested"
             }
-          ]
+          ],
+          "transformations": [{"id":"calculateField","options":{"mode":"binary","binary":{"left":"Time","operator":"-","right":"300000"},"alias":"window_start","replaceFields":false}},{"id":"calculateField","options":{"mode":"binary","binary":{"left":"Time","operator":"+","right":"300000"},"alias":"window_end","replaceFields":false}}]
         },
         {
           "id": 10,
           "type": "timeseries",
           "title": "Memory usage vs requested",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+          "fieldConfig": { "defaults": { "unit": "bytes", "links": [{"title":"View logs (+/-5m)","url":"/explore?schemaVersion=1&panes=%7B%22e1w%22%3A%7B%22datasource%22%3A%22victorialogs%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22expr%22%3A%22%7Bnamespace%3D%5C%22${__field.labels.namespace}%5C%22%2Cpod%3D~%5C%22${__field.labels.pod}%5C%22%7D%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22${__data.fields.window_start}%22%2C%22to%22%3A%22${__data.fields.window_end}%22%7D%7D%7D&orgId=1","targetBlank":true}] }, "overrides": [] },
           "gridPos": { "h": 8, "w": 12, "x": 12, "y": 26 },
           "targets": [
             {
@@ -170,7 +174,8 @@ spec:
               "expr": "sum by (namespace, pod) (kube_pod_container_resource_requests{namespace=~\"$namespace\", pod=~\"checkout.*|analytics.*\", resource=\"memory\"})",
               "legendFormat": "{{namespace}}/{{pod}} requested"
             }
-          ]
+          ],
+          "transformations": [{"id":"calculateField","options":{"mode":"binary","binary":{"left":"Time","operator":"-","right":"300000"},"alias":"window_start","replaceFields":false}},{"id":"calculateField","options":{"mode":"binary","binary":{"left":"Time","operator":"+","right":"300000"},"alias":"window_end","replaceFields":false}}]
         },
         {
           "id": 11,

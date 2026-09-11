@@ -16,3 +16,16 @@ spec:
     type: victoriametrics-logs-datasource
     access: proxy
     url: http://vl-local-victoria-logs-single-server.observability.svc.cluster.local:9428
+    jsonData:
+      # trace_id is a structured field on every log line (see log_json() in
+      # apps/checkout|analytics/app.py) - this is the *second* hop of the
+      # metrics -> logs -> traces chain: a metric panel links to a windowed
+      # log view (see dashboards/manifests/application-overview.yaml), and
+      # from there a specific line with a trace_id jumps into Tempo.
+      derivedFields:
+        - datasourceUid: tempo
+          matcherType: label
+          matcherRegex: trace_id
+          name: trace_id
+          url: "${__value.raw}"
+          urlDisplayLabel: "View trace"
