@@ -9,6 +9,7 @@ spec:
       dashboards: "grafana-local"
   json: |
     {
+      "uid": "cost-story",
       "title": "Cost Story",
       "description": "The headline FinOps narrative: what we spend, where it goes, how efficient it is, and what levers exist to spend less. Built on OpenCost's native cost metrics + real VPA rightsizing recommendations - see each panel's description for exactly what's real vs illustrative reference pricing.",
       "tags": [
@@ -514,9 +515,65 @@ spec:
                 "scaleDistribution": {
                   "type": "linear"
                 }
-              }
+              },
+              "links": [
+                {
+                  "title": "Open Application Overview (+/-5m)",
+                  "url": "/d/application-overview/application-overview?orgId=1&var-namespace=prod&from=${__data.fields.window_start}&to=${__data.fields.window_end}",
+                  "targetBlank": true
+                }
+              ]
             },
-            "overrides": []
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "window_start"
+                },
+                "properties": [
+                  {
+                    "id": "custom.hideFrom",
+                    "value": {
+                      "viz": true,
+                      "legend": true,
+                      "tooltip": true
+                    }
+                  },
+                  {
+                    "id": "unit",
+                    "value": "none"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "window_end"
+                },
+                "properties": [
+                  {
+                    "id": "custom.hideFrom",
+                    "value": {
+                      "viz": true,
+                      "legend": true,
+                      "tooltip": true
+                    }
+                  },
+                  {
+                    "id": "unit",
+                    "value": "none"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
+                  }
+                ]
+              }
+            ]
           },
           "gridPos": {
             "h": 8,
@@ -543,7 +600,35 @@ spec:
               "mode": "multi",
               "sort": "desc"
             }
-          }
+          },
+          "transformations": [
+            {
+              "id": "calculateField",
+              "options": {
+                "mode": "binary",
+                "binary": {
+                  "left": "Time",
+                  "operator": "-",
+                  "right": "300000"
+                },
+                "alias": "window_start",
+                "replaceFields": false
+              }
+            },
+            {
+              "id": "calculateField",
+              "options": {
+                "mode": "binary",
+                "binary": {
+                  "left": "Time",
+                  "operator": "+",
+                  "right": "300000"
+                },
+                "alias": "window_end",
+                "replaceFields": false
+              }
+            }
+          ]
         },
         {
           "id": 17,
