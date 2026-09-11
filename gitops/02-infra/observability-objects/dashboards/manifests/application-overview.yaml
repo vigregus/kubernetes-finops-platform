@@ -9,6 +9,7 @@ spec:
       dashboards: "grafana-local"
   json: |
     {
+      "uid": "application-overview",
       "title": "Application Overview",
       "description": "Traffic, latency, errors, resource usage, and ownership context for checkout/analytics.",
       "tags": [

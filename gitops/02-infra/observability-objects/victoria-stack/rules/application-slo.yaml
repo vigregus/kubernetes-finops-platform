@@ -1,0 +1,50 @@
+# RED-metric SLO alerts for checkout/analytics. The point isn't the
+# threshold - it's that firing an alert is where the metrics -> logs ->
+# traces correlation work (see dashboards/manifests/application-overview.yaml)
+# actually pays off: whoever gets paged should land on the exact +/-window
+# around when it fired, not "here's a metric name, go figure out the rest."
+# $activeAt is vmalert's own alert-fire timestamp (a time.Time), so the
+# window is computed server-side at notification time - same idea as the
+# calculateField trick on the dashboard panels, just done with vmalert's
+# native templating instead of a Grafana transform.
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMRule
+metadata:
+  name: application-slo
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: victoria-metrics-k8s-stack
+spec:
+  groups:
+    - name: application-slo
+      interval: 20s
+      rules:
+        - alert: HighErrorRate
+          expr: |
+            100 * sum by (job, namespace) (rate(http_requests_total{namespace=~"dev|stage|prod", status="500"}[5m]))
+              / sum by (job, namespace) (rate(http_requests_total{namespace=~"dev|stage|prod"}[5m]))
+              > 5
+          for: 5m
+          labels:
+            severity: warning
+            finops.internal/component: application
+          annotations:
+            summary: '{{ $labels.job }}/{{ $labels.namespace }}: error rate {{ $value | printf "%.1f" }}% (>5% for 5m)'
+            description: '{{ $labels.job }} in {{ $labels.namespace }} has returned 5xx on more than 5% of requests for 5 minutes straight. Dashboard, logs and traces below are all scoped to the same +/-window around when this fired.'
+            dashboard_url: 'http://grafana.finops.local/d/application-overview/application-overview?orgId=1&var-namespace={{ $labels.namespace }}&from={{ ($activeAt.Add (parseDurationTime "-15m")).UnixMilli }}&to={{ ($activeAt.Add (parseDurationTime "5m")).UnixMilli }}'
+            logs_url: 'http://grafana.finops.local/explore?schemaVersion=1&panes=%7B%22e1w%22%3A%7B%22datasource%22%3A%22victorialogs%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22expr%22%3A%22%7Bnamespace%3D%5C%22{{ $labels.namespace }}%5C%22%7D%20app%3A~%5C%22{{ $labels.job }}%5C%22%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22{{ ($activeAt.Add (parseDurationTime "-15m")).UnixMilli }}%22%2C%22to%22%3A%22{{ ($activeAt.Add (parseDurationTime "5m")).UnixMilli }}%22%7D%7D%7D&orgId=1'
+            traces_url: 'http://grafana.finops.local/explore?schemaVersion=1&panes=%7B%22e1w%22%3A%7B%22datasource%22%3A%22tempo%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22queryType%22%3A%22traceql%22%2C%22query%22%3A%22%7Bresource.service.name%3D%5C%22{{ $labels.job }}%5C%22%7D%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22{{ ($activeAt.Add (parseDurationTime "-15m")).UnixMilli }}%22%2C%22to%22%3A%22{{ ($activeAt.Add (parseDurationTime "5m")).UnixMilli }}%22%7D%7D%7D&orgId=1'
+        - alert: HighLatencyP99
+          expr: |
+            histogram_quantile(0.99, sum by (job, namespace, le) (rate(http_request_duration_seconds_bucket{namespace=~"dev|stage|prod"}[5m])))
+              > 0.25
+          for: 5m
+          labels:
+            severity: warning
+            finops.internal/component: application
+          annotations:
+            summary: '{{ $labels.job }}/{{ $labels.namespace }}: p99 latency {{ $value | printf "%.3f" }}s (>0.25s for 5m)'
+            description: '{{ $labels.job }} in {{ $labels.namespace }} has had p99 request latency above 250ms for 5 minutes straight. Dashboard, logs and traces below are all scoped to the same +/-window around when this fired.'
+            dashboard_url: 'http://grafana.finops.local/d/application-overview/application-overview?orgId=1&var-namespace={{ $labels.namespace }}&from={{ ($activeAt.Add (parseDurationTime "-15m")).UnixMilli }}&to={{ ($activeAt.Add (parseDurationTime "5m")).UnixMilli }}'
+            logs_url: 'http://grafana.finops.local/explore?schemaVersion=1&panes=%7B%22e1w%22%3A%7B%22datasource%22%3A%22victorialogs%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22expr%22%3A%22%7Bnamespace%3D%5C%22{{ $labels.namespace }}%5C%22%7D%20app%3A~%5C%22{{ $labels.job }}%5C%22%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22{{ ($activeAt.Add (parseDurationTime "-15m")).UnixMilli }}%22%2C%22to%22%3A%22{{ ($activeAt.Add (parseDurationTime "5m")).UnixMilli }}%22%7D%7D%7D&orgId=1'
+            traces_url: 'http://grafana.finops.local/explore?schemaVersion=1&panes=%7B%22e1w%22%3A%7B%22datasource%22%3A%22tempo%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22queryType%22%3A%22traceql%22%2C%22query%22%3A%22%7Bresource.service.name%3D%5C%22{{ $labels.job }}%5C%22%7D%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22{{ ($activeAt.Add (parseDurationTime "-15m")).UnixMilli }}%22%2C%22to%22%3A%22{{ ($activeAt.Add (parseDurationTime "5m")).UnixMilli }}%22%7D%7D%7D&orgId=1'
