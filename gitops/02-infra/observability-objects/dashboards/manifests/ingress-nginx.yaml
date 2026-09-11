@@ -565,9 +565,64 @@ spec:
                   }
                 ]
               },
-              "unit": "reqps"
+              "unit": "reqps",
+              "links": [
+                {
+                  "title": "View logs (+/-5m)",
+                  "url": "/explore?schemaVersion=1&panes=%7B%22e1w%22%3A%7B%22datasource%22%3A%22victorialogs%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22expr%22%3A%22%7Bnamespace%3D%5C%22${__field.labels.exported_namespace}%5C%22%7D%20app%3A~%5C%22${__field.labels.exported_service}%5C%22%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22${__data.fields.window_start}%22%2C%22to%22%3A%22${__data.fields.window_end}%22%7D%7D%7D&orgId=1",
+                  "targetBlank": true
+                }
+              ]
             },
             "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "window_start"
+                },
+                "properties": [
+                  {
+                    "id": "custom.hideFrom",
+                    "value": {
+                      "viz": true,
+                      "legend": true,
+                      "tooltip": true
+                    }
+                  },
+                  {
+                    "id": "unit",
+                    "value": "none"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "window_end"
+                },
+                "properties": [
+                  {
+                    "id": "custom.hideFrom",
+                    "value": {
+                      "viz": true,
+                      "legend": true,
+                      "tooltip": true
+                    }
+                  },
+                  {
+                    "id": "unit",
+                    "value": "none"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
+                  }
+                ]
+              },
               {
                 "matcher": {
                   "id": "byValue",
@@ -619,7 +674,7 @@ spec:
                 "type": "prometheus",
                 "uid": "${DS_PROMETHEUS}"
               },
-              "expr": "round(sum(irate(nginx_ingress_controller_requests{controller_pod=~\"$controller\",controller_class=~\"$controller_class\",controller_namespace=~\"$namespace\",exported_namespace=~\"$exported_namespace\",ingress=~\"$ingress\"}[2m])) by (ingress), 0.001)",
+              "expr": "round(sum(irate(nginx_ingress_controller_requests{controller_pod=~\"$controller\",controller_class=~\"$controller_class\",controller_namespace=~\"$namespace\",exported_namespace=~\"$exported_namespace\",ingress=~\"$ingress\"}[2m])) by (ingress, exported_namespace, cluster), 0.001)",
               "format": "time_series",
               "hide": false,
               "instant": false,
@@ -632,7 +687,35 @@ spec:
             }
           ],
           "title": "Ingress Request Volume",
-          "type": "timeseries"
+          "type": "timeseries",
+          "transformations": [
+            {
+              "id": "calculateField",
+              "options": {
+                "mode": "binary",
+                "binary": {
+                  "left": "Time",
+                  "operator": "-",
+                  "right": "300000"
+                },
+                "alias": "window_start",
+                "replaceFields": false
+              }
+            },
+            {
+              "id": "calculateField",
+              "options": {
+                "mode": "binary",
+                "binary": {
+                  "left": "Time",
+                  "operator": "+",
+                  "right": "300000"
+                },
+                "alias": "window_end",
+                "replaceFields": false
+              }
+            }
+          ]
         },
         {
           "datasource": {
@@ -690,9 +773,69 @@ spec:
                   }
                 ]
               },
-              "unit": "percentunit"
+              "unit": "percentunit",
+              "links": [
+                {
+                  "title": "View logs (+/-5m)",
+                  "url": "/explore?schemaVersion=1&panes=%7B%22e1w%22%3A%7B%22datasource%22%3A%22victorialogs%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22expr%22%3A%22%7Bnamespace%3D%5C%22${__field.labels.exported_namespace}%5C%22%7D%20app%3A~%5C%22${__field.labels.exported_service}%5C%22%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22${__data.fields.window_start}%22%2C%22to%22%3A%22${__data.fields.window_end}%22%7D%7D%7D&orgId=1",
+                  "targetBlank": true
+                },
+                {
+                  "title": "View traces (+/-5m)",
+                  "url": "/explore?schemaVersion=1&panes=%7B%22e1w%22%3A%7B%22datasource%22%3A%22tempo%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22queryType%22%3A%22traceql%22%2C%22query%22%3A%22%7Bresource.service.name%3D%5C%22${__field.labels.exported_service}%5C%22%7D%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22${__data.fields.window_start}%22%2C%22to%22%3A%22${__data.fields.window_end}%22%7D%7D%7D&orgId=1",
+                  "targetBlank": true
+                }
+              ]
             },
             "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "window_start"
+                },
+                "properties": [
+                  {
+                    "id": "custom.hideFrom",
+                    "value": {
+                      "viz": true,
+                      "legend": true,
+                      "tooltip": true
+                    }
+                  },
+                  {
+                    "id": "unit",
+                    "value": "none"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "window_end"
+                },
+                "properties": [
+                  {
+                    "id": "custom.hideFrom",
+                    "value": {
+                      "viz": true,
+                      "legend": true,
+                      "tooltip": true
+                    }
+                  },
+                  {
+                    "id": "unit",
+                    "value": "none"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
+                  }
+                ]
+              },
               {
                 "matcher": {
                   "id": "byName",
@@ -788,7 +931,7 @@ spec:
                 "type": "prometheus",
                 "uid": "${DS_PROMETHEUS}"
               },
-              "expr": "sum(rate(nginx_ingress_controller_requests{controller_pod=~\"$controller\",controller_class=~\"$controller_class\",namespace=~\"$namespace\",exported_namespace=~\"$exported_namespace\",ingress=~\"$ingress\",status!~\"[4-5].*\"}[2m])) by (ingress) / sum(rate(nginx_ingress_controller_requests{controller_pod=~\"$controller\",controller_class=~\"$controller_class\",namespace=~\"$namespace\",exported_namespace=~\"$exported_namespace\",ingress=~\"$ingress\"}[2m])) by (ingress)",
+              "expr": "sum(rate(nginx_ingress_controller_requests{controller_pod=~\"$controller\",controller_class=~\"$controller_class\",namespace=~\"$namespace\",exported_namespace=~\"$exported_namespace\",ingress=~\"$ingress\",status!~\"[4-5].*\"}[2m])) by (ingress, exported_namespace, cluster) / sum(rate(nginx_ingress_controller_requests{controller_pod=~\"$controller\",controller_class=~\"$controller_class\",namespace=~\"$namespace\",exported_namespace=~\"$exported_namespace\",ingress=~\"$ingress\"}[2m])) by (ingress, exported_namespace, cluster)",
               "format": "time_series",
               "instant": false,
               "interval": "10s",
@@ -800,7 +943,35 @@ spec:
             }
           ],
           "title": "Ingress Success Rate (non-4|5xx responses)",
-          "type": "timeseries"
+          "type": "timeseries",
+          "transformations": [
+            {
+              "id": "calculateField",
+              "options": {
+                "mode": "binary",
+                "binary": {
+                  "left": "Time",
+                  "operator": "-",
+                  "right": "300000"
+                },
+                "alias": "window_start",
+                "replaceFields": false
+              }
+            },
+            {
+              "id": "calculateField",
+              "options": {
+                "mode": "binary",
+                "binary": {
+                  "left": "Time",
+                  "operator": "+",
+                  "right": "300000"
+                },
+                "alias": "window_end",
+                "replaceFields": false
+              }
+            }
+          ]
         },
         {
           "datasource": {
@@ -1663,7 +1834,7 @@ spec:
               "color": "rgba(255,0,255,0.7)"
             },
             "filterValues": {
-              "le": 1e-9
+              "le": 1e-09
             },
             "legend": {
               "show": true
@@ -1863,12 +2034,29 @@ spec:
           "type": "timeseries",
           "title": "Requests by status code",
           "description": "The upstream dashboard only ships a Success Rate (% non-4xx/5xx) panel, which hides what's actually failing - this breaks the same data out by status code so 400/404/500/etc are directly visible, not just an aggregate percentage.",
-          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-          "fieldConfig": { "defaults": { "unit": "reqps", "min": 0 }, "overrides": [] },
-          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 39 },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "min": 0
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 39
+          },
           "targets": [
             {
-              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
               "expr": "sum by (status) (rate(nginx_ingress_controller_requests{controller_pod=~\"$controller\",controller_class=~\"$controller_class\",namespace=~\"$namespace\"}[2m]))",
               "legendFormat": "{{status}}"
             }
