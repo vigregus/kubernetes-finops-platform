@@ -150,6 +150,14 @@ spec:
                       "legend": true,
                       "tooltip": true
                     }
+                  },
+                  {
+                    "id": "unit",
+                    "value": "none"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
                   }
                 ]
               },
@@ -166,6 +174,14 @@ spec:
                       "legend": true,
                       "tooltip": true
                     }
+                  },
+                  {
+                    "id": "unit",
+                    "value": "none"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
                   }
                 ]
               }
@@ -251,6 +267,14 @@ spec:
                       "legend": true,
                       "tooltip": true
                     }
+                  },
+                  {
+                    "id": "unit",
+                    "value": "none"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
                   }
                 ]
               },
@@ -267,6 +291,14 @@ spec:
                       "legend": true,
                       "tooltip": true
                     }
+                  },
+                  {
+                    "id": "unit",
+                    "value": "none"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
                   }
                 ]
               }
@@ -362,6 +394,14 @@ spec:
                       "legend": true,
                       "tooltip": true
                     }
+                  },
+                  {
+                    "id": "unit",
+                    "value": "none"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
                   }
                 ]
               },
@@ -378,6 +418,14 @@ spec:
                       "legend": true,
                       "tooltip": true
                     }
+                  },
+                  {
+                    "id": "unit",
+                    "value": "none"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
                   }
                 ]
               }
@@ -476,6 +524,14 @@ spec:
                       "legend": true,
                       "tooltip": true
                     }
+                  },
+                  {
+                    "id": "unit",
+                    "value": "none"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
                   }
                 ]
               },
@@ -492,6 +548,14 @@ spec:
                       "legend": true,
                       "tooltip": true
                     }
+                  },
+                  {
+                    "id": "unit",
+                    "value": "none"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
                   }
                 ]
               }
@@ -575,6 +639,14 @@ spec:
                       "legend": true,
                       "tooltip": true
                     }
+                  },
+                  {
+                    "id": "unit",
+                    "value": "none"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
                   }
                 ]
               },
@@ -591,6 +663,14 @@ spec:
                       "legend": true,
                       "tooltip": true
                     }
+                  },
+                  {
+                    "id": "unit",
+                    "value": "none"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
                   }
                 ]
               }
