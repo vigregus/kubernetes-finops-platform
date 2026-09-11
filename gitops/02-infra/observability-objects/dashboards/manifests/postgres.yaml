@@ -5018,9 +5018,65 @@ spec:
                 ]
               },
               "unit": "short",
-              "unitScale": true
+              "unitScale": true,
+              "links": [
+                {
+                  "title": "View logs (+/-5m)",
+                  "url": "/explore?schemaVersion=1&panes=%7B%22e1w%22%3A%7B%22datasource%22%3A%22victorialogs%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22expr%22%3A%22%7Bnamespace%3D%5C%22${__field.labels.namespace}%5C%22%2Cpod%3D~%5C%22${__field.labels.pod}%5C%22%7D%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22${__data.fields.window_start}%22%2C%22to%22%3A%22${__data.fields.window_end}%22%7D%7D%7D&orgId=1",
+                  "targetBlank": true
+                }
+              ]
             },
-            "overrides": []
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "window_start"
+                },
+                "properties": [
+                  {
+                    "id": "custom.hideFrom",
+                    "value": {
+                      "viz": true,
+                      "legend": true,
+                      "tooltip": true
+                    }
+                  },
+                  {
+                    "id": "unit",
+                    "value": "none"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "window_end"
+                },
+                "properties": [
+                  {
+                    "id": "custom.hideFrom",
+                    "value": {
+                      "viz": true,
+                      "legend": true,
+                      "tooltip": true
+                    }
+                  },
+                  {
+                    "id": "unit",
+                    "value": "none"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
+                  }
+                ]
+              }
+            ]
           },
           "gridPos": {
             "h": 7,
@@ -5050,7 +5106,7 @@ spec:
                 "uid": "${DS_PROMETHEUS}"
               },
               "exemplar": true,
-              "expr": "sum(node_namespace_pod_container:container_cpu_usage_seconds_total:sum_irate{pod=~\"$instances\", namespace=~\"$namespace\"}) by (pod)",
+              "expr": "sum(node_namespace_pod_container:container_cpu_usage_seconds_total:sum_irate{pod=~\"$instances\", namespace=~\"$namespace\"}) by (pod, namespace)",
               "format": "time_series",
               "interval": "",
               "intervalFactor": 2,
@@ -5060,7 +5116,35 @@ spec:
             }
           ],
           "title": "CPU Usage",
-          "type": "timeseries"
+          "type": "timeseries",
+          "transformations": [
+            {
+              "id": "calculateField",
+              "options": {
+                "mode": "binary",
+                "binary": {
+                  "left": "Time",
+                  "operator": "-",
+                  "right": "300000"
+                },
+                "alias": "window_start",
+                "replaceFields": false
+              }
+            },
+            {
+              "id": "calculateField",
+              "options": {
+                "mode": "binary",
+                "binary": {
+                  "left": "Time",
+                  "operator": "+",
+                  "right": "300000"
+                },
+                "alias": "window_end",
+                "replaceFields": false
+              }
+            }
+          ]
         },
         {
           "datasource": {
@@ -5120,9 +5204,64 @@ spec:
                 ]
               },
               "unit": "bytes",
-              "unitScale": true
+              "unitScale": true,
+              "links": [
+                {
+                  "title": "View logs (+/-5m)",
+                  "url": "/explore?schemaVersion=1&panes=%7B%22e1w%22%3A%7B%22datasource%22%3A%22victorialogs%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22expr%22%3A%22%7Bnamespace%3D%5C%22${__field.labels.namespace}%5C%22%2Cpod%3D~%5C%22${__field.labels.pod}%5C%22%7D%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22${__data.fields.window_start}%22%2C%22to%22%3A%22${__data.fields.window_end}%22%7D%7D%7D&orgId=1",
+                  "targetBlank": true
+                }
+              ]
             },
             "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "window_start"
+                },
+                "properties": [
+                  {
+                    "id": "custom.hideFrom",
+                    "value": {
+                      "viz": true,
+                      "legend": true,
+                      "tooltip": true
+                    }
+                  },
+                  {
+                    "id": "unit",
+                    "value": "none"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "window_end"
+                },
+                "properties": [
+                  {
+                    "id": "custom.hideFrom",
+                    "value": {
+                      "viz": true,
+                      "legend": true,
+                      "tooltip": true
+                    }
+                  },
+                  {
+                    "id": "unit",
+                    "value": "none"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
+                  }
+                ]
+              },
               {
                 "matcher": {
                   "id": "byName",
@@ -5233,7 +5372,7 @@ spec:
                 "uid": "${DS_PROMETHEUS}"
               },
               "exemplar": true,
-              "expr": "sum(container_memory_working_set_bytes{pod=~\"$instances\", namespace=\"$namespace\", container!=\"\", image!=\"\"}) by (pod)",
+              "expr": "sum(container_memory_working_set_bytes{pod=~\"$instances\", namespace=\"$namespace\", container!=\"\", image!=\"\"}) by (pod, namespace)",
               "format": "time_series",
               "interval": "",
               "intervalFactor": 2,
@@ -5243,7 +5382,35 @@ spec:
             }
           ],
           "title": "Memory Usage (container memory working set)",
-          "type": "timeseries"
+          "type": "timeseries",
+          "transformations": [
+            {
+              "id": "calculateField",
+              "options": {
+                "mode": "binary",
+                "binary": {
+                  "left": "Time",
+                  "operator": "-",
+                  "right": "300000"
+                },
+                "alias": "window_start",
+                "replaceFields": false
+              }
+            },
+            {
+              "id": "calculateField",
+              "options": {
+                "mode": "binary",
+                "binary": {
+                  "left": "Time",
+                  "operator": "+",
+                  "right": "300000"
+                },
+                "alias": "window_end",
+                "replaceFields": false
+              }
+            }
+          ]
         },
         {
           "datasource": {
@@ -5404,9 +5571,65 @@ spec:
                   }
                 ]
               },
-              "unitScale": true
+              "unitScale": true,
+              "links": [
+                {
+                  "title": "View logs (+/-5m)",
+                  "url": "/explore?schemaVersion=1&panes=%7B%22e1w%22%3A%7B%22datasource%22%3A%22victorialogs%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22expr%22%3A%22%7Bnamespace%3D%5C%22${__field.labels.namespace}%5C%22%2Cpod%3D~%5C%22${__field.labels.pod}%5C%22%7D%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22${__data.fields.window_start}%22%2C%22to%22%3A%22${__data.fields.window_end}%22%7D%7D%7D&orgId=1",
+                  "targetBlank": true
+                }
+              ]
             },
-            "overrides": []
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "window_start"
+                },
+                "properties": [
+                  {
+                    "id": "custom.hideFrom",
+                    "value": {
+                      "viz": true,
+                      "legend": true,
+                      "tooltip": true
+                    }
+                  },
+                  {
+                    "id": "unit",
+                    "value": "none"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "window_end"
+                },
+                "properties": [
+                  {
+                    "id": "custom.hideFrom",
+                    "value": {
+                      "viz": true,
+                      "legend": true,
+                      "tooltip": true
+                    }
+                  },
+                  {
+                    "id": "unit",
+                    "value": "none"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
+                  }
+                ]
+              }
+            ]
           },
           "gridPos": {
             "h": 8,
@@ -5435,7 +5658,7 @@ spec:
               },
               "editorMode": "code",
               "exemplar": true,
-              "expr": "sum(rate(cnpg_pg_stat_database_xact_commit{namespace=~\"$namespace\",pod=~\"$instances\"}[5m])) by (pod)",
+              "expr": "sum(rate(cnpg_pg_stat_database_xact_commit{namespace=~\"$namespace\",pod=~\"$instances\"}[5m])) by (pod, namespace)",
               "interval": "",
               "legendFormat": "committed ({{pod}})",
               "range": true,
@@ -5447,7 +5670,7 @@ spec:
                 "uid": "${DS_PROMETHEUS}"
               },
               "exemplar": true,
-              "expr": "sum(rate(cnpg_pg_stat_database_xact_rollback{namespace=~\"$namespace\",pod=~\"$instances\"}[5m])) by (pod)",
+              "expr": "sum(rate(cnpg_pg_stat_database_xact_rollback{namespace=~\"$namespace\",pod=~\"$instances\"}[5m])) by (pod, namespace)",
               "hide": false,
               "interval": "",
               "legendFormat": "rolled back ({{pod}})",
@@ -5455,7 +5678,35 @@ spec:
             }
           ],
           "title": "Transactions [5m]",
-          "type": "timeseries"
+          "type": "timeseries",
+          "transformations": [
+            {
+              "id": "calculateField",
+              "options": {
+                "mode": "binary",
+                "binary": {
+                  "left": "Time",
+                  "operator": "-",
+                  "right": "300000"
+                },
+                "alias": "window_start",
+                "replaceFields": false
+              }
+            },
+            {
+              "id": "calculateField",
+              "options": {
+                "mode": "binary",
+                "binary": {
+                  "left": "Time",
+                  "operator": "+",
+                  "right": "300000"
+                },
+                "alias": "window_end",
+                "replaceFields": false
+              }
+            }
+          ]
         },
         {
           "datasource": {
@@ -5514,9 +5765,65 @@ spec:
                 ]
               },
               "unit": "s",
-              "unitScale": true
+              "unitScale": true,
+              "links": [
+                {
+                  "title": "View logs (+/-5m)",
+                  "url": "/explore?schemaVersion=1&panes=%7B%22e1w%22%3A%7B%22datasource%22%3A%22victorialogs%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22expr%22%3A%22%7Bnamespace%3D%5C%22${__field.labels.namespace}%5C%22%2Cpod%3D~%5C%22${__field.labels.pod}%5C%22%7D%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22${__data.fields.window_start}%22%2C%22to%22%3A%22${__data.fields.window_end}%22%7D%7D%7D&orgId=1",
+                  "targetBlank": true
+                }
+              ]
             },
-            "overrides": []
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "window_start"
+                },
+                "properties": [
+                  {
+                    "id": "custom.hideFrom",
+                    "value": {
+                      "viz": true,
+                      "legend": true,
+                      "tooltip": true
+                    }
+                  },
+                  {
+                    "id": "unit",
+                    "value": "none"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "window_end"
+                },
+                "properties": [
+                  {
+                    "id": "custom.hideFrom",
+                    "value": {
+                      "viz": true,
+                      "legend": true,
+                      "tooltip": true
+                    }
+                  },
+                  {
+                    "id": "unit",
+                    "value": "none"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
+                  }
+                ]
+              }
+            ]
           },
           "gridPos": {
             "h": 8,
@@ -5544,14 +5851,42 @@ spec:
                 "uid": "${DS_PROMETHEUS}"
               },
               "exemplar": true,
-              "expr": "max by (pod) (cnpg_backends_max_tx_duration_seconds{namespace=~\"$namespace\",pod=~\"$instances\"})",
+              "expr": "max by (pod, namespace) (cnpg_backends_max_tx_duration_seconds{namespace=~\"$namespace\",pod=~\"$instances\"})",
               "interval": "",
               "legendFormat": "{{pod}}",
               "refId": "A"
             }
           ],
           "title": "Longest Transaction",
-          "type": "timeseries"
+          "type": "timeseries",
+          "transformations": [
+            {
+              "id": "calculateField",
+              "options": {
+                "mode": "binary",
+                "binary": {
+                  "left": "Time",
+                  "operator": "-",
+                  "right": "300000"
+                },
+                "alias": "window_start",
+                "replaceFields": false
+              }
+            },
+            {
+              "id": "calculateField",
+              "options": {
+                "mode": "binary",
+                "binary": {
+                  "left": "Time",
+                  "operator": "+",
+                  "right": "300000"
+                },
+                "alias": "window_end",
+                "replaceFields": false
+              }
+            }
+          ]
         },
         {
           "datasource": {
@@ -5609,9 +5944,65 @@ spec:
                   }
                 ]
               },
-              "unitScale": true
+              "unitScale": true,
+              "links": [
+                {
+                  "title": "View logs (+/-5m)",
+                  "url": "/explore?schemaVersion=1&panes=%7B%22e1w%22%3A%7B%22datasource%22%3A%22victorialogs%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22expr%22%3A%22%7Bnamespace%3D%5C%22${__field.labels.namespace}%5C%22%2Cpod%3D~%5C%22${__field.labels.pod}%5C%22%7D%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22${__data.fields.window_start}%22%2C%22to%22%3A%22${__data.fields.window_end}%22%7D%7D%7D&orgId=1",
+                  "targetBlank": true
+                }
+              ]
             },
-            "overrides": []
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "window_start"
+                },
+                "properties": [
+                  {
+                    "id": "custom.hideFrom",
+                    "value": {
+                      "viz": true,
+                      "legend": true,
+                      "tooltip": true
+                    }
+                  },
+                  {
+                    "id": "unit",
+                    "value": "none"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "window_end"
+                },
+                "properties": [
+                  {
+                    "id": "custom.hideFrom",
+                    "value": {
+                      "viz": true,
+                      "legend": true,
+                      "tooltip": true
+                    }
+                  },
+                  {
+                    "id": "unit",
+                    "value": "none"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
+                  }
+                ]
+              }
+            ]
           },
           "gridPos": {
             "h": 8,
@@ -5648,7 +6039,35 @@ spec:
             }
           ],
           "title": "Deadlocks [5m]",
-          "type": "timeseries"
+          "type": "timeseries",
+          "transformations": [
+            {
+              "id": "calculateField",
+              "options": {
+                "mode": "binary",
+                "binary": {
+                  "left": "Time",
+                  "operator": "-",
+                  "right": "300000"
+                },
+                "alias": "window_start",
+                "replaceFields": false
+              }
+            },
+            {
+              "id": "calculateField",
+              "options": {
+                "mode": "binary",
+                "binary": {
+                  "left": "Time",
+                  "operator": "+",
+                  "right": "300000"
+                },
+                "alias": "window_end",
+                "replaceFields": false
+              }
+            }
+          ]
         },
         {
           "datasource": {
@@ -5706,9 +6125,65 @@ spec:
                   }
                 ]
               },
-              "unitScale": true
+              "unitScale": true,
+              "links": [
+                {
+                  "title": "View logs (+/-5m)",
+                  "url": "/explore?schemaVersion=1&panes=%7B%22e1w%22%3A%7B%22datasource%22%3A%22victorialogs%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22expr%22%3A%22%7Bnamespace%3D%5C%22${__field.labels.namespace}%5C%22%2Cpod%3D~%5C%22${__field.labels.pod}%5C%22%7D%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22${__data.fields.window_start}%22%2C%22to%22%3A%22${__data.fields.window_end}%22%7D%7D%7D&orgId=1",
+                  "targetBlank": true
+                }
+              ]
             },
-            "overrides": []
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "window_start"
+                },
+                "properties": [
+                  {
+                    "id": "custom.hideFrom",
+                    "value": {
+                      "viz": true,
+                      "legend": true,
+                      "tooltip": true
+                    }
+                  },
+                  {
+                    "id": "unit",
+                    "value": "none"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "window_end"
+                },
+                "properties": [
+                  {
+                    "id": "custom.hideFrom",
+                    "value": {
+                      "viz": true,
+                      "legend": true,
+                      "tooltip": true
+                    }
+                  },
+                  {
+                    "id": "unit",
+                    "value": "none"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
+                  }
+                ]
+              }
+            ]
           },
           "gridPos": {
             "h": 8,
@@ -5743,7 +6218,35 @@ spec:
             }
           ],
           "title": "Blocked Queries",
-          "type": "timeseries"
+          "type": "timeseries",
+          "transformations": [
+            {
+              "id": "calculateField",
+              "options": {
+                "mode": "binary",
+                "binary": {
+                  "left": "Time",
+                  "operator": "-",
+                  "right": "300000"
+                },
+                "alias": "window_start",
+                "replaceFields": false
+              }
+            },
+            {
+              "id": "calculateField",
+              "options": {
+                "mode": "binary",
+                "binary": {
+                  "left": "Time",
+                  "operator": "+",
+                  "right": "300000"
+                },
+                "alias": "window_end",
+                "replaceFields": false
+              }
+            }
+          ]
         },
         {
           "collapsed": true,
@@ -7398,7 +7901,7 @@ spec:
                   "color": "rgba(255,0,255,0.7)"
                 },
                 "filterValues": {
-                  "le": 1e-9
+                  "le": 1e-09
                 },
                 "legend": {
                   "show": false
@@ -9369,4 +9872,3 @@ spec:
       "version": 2,
       "weekStart": ""
     }
-
