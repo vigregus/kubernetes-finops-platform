@@ -11,22 +11,34 @@ spec:
     {
       "title": "Application Overview",
       "description": "Traffic, latency, errors, resource usage, and ownership context for checkout/analytics.",
-      "tags": ["application-overview", "finops"],
+      "tags": [
+        "application-overview",
+        "finops"
+      ],
       "schemaVersion": 39,
       "version": 2,
       "editable": true,
-      "time": { "from": "now-1h", "to": "now" },
+      "time": {
+        "from": "now-1h",
+        "to": "now"
+      },
       "templating": {
         "list": [
           {
             "name": "namespace",
             "type": "query",
-            "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "victoriametrics"
+            },
             "query": "label_values(http_requests_total{job=~\"checkout|analytics\"}, namespace)",
             "refresh": 2,
             "includeAll": true,
             "multi": true,
-            "current": { "text": "All", "value": "$__all" }
+            "current": {
+              "text": "All",
+              "value": "$__all"
+            }
           }
         ]
       },
@@ -35,14 +47,27 @@ spec:
           "id": 1,
           "type": "row",
           "title": "Ownership",
-          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 0
+          }
         },
         {
           "id": 2,
           "type": "table",
           "title": "Workload ownership",
-          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "gridPos": { "h": 6, "w": 24, "x": 0, "y": 1 },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 24,
+            "x": 0,
+            "y": 1
+          },
           "targets": [
             {
               "expr": "kube_pod_labels{namespace=~\"$namespace\", label_app_kubernetes_io_name=~\"checkout|analytics\"}",
@@ -54,7 +79,20 @@ spec:
             {
               "id": "organize",
               "options": {
-                "excludeByName": { "Time": true, "Value": true, "__name__": true, "cluster": true, "container": true, "endpoint": true, "instance": true, "job": true, "prometheus": true, "service": true, "uid": true, "label_pod_template_hash": true },
+                "excludeByName": {
+                  "Time": true,
+                  "Value": true,
+                  "__name__": true,
+                  "cluster": true,
+                  "container": true,
+                  "endpoint": true,
+                  "instance": true,
+                  "job": true,
+                  "prometheus": true,
+                  "service": true,
+                  "uid": true,
+                  "label_pod_template_hash": true
+                },
                 "indexByName": {},
                 "renameByName": {
                   "label_app_kubernetes_io_name": "workload",
@@ -72,51 +110,285 @@ spec:
           "id": 3,
           "type": "row",
           "title": "Traffic and errors",
-          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 7 }
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 7
+          }
         },
         {
           "id": 4,
           "type": "timeseries",
           "title": "Request rate by workload and status",
-          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "reqps", "links": [{"title":"View logs (+/-5m)","url":"/explore?schemaVersion=1&panes=%7B%22e1w%22%3A%7B%22datasource%22%3A%22victorialogs%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22expr%22%3A%22%7Bnamespace%3D%5C%22${__field.labels.namespace}%5C%22%7D%20app%3A~%5C%22${__field.labels.job}%5C%22%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22${__data.fields.window_start}%22%2C%22to%22%3A%22${__data.fields.window_end}%22%7D%7D%7D&orgId=1","targetBlank":true}] }, "overrides": [] },
-          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "links": [
+                {
+                  "title": "View logs (+/-5m)",
+                  "url": "/explore?schemaVersion=1&panes=%7B%22e1w%22%3A%7B%22datasource%22%3A%22victorialogs%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22expr%22%3A%22%7Bnamespace%3D%5C%22${__field.labels.namespace}%5C%22%7D%20app%3A~%5C%22${__field.labels.job}%5C%22%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22${__data.fields.window_start}%22%2C%22to%22%3A%22${__data.fields.window_end}%22%7D%7D%7D&orgId=1",
+                  "targetBlank": true
+                }
+              ]
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "window_start"
+                },
+                "properties": [
+                  {
+                    "id": "custom.hideFrom",
+                    "value": {
+                      "viz": true,
+                      "legend": true,
+                      "tooltip": true
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "window_end"
+                },
+                "properties": [
+                  {
+                    "id": "custom.hideFrom",
+                    "value": {
+                      "viz": true,
+                      "legend": true,
+                      "tooltip": true
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 8
+          },
           "targets": [
             {
               "expr": "sum by (job, status, namespace) (rate(http_requests_total{namespace=~\"$namespace\"}[5m]))",
               "legendFormat": "{{job}} {{status}}"
             }
           ],
-          "transformations": [{"id":"calculateField","options":{"mode":"binary","binary":{"left":"Time","operator":"-","right":"300000"},"alias":"window_start","replaceFields":false}},{"id":"calculateField","options":{"mode":"binary","binary":{"left":"Time","operator":"+","right":"300000"},"alias":"window_end","replaceFields":false}}]
+          "transformations": [
+            {
+              "id": "calculateField",
+              "options": {
+                "mode": "binary",
+                "binary": {
+                  "left": "Time",
+                  "operator": "-",
+                  "right": "300000"
+                },
+                "alias": "window_start",
+                "replaceFields": false
+              }
+            },
+            {
+              "id": "calculateField",
+              "options": {
+                "mode": "binary",
+                "binary": {
+                  "left": "Time",
+                  "operator": "+",
+                  "right": "300000"
+                },
+                "alias": "window_end",
+                "replaceFields": false
+              }
+            }
+          ]
         },
         {
           "id": 5,
           "type": "timeseries",
           "title": "Error rate (%) by workload",
-          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "links": [{"title":"View logs (+/-5m)","url":"/explore?schemaVersion=1&panes=%7B%22e1w%22%3A%7B%22datasource%22%3A%22victorialogs%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22expr%22%3A%22%7Bnamespace%3D%5C%22${__field.labels.namespace}%5C%22%7D%20app%3A~%5C%22${__field.labels.job}%5C%22%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22${__data.fields.window_start}%22%2C%22to%22%3A%22${__data.fields.window_end}%22%7D%7D%7D&orgId=1","targetBlank":true}, {"title":"View traces (+/-5m)","url":"/explore?schemaVersion=1&panes=%7B%22e1w%22%3A%7B%22datasource%22%3A%22tempo%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22queryType%22%3A%22traceql%22%2C%22query%22%3A%22%7Bresource.service.name%3D%5C%22${__field.labels.job}%5C%22%7D%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22${__data.fields.window_start}%22%2C%22to%22%3A%22${__data.fields.window_end}%22%7D%7D%7D&orgId=1","targetBlank":true}] }, "overrides": [] },
-          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "min": 0,
+              "links": [
+                {
+                  "title": "View logs (+/-5m)",
+                  "url": "/explore?schemaVersion=1&panes=%7B%22e1w%22%3A%7B%22datasource%22%3A%22victorialogs%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22expr%22%3A%22%7Bnamespace%3D%5C%22${__field.labels.namespace}%5C%22%7D%20app%3A~%5C%22${__field.labels.job}%5C%22%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22${__data.fields.window_start}%22%2C%22to%22%3A%22${__data.fields.window_end}%22%7D%7D%7D&orgId=1",
+                  "targetBlank": true
+                },
+                {
+                  "title": "View traces (+/-5m)",
+                  "url": "/explore?schemaVersion=1&panes=%7B%22e1w%22%3A%7B%22datasource%22%3A%22tempo%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22queryType%22%3A%22traceql%22%2C%22query%22%3A%22%7Bresource.service.name%3D%5C%22${__field.labels.job}%5C%22%7D%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22${__data.fields.window_start}%22%2C%22to%22%3A%22${__data.fields.window_end}%22%7D%7D%7D&orgId=1",
+                  "targetBlank": true
+                }
+              ]
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "window_start"
+                },
+                "properties": [
+                  {
+                    "id": "custom.hideFrom",
+                    "value": {
+                      "viz": true,
+                      "legend": true,
+                      "tooltip": true
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "window_end"
+                },
+                "properties": [
+                  {
+                    "id": "custom.hideFrom",
+                    "value": {
+                      "viz": true,
+                      "legend": true,
+                      "tooltip": true
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 8
+          },
           "targets": [
             {
               "expr": "100 * sum by (job, namespace) (rate(http_requests_total{namespace=~\"$namespace\", status=\"500\"}[5m])) / sum by (job, namespace) (rate(http_requests_total{namespace=~\"$namespace\"}[5m]))",
               "legendFormat": "{{job}}"
             }
           ],
-          "transformations": [{"id":"calculateField","options":{"mode":"binary","binary":{"left":"Time","operator":"-","right":"300000"},"alias":"window_start","replaceFields":false}},{"id":"calculateField","options":{"mode":"binary","binary":{"left":"Time","operator":"+","right":"300000"},"alias":"window_end","replaceFields":false}}]
+          "transformations": [
+            {
+              "id": "calculateField",
+              "options": {
+                "mode": "binary",
+                "binary": {
+                  "left": "Time",
+                  "operator": "-",
+                  "right": "300000"
+                },
+                "alias": "window_start",
+                "replaceFields": false
+              }
+            },
+            {
+              "id": "calculateField",
+              "options": {
+                "mode": "binary",
+                "binary": {
+                  "left": "Time",
+                  "operator": "+",
+                  "right": "300000"
+                },
+                "alias": "window_end",
+                "replaceFields": false
+              }
+            }
+          ]
         },
         {
           "id": 6,
           "type": "row",
           "title": "Latency",
-          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 16 }
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 16
+          }
         },
         {
           "id": 7,
           "type": "timeseries",
           "title": "p50 / p95 / p99 latency by workload",
-          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "s", "links": [{"title":"View logs (+/-5m)","url":"/explore?schemaVersion=1&panes=%7B%22e1w%22%3A%7B%22datasource%22%3A%22victorialogs%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22expr%22%3A%22%7Bnamespace%3D%5C%22${__field.labels.namespace}%5C%22%7D%20app%3A~%5C%22${__field.labels.job}%5C%22%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22${__data.fields.window_start}%22%2C%22to%22%3A%22${__data.fields.window_end}%22%7D%7D%7D&orgId=1","targetBlank":true}, {"title":"View traces (+/-5m)","url":"/explore?schemaVersion=1&panes=%7B%22e1w%22%3A%7B%22datasource%22%3A%22tempo%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22queryType%22%3A%22traceql%22%2C%22query%22%3A%22%7Bresource.service.name%3D%5C%22${__field.labels.job}%5C%22%7D%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22${__data.fields.window_start}%22%2C%22to%22%3A%22${__data.fields.window_end}%22%7D%7D%7D&orgId=1","targetBlank":true}] }, "overrides": [] },
-          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 17 },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "links": [
+                {
+                  "title": "View logs (+/-5m)",
+                  "url": "/explore?schemaVersion=1&panes=%7B%22e1w%22%3A%7B%22datasource%22%3A%22victorialogs%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22expr%22%3A%22%7Bnamespace%3D%5C%22${__field.labels.namespace}%5C%22%7D%20app%3A~%5C%22${__field.labels.job}%5C%22%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22${__data.fields.window_start}%22%2C%22to%22%3A%22${__data.fields.window_end}%22%7D%7D%7D&orgId=1",
+                  "targetBlank": true
+                },
+                {
+                  "title": "View traces (+/-5m)",
+                  "url": "/explore?schemaVersion=1&panes=%7B%22e1w%22%3A%7B%22datasource%22%3A%22tempo%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22queryType%22%3A%22traceql%22%2C%22query%22%3A%22%7Bresource.service.name%3D%5C%22${__field.labels.job}%5C%22%7D%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22${__data.fields.window_start}%22%2C%22to%22%3A%22${__data.fields.window_end}%22%7D%7D%7D&orgId=1",
+                  "targetBlank": true
+                }
+              ]
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "window_start"
+                },
+                "properties": [
+                  {
+                    "id": "custom.hideFrom",
+                    "value": {
+                      "viz": true,
+                      "legend": true,
+                      "tooltip": true
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "window_end"
+                },
+                "properties": [
+                  {
+                    "id": "custom.hideFrom",
+                    "value": {
+                      "viz": true,
+                      "legend": true,
+                      "tooltip": true
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 17
+          },
           "targets": [
             {
               "expr": "histogram_quantile(0.5, sum by (job, namespace, le) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])))",
@@ -131,21 +403,106 @@ spec:
               "legendFormat": "{{job}} p99"
             }
           ],
-          "transformations": [{"id":"calculateField","options":{"mode":"binary","binary":{"left":"Time","operator":"-","right":"300000"},"alias":"window_start","replaceFields":false}},{"id":"calculateField","options":{"mode":"binary","binary":{"left":"Time","operator":"+","right":"300000"},"alias":"window_end","replaceFields":false}}]
+          "transformations": [
+            {
+              "id": "calculateField",
+              "options": {
+                "mode": "binary",
+                "binary": {
+                  "left": "Time",
+                  "operator": "-",
+                  "right": "300000"
+                },
+                "alias": "window_start",
+                "replaceFields": false
+              }
+            },
+            {
+              "id": "calculateField",
+              "options": {
+                "mode": "binary",
+                "binary": {
+                  "left": "Time",
+                  "operator": "+",
+                  "right": "300000"
+                },
+                "alias": "window_end",
+                "replaceFields": false
+              }
+            }
+          ]
         },
         {
           "id": 8,
           "type": "row",
           "title": "Resource usage",
-          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 25 }
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 25
+          }
         },
         {
           "id": 9,
           "type": "timeseries",
           "title": "CPU usage vs requested",
-          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "short", "links": [{"title":"View logs (+/-5m)","url":"/explore?schemaVersion=1&panes=%7B%22e1w%22%3A%7B%22datasource%22%3A%22victorialogs%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22expr%22%3A%22%7Bnamespace%3D%5C%22${__field.labels.namespace}%5C%22%2Cpod%3D~%5C%22${__field.labels.pod}%5C%22%7D%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22${__data.fields.window_start}%22%2C%22to%22%3A%22${__data.fields.window_end}%22%7D%7D%7D&orgId=1","targetBlank":true}] }, "overrides": [] },
-          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 26 },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "links": [
+                {
+                  "title": "View logs (+/-5m)",
+                  "url": "/explore?schemaVersion=1&panes=%7B%22e1w%22%3A%7B%22datasource%22%3A%22victorialogs%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22expr%22%3A%22%7Bnamespace%3D%5C%22${__field.labels.namespace}%5C%22%2Cpod%3D~%5C%22${__field.labels.pod}%5C%22%7D%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22${__data.fields.window_start}%22%2C%22to%22%3A%22${__data.fields.window_end}%22%7D%7D%7D&orgId=1",
+                  "targetBlank": true
+                }
+              ]
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "window_start"
+                },
+                "properties": [
+                  {
+                    "id": "custom.hideFrom",
+                    "value": {
+                      "viz": true,
+                      "legend": true,
+                      "tooltip": true
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "window_end"
+                },
+                "properties": [
+                  {
+                    "id": "custom.hideFrom",
+                    "value": {
+                      "viz": true,
+                      "legend": true,
+                      "tooltip": true
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 26
+          },
           "targets": [
             {
               "expr": "node_namespace_pod_container:container_cpu_usage_seconds_total:sum_irate{namespace=~\"$namespace\", pod=~\"checkout.*|analytics.*\"}",
@@ -156,15 +513,95 @@ spec:
               "legendFormat": "{{namespace}}/{{pod}} requested"
             }
           ],
-          "transformations": [{"id":"calculateField","options":{"mode":"binary","binary":{"left":"Time","operator":"-","right":"300000"},"alias":"window_start","replaceFields":false}},{"id":"calculateField","options":{"mode":"binary","binary":{"left":"Time","operator":"+","right":"300000"},"alias":"window_end","replaceFields":false}}]
+          "transformations": [
+            {
+              "id": "calculateField",
+              "options": {
+                "mode": "binary",
+                "binary": {
+                  "left": "Time",
+                  "operator": "-",
+                  "right": "300000"
+                },
+                "alias": "window_start",
+                "replaceFields": false
+              }
+            },
+            {
+              "id": "calculateField",
+              "options": {
+                "mode": "binary",
+                "binary": {
+                  "left": "Time",
+                  "operator": "+",
+                  "right": "300000"
+                },
+                "alias": "window_end",
+                "replaceFields": false
+              }
+            }
+          ]
         },
         {
           "id": 10,
           "type": "timeseries",
           "title": "Memory usage vs requested",
-          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "bytes", "links": [{"title":"View logs (+/-5m)","url":"/explore?schemaVersion=1&panes=%7B%22e1w%22%3A%7B%22datasource%22%3A%22victorialogs%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22expr%22%3A%22%7Bnamespace%3D%5C%22${__field.labels.namespace}%5C%22%2Cpod%3D~%5C%22${__field.labels.pod}%5C%22%7D%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22${__data.fields.window_start}%22%2C%22to%22%3A%22${__data.fields.window_end}%22%7D%7D%7D&orgId=1","targetBlank":true}] }, "overrides": [] },
-          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 26 },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "links": [
+                {
+                  "title": "View logs (+/-5m)",
+                  "url": "/explore?schemaVersion=1&panes=%7B%22e1w%22%3A%7B%22datasource%22%3A%22victorialogs%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22expr%22%3A%22%7Bnamespace%3D%5C%22${__field.labels.namespace}%5C%22%2Cpod%3D~%5C%22${__field.labels.pod}%5C%22%7D%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22${__data.fields.window_start}%22%2C%22to%22%3A%22${__data.fields.window_end}%22%7D%7D%7D&orgId=1",
+                  "targetBlank": true
+                }
+              ]
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "window_start"
+                },
+                "properties": [
+                  {
+                    "id": "custom.hideFrom",
+                    "value": {
+                      "viz": true,
+                      "legend": true,
+                      "tooltip": true
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "window_end"
+                },
+                "properties": [
+                  {
+                    "id": "custom.hideFrom",
+                    "value": {
+                      "viz": true,
+                      "legend": true,
+                      "tooltip": true
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 26
+          },
           "targets": [
             {
               "expr": "node_namespace_pod_container:container_memory_working_set_bytes{namespace=~\"$namespace\", pod=~\"checkout.*|analytics.*\"}",
@@ -175,14 +612,49 @@ spec:
               "legendFormat": "{{namespace}}/{{pod}} requested"
             }
           ],
-          "transformations": [{"id":"calculateField","options":{"mode":"binary","binary":{"left":"Time","operator":"-","right":"300000"},"alias":"window_start","replaceFields":false}},{"id":"calculateField","options":{"mode":"binary","binary":{"left":"Time","operator":"+","right":"300000"},"alias":"window_end","replaceFields":false}}]
+          "transformations": [
+            {
+              "id": "calculateField",
+              "options": {
+                "mode": "binary",
+                "binary": {
+                  "left": "Time",
+                  "operator": "-",
+                  "right": "300000"
+                },
+                "alias": "window_start",
+                "replaceFields": false
+              }
+            },
+            {
+              "id": "calculateField",
+              "options": {
+                "mode": "binary",
+                "binary": {
+                  "left": "Time",
+                  "operator": "+",
+                  "right": "300000"
+                },
+                "alias": "window_end",
+                "replaceFields": false
+              }
+            }
+          ]
         },
         {
           "id": 11,
           "type": "logs",
           "title": "Recent logs",
-          "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
-          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 34 },
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 34
+          },
           "targets": [
             {
               "expr": "{namespace=~\"$namespace\"} app:~\"checkout|analytics\""
