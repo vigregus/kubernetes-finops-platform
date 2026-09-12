@@ -26,4 +26,8 @@ namespaces:
       # numbers comparable across the enrollment boundary. The mesh's cost
       # lands in istio-system instead, where ADR 0002 says platform overhead
       # belongs.
-      istio.io/dataplane-mode: ambient
+      # Temporarily off while the no-mesh baseline is measured. Toggling this
+      # label is the whole enrolment mechanism in ambient - no pod spec
+      # changes, no sidecar to add or remove - which is exactly what makes the
+      # mesh's cost measurable as an A/B rather than argued from a datasheet.
+      # istio.io/dataplane-mode: ambient
