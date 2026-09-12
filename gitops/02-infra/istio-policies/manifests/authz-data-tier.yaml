@@ -95,6 +95,19 @@ spec:
       cnpg.io/podRole: instance
   action: ALLOW
   rules:
+    # The CNPG operator polls /pg/status on each instance to read its state.
+    # This was missed when the policies were first written: the traffic matrix
+    # they were built from came from a six-minute ztunnel window that happened
+    # not to contain an operator poll, and the conclusion "the operator works
+    # through the API server" was wrong. STRICT then rejected every poll and
+    # the clusters sat in "Instance Status Extraction Error" - unable to fail
+    # over, unable to apply a restart - while looking Running to kubectl.
+    - from:
+        - source:
+            principals: ["cluster.local/ns/cnpg-system/sa/cnpg-cloudnative-pg"]
+      to:
+        - operation:
+            ports: ["8000"]
     - from:
         - source:
             principals: ["cluster.local/ns/prod/sa/checkout-db-pooler"]
@@ -120,6 +133,19 @@ spec:
       cnpg.io/podRole: instance
   action: ALLOW
   rules:
+    # The CNPG operator polls /pg/status on each instance to read its state.
+    # This was missed when the policies were first written: the traffic matrix
+    # they were built from came from a six-minute ztunnel window that happened
+    # not to contain an operator poll, and the conclusion "the operator works
+    # through the API server" was wrong. STRICT then rejected every poll and
+    # the clusters sat in "Instance Status Extraction Error" - unable to fail
+    # over, unable to apply a restart - while looking Running to kubectl.
+    - from:
+        - source:
+            principals: ["cluster.local/ns/cnpg-system/sa/cnpg-cloudnative-pg"]
+      to:
+        - operation:
+            ports: ["8000"]
     - from:
         - source:
             principals: ["cluster.local/ns/prod/sa/analytics-events-db-pooler"]

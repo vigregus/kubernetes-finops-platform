@@ -27,6 +27,17 @@ spec:
     server: https://kubernetes.default.svc
     namespace: cnpg-system
   syncPolicy:
+    # In the mesh so the operator has an identity. It reaches each Postgres
+    # instance directly on port 8000 (/pg/status) to read instance state, and
+    # prod runs STRICT mTLS - from outside the mesh that call carries no
+    # identity and is rejected at the transport, which presents as
+    # "Instance Status Extraction Error: HTTP communication issue" on the
+    # Cluster and leaves the operator unable to manage failover or apply a
+    # restart. The namespace is created by this application, so its labels
+    # belong here rather than in infra-bootstrap's namespace list.
+    managedNamespaceMetadata:
+      labels:
+        istio.io/dataplane-mode: ambient
     automated:
       prune: true
       selfHeal: true
