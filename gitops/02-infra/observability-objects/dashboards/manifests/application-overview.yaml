@@ -741,6 +741,161 @@ spec:
               "expr": "{namespace=~\"$namespace\"} app:~\"checkout|analytics\""
             }
           ]
+        },
+        {
+          "id": 12,
+          "type": "row",
+          "title": "Response cache",
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 42
+          }
+        },
+        {
+          "id": 13,
+          "type": "timeseries",
+          "title": "Cache hit ratio",
+          "description": "Hits and cached absences over all cache lookups. A ratio pinned at 100% means the working set is smaller than the cache and nothing is being measured; pinned at 0% means access is uniform over too large a key space. The interesting configurations sit in between.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "min": 0,
+              "max": 100,
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 2,
+                "fillOpacity": 10
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 43
+          },
+          "targets": [
+            {
+              "expr": "100 * sum by (job, namespace) (rate(cache_requests_total{namespace=~\"$namespace\",result=~\"hit|negative\"}[5m])) / clamp_min(sum by (job, namespace) (rate(cache_requests_total{namespace=~\"$namespace\"}[5m])), 0.001)",
+              "legendFormat": "{{job}}"
+            }
+          ]
+        },
+        {
+          "id": 14,
+          "type": "timeseries",
+          "title": "Cache lookups by outcome",
+          "description": "miss = this caller loaded from Postgres; waited = single-flight, another caller was already loading; negative = a cached absence; bypass = the deliberately-slow path, which skips the cache so it still produces a real Postgres slow-query line.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 2,
+                "fillOpacity": 25,
+                "stacking": {
+                  "mode": "normal"
+                }
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 43
+          },
+          "targets": [
+            {
+              "expr": "sum by (result, namespace) (rate(cache_requests_total{namespace=~\"$namespace\"}[5m]))",
+              "legendFormat": "{{result}}"
+            }
+          ]
+        },
+        {
+          "id": 15,
+          "type": "timeseries",
+          "title": "Postgres queries vs cache lookups",
+          "description": "What the cache is actually buying: the gap between lookups served and queries the database still had to answer. This is the line that turns a cache setting into a database sizing decision.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 2,
+                "fillOpacity": 10
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 51
+          },
+          "targets": [
+            {
+              "expr": "sum by (namespace) (rate(cache_requests_total{namespace=~\"$namespace\"}[5m]))",
+              "legendFormat": "cache lookups"
+            },
+            {
+              "expr": "sum by (namespace) (rate(db_query_duration_seconds_count{namespace=~\"$namespace\",job=\"checkout\"}[5m]))",
+              "legendFormat": "postgres queries"
+            }
+          ]
+        },
+        {
+          "id": 16,
+          "type": "timeseries",
+          "title": "Warm state and keys loaded",
+          "description": "cache_warm_complete drops to 0 while a pod is warming, during which it stays unready on purpose - an unwarmed pod would send its first traffic straight to Postgres, so scaling out would briefly raise database load rather than relieve it.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 2
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 51
+          },
+          "targets": [
+            {
+              "expr": "sum by (pod) (cache_warmed_keys{namespace=~\"$namespace\"})",
+              "legendFormat": "{{pod}} warmed keys"
+            },
+            {
+              "expr": "sum by (pod) (cache_warm_complete{namespace=~\"$namespace\"})",
+              "legendFormat": "{{pod}} warm complete"
+            }
+          ]
         }
       ]
     }

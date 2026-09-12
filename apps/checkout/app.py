@@ -279,9 +279,18 @@ def persist_order(order_id, span_ctx_for_sql):
         # log_statement output (see charts/app1/templates/postgres.yaml)
         # greppable by trace_id - without it, the query shows up in
         # Postgres's log with zero link back to the request that ran it.
+        # ON CONFLICT, not a plain INSERT: order ids are derived from the
+        # idempotency key (order_id_for), so a repeated key is a repeated id.
+        # The Redis idempotency lookup skips most of these, but it is a cache -
+        # it evicts, especially now that it shares a bounded allkeys-lru Redis
+        # with the response cache. Leaning on it for correctness produced
+        # duplicate-key violations under load, five of which in a row opened
+        # the circuit breaker and turned 24 real errors into 1031 cascading
+        # 503s. Idempotency has to be enforced where the data lives.
         sql = (
             f"/* trace_id={span_ctx_for_sql} */ "
-            "INSERT INTO orders (id, status) VALUES (%s, %s)"
+            "INSERT INTO orders (id, status) VALUES (%s, %s) "
+            "ON CONFLICT (id) DO NOTHING"
         )
         span.set_attribute("db.system", "postgresql")
         span.set_attribute("db.name", DATABASE_NAME)
