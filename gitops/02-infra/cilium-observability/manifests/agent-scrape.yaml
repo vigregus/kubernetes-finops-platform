@@ -21,6 +21,14 @@ spec:
   selector:
     matchLabels:
       k8s-app: cilium
+  # Every panel of the upstream Cilium Metrics dashboard filters on
+  # k8s_app="cilium", and a scrape does not carry pod labels onto the metrics
+  # unless asked. Without this the dashboard renders "No data" on every panel
+  # while all 251 cilium_* series sit in the database - the labels are the
+  # mismatch, not the collection. Prometheus sanitises the dash, so the pod
+  # label k8s-app arrives as k8s_app.
+  podTargetLabels:
+    - k8s-app
   podMetricsEndpoints:
     - port: prometheus
       path: /metrics
