@@ -15,3 +15,15 @@ namespaces:
     labels:
       finops.internal/environment: prod
       goldilocks.fairwinds.com/enabled: "true"
+      # Enrolled in the ambient mesh. prod only, deliberately: stage and dev
+      # stay outside it so the mesh's own cost and latency can be read as the
+      # difference between two otherwise identical environments rather than
+      # taken on faith from a vendor benchmark.
+      #
+      # ambient captures traffic at the node (ztunnel) rather than by injecting
+      # a sidecar, so no pod here gains a container and no workload's own
+      # resource accounting changes - which is what keeps the per-workload cost
+      # numbers comparable across the enrollment boundary. The mesh's cost
+      # lands in istio-system instead, where ADR 0002 says platform overhead
+      # belongs.
+      istio.io/dataplane-mode: ambient

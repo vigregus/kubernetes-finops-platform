@@ -8,7 +8,7 @@ podLabels:
   finops.internal/product: platform
   finops.internal/team: platform-engineering
   finops.internal/environment: prod
-  finops.internal/component: platform
+  finops.internal/component: service-mesh
 
 resources:
   requests:

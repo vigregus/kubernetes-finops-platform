@@ -31,7 +31,7 @@ operator:
     finops.internal/product: platform
     finops.internal/team: platform-engineering
     finops.internal/environment: prod
-    finops.internal/component: platform
+    finops.internal/component: cni
 
 # Without these the agent's own consumption lands in untracked overhead, and
 # the cost-allocation model in the design has nothing to join on.
