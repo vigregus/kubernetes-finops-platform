@@ -602,13 +602,21 @@ def _checkout():
         duration_ms=duration_ms,
     )
 
-    if status == 429:
-        return Response("overloaded\n", status=429, headers={"Retry-After": "1"})
-    if status == 503:
-        return Response("checkout dependency unavailable\n", status=503)
-    if status == 500:
-        return Response("checkout failed\n", status=500)
-    return Response(f"checkout ok order_id={order_id}\n", status=200)
+    # Driven off `status` rather than a ladder of ifs with a default return.
+    # The ladder silently disagreed with the metrics once already: 402 was
+    # added to the handler and to REQUEST_COUNT but not here, so declines were
+    # counted as 402 and answered as 200 - the dashboards showed the new status
+    # while every client saw success. A table cannot drift that way, because a
+    # status with no entry fails loudly instead of falling through to 200.
+    BODIES = {
+        200: (f"checkout ok order_id={order_id}\n", {}),
+        402: ("payment declined\n", {}),
+        429: ("overloaded\n", {"Retry-After": "1"}),
+        500: ("checkout failed\n", {}),
+        503: ("checkout dependency unavailable\n", {}),
+    }
+    body, headers = BODIES[status]
+    return Response(body, status=status, headers=headers)
 
 
 @app.route("/checkout/lookup", methods=["GET"])
