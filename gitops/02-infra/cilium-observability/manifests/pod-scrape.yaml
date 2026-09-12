@@ -1,0 +1,31 @@
+# Hubble's own metrics, which were being produced and thrown away.
+#
+# cilium/values.yaml already enables six metric families (dns, drop, tcp, flow,
+# port-distribution, httpV2) and the chart creates a hubble-metrics Service on
+# 9965, but nothing in the cluster scraped it - 187 hubble_* series served to
+# no one. Every official Cilium dashboard would have rendered empty, which
+# reads as "the mesh sees nothing" rather than "nobody is collecting".
+#
+# A VMPodScrape rather than a VMServiceScrape: cilium is a DaemonSet and these
+# counters are per-node, so the pod-level scrape keeps the node identity that
+# a Service-level one would collapse.
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMPodScrape
+metadata:
+  name: hubble-metrics
+  namespace: kube-system
+  labels:
+    finops.internal/product: platform
+    finops.internal/team: platform-engineering
+    finops.internal/environment: prod
+    finops.internal/component: cni
+    finops.internal/cost-center: platform-infra
+    finops.internal/owner: platform-team
+spec:
+  selector:
+    matchLabels:
+      k8s-app: cilium
+  podMetricsEndpoints:
+    - port: hubble-metrics
+      path: /metrics
+      interval: 15s

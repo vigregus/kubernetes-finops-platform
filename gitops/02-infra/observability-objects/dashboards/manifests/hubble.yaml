@@ -1,0 +1,24 @@
+# Hubble: flows, drops, DNS and TCP per node, from the hubble_* metrics that nothing collected until cilium-observability began scraping port 9965.
+#
+# Unmodified upstream dashboard, pinned to the Cilium release running here
+# (v1.20.1) rather than tracking a branch, so a chart upgrade is what moves
+# it. Referenced by url rather than inlined: these are large, and the repo
+# already fetches k8s-views and node-exporter the same way via grafanaCom.
+#
+# Note the path. The copies under examples/kubernetes/addons are symlinks,
+# and raw.githubusercontent serves a symlink as its target *text* with a
+# 200 - so that URL yields an 89-byte file that is not JSON and a dashboard
+# that silently never renders.
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: hubble
+  namespace: observability
+spec:
+  instanceSelector:
+    matchLabels:
+      dashboards: "grafana-local"
+  datasources:
+    - inputName: "DS_PROMETHEUS"
+      datasourceName: "victoriametrics"
+  url: https://raw.githubusercontent.com/cilium/cilium/v1.20.1/install/kubernetes/cilium/files/hubble/dashboards/hubble-dashboard.json

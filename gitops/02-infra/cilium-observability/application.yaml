@@ -1,0 +1,30 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cilium-observability
+  namespace: argocd
+  annotations:
+    # Separate from the cilium application on purpose. That one's source is the
+    # upstream Helm chart and it runs with prune disabled, because pruning the
+    # CNI on a transient diff would take cluster networking down with it. These
+    # objects are ordinary observability plumbing that should be prunable, and
+    # mixing them in would mean either giving up pruning here or giving up the
+    # safety there.
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  project: finops-platform
+  source:
+    repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
+    targetRevision: HEAD
+    path: gitops/02-infra/cilium-observability/manifests
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true
