@@ -45,10 +45,14 @@ env:
   PROFILE_LOOKUP_IO_MS: "5"
   PROFILE_LOOKUP_IO_JITTER_MS: "2"
 
-  # Connection pools. The effective ceiling is pods x WEB_CONCURRENCY x
-  # DB_POOL_MAX, which is why this stays small until PgBouncer is in front.
+  # Now that PgBouncer is in front, client-side connections are cheap: they
+  # terminate at the pooler, which multiplexes them onto default_pool_size
+  # server connections. Holding 40 per pod no longer means 40 backends on
+  # Postgres, which is the entire reason a pooler is worth running - and it
+  # moves the local bottleneck off the app-side semaphore, where PoolBusy was
+  # firing long before CPU was the constraint.
   DB_POOL_MIN: "1"
-  DB_POOL_MAX: "16"
+  DB_POOL_MAX: "40"
   DB_STATEMENT_TIMEOUT_MS: "5000"
   DB_ACQUIRE_TIMEOUT_MS: "250"
   REDIS_POOL_MAX: "32"
