@@ -107,6 +107,22 @@ const shedRate = new Trend("shop_shed_ratio");
 
 export const options = {
   scenarios: { [PROFILE]: selected },
+  // `url` is a default system tag and carries the raw request URL, so tagging
+  // each request with a bounded `name` is not on its own enough - the URL would
+  // keep minting a series per order id regardless. This is the explicit list
+  // minus `url`; everything kept here has bounded cardinality, and dropping the
+  // tag costs nothing because `name` already says which endpoint was called.
+  systemTags: [
+    "proto",
+    "method",
+    "status",
+    "name",
+    "scenario",
+    "group",
+    "check",
+    "error_code",
+    "expected_response",
+  ],
   thresholds: {
     // checkout runs with ERROR_RATE=0.02 and /checkout/lookup deliberately
     // returns 404/400 for a share of requests, so these bounds describe the
@@ -144,6 +160,22 @@ function hotIndex() {
 
 const params = { headers: { Host: HOST }, tags: { journey: "shop" } };
 
+// Every request below carries an explicit `name` tag, and none of them may be
+// left to default.
+//
+// k6 tags each request with its URL as `name` unless told otherwise. The URLs
+// here embed an order id and a key index drawn from a 50k key space, so a run
+// mints a fresh time series per distinct URL: a stress run generated 400,103
+// unique series against a suggested ceiling of 100,000, spent its memory limit
+// holding them, and was OOMKilled at minute seven of ten. That looked exactly
+// like the system collapsing - throughput halved and p95 doubled in the final
+// sample - when what actually died was the instrument.
+//
+// The names below are the endpoint shapes, which is the cardinality that
+// carries information: `lookup-hit` and `lookup-miss` hit the same handler but
+// exercise opposite cache paths, so they stay separate on purpose.
+const asName = (name) => Object.assign({}, params, { tags: { journey: "shop", name } });
+
 export default function () {
   // A session, not an isolated request: a checkout followed by the reads a
   // real client would make around it. Weights keep reads dominant, which is
@@ -153,7 +185,7 @@ export default function () {
   // Write into the same skewed key space the reads use, so the hot set is
   // genuinely present in the database and the cold tail genuinely is not.
   const writeIdx = hotIndex();
-  const placed = http.get(`${TARGET}/checkout?key=${writeIdx}`, params);
+  const placed = http.get(`${TARGET}/checkout?key=${writeIdx}`, asName("checkout"));
   if (placed.status === 429) shed++;
 
   const roll = Math.random();
@@ -162,16 +194,16 @@ export default function () {
     // Existing orders, skewed towards the hot set - the traffic a cache is
     // supposed to absorb.
     const slow = Math.random() < 0.05 ? "&slow=1" : "";
-    lookup = http.get(`${TARGET}/checkout/lookup?id=${orderId(hotIndex())}${slow}`, params);
+    lookup = http.get(`${TARGET}/checkout/lookup?id=${orderId(hotIndex())}${slow}`, asName("lookup-hit"));
   } else if (roll < 0.9) {
     // Well-formed ids beyond the populated space: real 404s, and the traffic
     // that negative caching exists to absorb.
     lookup = http.get(
       `${TARGET}/checkout/lookup?id=${orderId(KEY_SPACE + Math.floor(Math.random() * KEY_SPACE))}`,
-      params
+      asName("lookup-miss")
     );
   } else {
-    lookup = http.get(`${TARGET}/checkout/lookup?id=not-a-valid-uuid`, params);
+    lookup = http.get(`${TARGET}/checkout/lookup?id=not-a-valid-uuid`, asName("lookup-invalid"));
   }
   if (lookup.status === 429) shed++;
 
@@ -182,7 +214,7 @@ export default function () {
   if (Math.random() < 0.25) {
     const insight = http.get(`${TARGET}/analytics`, {
       headers: { Host: __ENV.K6_ANALYTICS_HOST || "analytics.finops.local" },
-      tags: { journey: "shop" },
+      tags: { journey: "shop", name: "analytics" },
     });
     if (insight.status === 429) shed++;
     requests++;
