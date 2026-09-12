@@ -119,10 +119,27 @@ export const options = {
   },
 };
 
-function randomUuid() {
-  // Same shape as a real order id but never actually inserted - a
-  // legitimate "valid input, no such row" 404, not an error.
-  return "11111111-1111-4111-8111-11111111111" + Math.floor(Math.random() * 10);
+// The order id is a pure function of the idempotency key (see order_id_for in
+// apps/checkout/app.py), so the generator can read back anything it wrote
+// without a discovery step.
+function orderId(i) {
+  return "00000000-0000-4000-8000-" + String(i).padStart(12, "0");
+}
+
+// How many distinct orders the run circulates through. This is the number
+// that decides whether caching means anything: with a key space of one - the
+// previous profile read a single seed id for 70% of its requests - hit ratio
+// is ~100% by construction, eviction never happens, and every cache setting
+// measures the same.
+const KEY_SPACE = Number(__ENV.KEY_SPACE || 50000);
+// Real read traffic is skewed, not uniform: a small set of items takes most
+// of the requests and a long tail takes the rest. A uniform draw over a large
+// key space would instead produce a ~0% hit ratio, which is just as
+// unrepresentative as a 100% one. Higher skew concentrates harder.
+const SKEW = Number(__ENV.ACCESS_SKEW || 3);
+
+function hotIndex() {
+  return Math.floor(KEY_SPACE * Math.pow(Math.random(), SKEW));
 }
 
 const params = { headers: { Host: HOST }, tags: { journey: "shop" } };
@@ -133,19 +150,26 @@ export default function () {
   // what makes the cache and the read path matter.
   let shed = 0;
 
-  const placed = http.get(`${TARGET}/checkout`, params);
+  // Write into the same skewed key space the reads use, so the hot set is
+  // genuinely present in the database and the cold tail genuinely is not.
+  const writeIdx = hotIndex();
+  const placed = http.get(`${TARGET}/checkout?key=${writeIdx}`, params);
   if (placed.status === 429) shed++;
 
   const roll = Math.random();
   let lookup;
   if (roll < 0.7) {
-    const slow = Math.random() < 0.2 ? "&slow=1" : "";
+    // Existing orders, skewed towards the hot set - the traffic a cache is
+    // supposed to absorb.
+    const slow = Math.random() < 0.05 ? "&slow=1" : "";
+    lookup = http.get(`${TARGET}/checkout/lookup?id=${orderId(hotIndex())}${slow}`, params);
+  } else if (roll < 0.9) {
+    // Well-formed ids beyond the populated space: real 404s, and the traffic
+    // that negative caching exists to absorb.
     lookup = http.get(
-      `${TARGET}/checkout/lookup?id=00000000-0000-0000-0000-000000000001${slow}`,
+      `${TARGET}/checkout/lookup?id=${orderId(KEY_SPACE + Math.floor(Math.random() * KEY_SPACE))}`,
       params
     );
-  } else if (roll < 0.9) {
-    lookup = http.get(`${TARGET}/checkout/lookup?id=${randomUuid()}`, params);
   } else {
     lookup = http.get(`${TARGET}/checkout/lookup?id=not-a-valid-uuid`, params);
   }

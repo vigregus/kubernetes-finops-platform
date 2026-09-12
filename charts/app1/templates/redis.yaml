@@ -20,6 +20,15 @@ spec:
       containers:
         - name: redis
           image: {{ .Values.redis.image }}
+          # A bounded cache is the whole point: if the working set always fits,
+          # hit ratio is ~100% whatever you do and "how much Redis do we need"
+          # has no answer to measure. Sized below the key space on purpose so
+          # eviction actually happens and the ratio becomes a real number.
+          args:
+            - --maxmemory
+            - {{ .Values.redis.maxmemory | default "64mb" | quote }}
+            - --maxmemory-policy
+            - {{ .Values.redis.maxmemoryPolicy | default "allkeys-lru" | quote }}
           ports:
             - name: redis
               containerPort: 6379

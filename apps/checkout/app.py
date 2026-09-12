@@ -10,6 +10,7 @@ import uuid
 import redis as redis_lib
 from common import metrics as metrics_mod
 from common import workload
+from common.cache import CacheResult, ResponseCache
 import psycopg2
 from common.db import PoolBusy, PooledPostgres, connect_with_retry
 from common.resilience import CircuitBreaker, CircuitOpen, LoadShedder, RetryBudget, Shed, call_with_retry
@@ -61,6 +62,17 @@ REDIS_URL = os.environ.get("REDIS_URL")
 REDIS_POOL_MAX = int(os.environ.get("REDIS_POOL_MAX", "32"))
 REDIS_TIMEOUT_S = float(os.environ.get("REDIS_TIMEOUT_S", "2"))
 
+# Response cache. TTL jitter is not cosmetic: identical TTLs expire together
+# and turn steady traffic into a sawtooth against Postgres.
+CACHE_TTL_S = float(os.environ.get("CACHE_TTL_S", "60"))
+CACHE_NEGATIVE_TTL_S = float(os.environ.get("CACHE_NEGATIVE_TTL_S", "10"))
+CACHE_JITTER_RATIO = float(os.environ.get("CACHE_JITTER_RATIO", "0.2"))
+# Warm before accepting traffic. A pod that starts cold sends its first
+# requests straight to the database, so scaling out under load briefly makes
+# database pressure worse - the opposite of what scaling out is for.
+CACHE_WARM_ON_START = os.environ.get("CACHE_WARM_ON_START", "true").lower() == "true"
+CACHE_WARM_KEYS = int(os.environ.get("CACHE_WARM_KEYS", "500"))
+
 KAFKA_BOOTSTRAP_SERVERS = os.environ.get("KAFKA_BOOTSTRAP_SERVERS")
 KAFKA_TOPIC = os.environ.get("KAFKA_TOPIC", "orders")
 KAFKA_LINGER_MS = int(os.environ.get("KAFKA_LINGER_MS", "20"))
@@ -106,6 +118,11 @@ REQUESTS_SHED = Counter("http_requests_shed_total", "Requests rejected because t
 IN_FLIGHT = Gauge("http_requests_in_flight", "Requests currently being served by this process")
 KAFKA_DELIVERY_ERRORS = Counter("kafka_delivery_errors_total", "Kafka messages the broker never acked")
 BREAKER_STATE = Gauge("dependency_circuit_state", "0=closed 1=half-open 2=open", ["dependency"])
+CACHE_REQUESTS = Counter(
+    "cache_requests_total", "Response cache outcomes", ["cache", "result"]
+)
+CACHE_WARMED = Gauge("cache_warmed_keys", "Keys loaded into the cache at startup")
+CACHE_READY = Gauge("cache_warm_complete", "1 once startup warming has finished")
 CPU_CALIBRATION = Gauge(
     "workload_cpu_iters_per_ms",
     "Calibrated synthetic-work iterations per millisecond on this node",
@@ -175,6 +192,9 @@ redis_client = (
     else None
 )
 
+order_cache: ResponseCache | None = None
+_warm_complete = not CACHE_WARM_ON_START
+
 db: PooledPostgres | None = None
 kafka_producer: Producer | None = None
 _shutting_down = threading.Event()
@@ -184,6 +204,24 @@ REGIONS = ["us-east", "us-west", "eu-central", "ap-south"]
 # Always present after init_db() - gives /checkout/lookup a real row to
 # find without depending on request ordering or cross-request state.
 SEED_ORDER_ID = "00000000-0000-0000-0000-000000000001"
+
+
+def order_id_for(key: str) -> str:
+    """Derive a stable order id from a numeric idempotency key.
+
+    The load generator needs to *read back* the orders it creates, across a
+    key space large enough for caching to mean anything. Without a derivable
+    id it can only re-read whatever id it happens to be told about, which is
+    how the previous profile ended up reading one single row 70% of the time
+    against a table of 42k: hit ratio was ~100% by construction, maxmemory
+    never bound, and every caching strategy measured identically.
+
+    Formatting the key into the UUID lets both sides compute the same id with
+    no discovery round trip and no shared state.
+    """
+    if key.isdigit():
+        return f"00000000-0000-4000-8000-{int(key):012d}"
+    return str(uuid.uuid4())
 
 
 def init_db():
@@ -273,7 +311,37 @@ def persist_order(order_id, span_ctx_for_sql):
         finally:
             BREAKER_STATE.labels(dependency="postgres").set(DB_BREAKER.state_code)
         log_json(span, level="debug", _msg="postgres INSERT", table="orders", order_id=order_id)
+        # The row this key would have cached is now stale. Dropping it is
+        # safer than writing the new value through: the write may still be
+        # rolled back by an outer failure, and a wrong cached value outlives
+        # the request that created it.
+        if order_cache is not None:
+            order_cache.invalidate(f"order:{order_id}")
     DB_LATENCY.observe(time.perf_counter() - start)
+
+
+def lookup_order_cached(order_id_str, span_ctx_for_sql, slow=False):
+    """Read through the cache, except on the deliberately-slow path.
+
+    slow=1 exists to produce a genuine Postgres slow-query log line; serving
+    it from cache would quietly remove the thing it was added to demonstrate.
+    """
+    if order_cache is None or slow:
+        row = lookup_order(order_id_str, span_ctx_for_sql, slow=slow)
+        CACHE_REQUESTS.labels(cache="order", result="bypass").inc()
+        return row
+
+    def _load():
+        row = lookup_order(order_id_str, span_ctx_for_sql, slow=False)
+        if row is None:
+            return None
+        return {"id": str(row[0]), "status": row[1], "created_at": str(row[2])}
+
+    value, result = order_cache.get_or_load(f"order:{order_id_str}", _load)
+    CACHE_REQUESTS.labels(cache="order", result=result).inc()
+    if value is None:
+        return None
+    return (value["id"], value["status"], value["created_at"])
 
 
 def lookup_order(order_id_str, span_ctx_for_sql, slow=False):
@@ -410,7 +478,8 @@ def _checkout():
         span.set_attribute("http.target", request.path)
         span.set_attribute("http.scheme", request.scheme)
         trace_id_hex = format(span.get_span_context().trace_id, "032x")
-        idempotency_key = f"checkout:idem:{request.args.get('key', uuid.uuid4().hex)}"
+        raw_key = request.args.get("key", uuid.uuid4().hex)
+        idempotency_key = f"checkout:idem:{raw_key}"
         cached_order_id = cache_lookup(idempotency_key)
 
         with tracer.start_as_current_span("checkout.validate_payment"):
@@ -420,7 +489,7 @@ def _checkout():
         try:
             if random.random() < ERROR_RATE:
                 raise PaymentValidationError("payment gateway declined the transaction")
-            order_id = cached_order_id.decode() if cached_order_id else str(uuid.uuid4())
+            order_id = cached_order_id.decode() if cached_order_id else order_id_for(raw_key)
             if not cached_order_id:
                 persist_order(order_id, trace_id_hex)
                 publish_order_event(order_id)
@@ -529,7 +598,7 @@ def _checkout_lookup():
 
         row = None
         try:
-            row = lookup_order(order_id_str, trace_id_hex, slow=slow)
+            row = lookup_order_cached(order_id_str, trace_id_hex, slow=slow)
             status = 200 if row is not None else 404
         except PoolBusy as e:
             # Previously this landed in the generic handler below and was
@@ -580,6 +649,21 @@ def _checkout_lookup():
     return Response(f"order {row[0]} status={row[1]} created_at={row[2]}\n", status=200)
 
 
+@app.route("/admin/cache/invalidate", methods=["POST"])
+def invalidate_cache():
+    """Bump the cache key-space version.
+
+    Unauthenticated on purpose - this is a load stand, and the experiment
+    runner needs to force a cold cache between variants to compare warm and
+    cold behaviour. It would need protecting in anything real.
+    """
+    if order_cache is None:
+        return Response(json.dumps({"invalidated": False, "reason": "no cache"}) + "\n", status=503)
+    version = order_cache.invalidate_all()
+    logger.info(json.dumps({"_msg": f"cache invalidated, now at v{version}", "level": "info", "cache_version": version}))
+    return Response(json.dumps({"invalidated": True, "version": version}) + "\n", status=200)
+
+
 @app.route("/metrics")
 def metrics():
     payload, content_type = metrics_mod.render()
@@ -604,6 +688,12 @@ def readyz():
     This is where dependency health belongs - a pod that cannot reach its
     database should stop receiving traffic without being restarted.
     """
+    if not _warm_complete:
+        # Deliberate: an unwarmed pod would serve its first traffic straight
+        # into Postgres. Staying unready until warm is what makes scale-out
+        # help immediately instead of adding database load first.
+        return Response(json.dumps({"ready": False, "warming": True}) + "\n", status=503)
+
     problems = []
     if db is not None and not db.healthy():
         problems.append("postgres")
@@ -652,6 +742,28 @@ def _shutdown(signum=None, frame=None):
         pass
 
 
+def _warm_cache() -> int:
+    """Preload the most recent orders, newest first.
+
+    Recency is the cheapest available proxy for "likely to be read" without
+    tracking access frequency; the point is to start with a populated cache,
+    not to predict perfectly.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT id, status, created_at FROM orders ORDER BY created_at DESC LIMIT %s",
+            (CACHE_WARM_KEYS,),
+        )
+        rows = cur.fetchall()
+    return order_cache.warm(
+        (
+            f"order:{r[0]}",
+            {"id": str(r[0]), "status": r[1], "created_at": str(r[2])},
+        )
+        for r in rows
+    )
+
+
 def _init_process():
     """Per-worker startup. Runs once per gunicorn worker (preload_app=False)."""
     global db, kafka_producer
@@ -670,6 +782,31 @@ def _init_process():
             application_name=f"{SERVICE_NAME}@{K8S_POD_NAME or 'local'}",
         )
         init_db()
+
+    global order_cache, _warm_complete
+    if redis_client is not None:
+        order_cache = ResponseCache(
+            redis_client,
+            namespace="checkout:cache:order",
+            ttl_s=CACHE_TTL_S,
+            negative_ttl_s=CACHE_NEGATIVE_TTL_S,
+            jitter_ratio=CACHE_JITTER_RATIO,
+        )
+        if CACHE_WARM_ON_START and db is not None:
+            _warm_complete = False
+            try:
+                warmed = _warm_cache()
+                CACHE_WARMED.set(warmed)
+                logger.info(json.dumps({"_msg": f"cache warmed with {warmed} orders", "level": "info", "warmed": warmed}))
+            except Exception as exc:  # noqa: BLE001 - warming must never block startup
+                logger.warning(json.dumps({"_msg": f"cache warm failed: {exc}", "level": "warning"}))
+            finally:
+                _warm_complete = True
+                CACHE_READY.set(1)
+
+    # Reflect the real state rather than only the happy path: with no Redis
+    # configured there is nothing to warm, and the pod is ready immediately.
+    CACHE_READY.set(1 if _warm_complete else 0)
 
     if KAFKA_BOOTSTRAP_SERVERS:
         kafka_producer = Producer(

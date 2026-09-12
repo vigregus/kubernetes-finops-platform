@@ -32,6 +32,17 @@ env:
   DB_STATEMENT_TIMEOUT_MS: "5000"
   DB_ACQUIRE_TIMEOUT_MS: "250"
   REDIS_POOL_MAX: "32"
+
+  # Response cache. Hit ratio is the lever that decides how much database the
+  # read path actually needs, so these are experiment knobs, not constants.
+  CACHE_TTL_S: "60"
+  CACHE_NEGATIVE_TTL_S: "10"
+  CACHE_JITTER_RATIO: "0.2"
+  # Warm before readiness: a cold pod sends its first traffic to Postgres, so
+  # scaling out would briefly raise database load instead of relieving it.
+  # Set false to measure exactly that.
+  CACHE_WARM_ON_START: "true"
+  CACHE_WARM_KEYS: "500"
   KAFKA_LINGER_MS: "20"
   KAFKA_COMPRESSION: lz4
 resources:
@@ -57,6 +68,10 @@ postgres:
       memory: 512Mi
 redis:
   image: redis:7-alpine
+  # Deliberately smaller than the load generator's KEY_SPACE so the cache
+  # evicts and hit ratio is something a strategy can move.
+  maxmemory: 64mb
+  maxmemoryPolicy: allkeys-lru
   resources:
     requests:
       cpu: 25m
