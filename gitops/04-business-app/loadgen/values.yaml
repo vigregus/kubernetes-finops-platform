@@ -16,6 +16,13 @@ profile: baseline
 rpsTarget: "50"
 duration: 5m
 
+# How many distinct orders the run circulates through, and how hard access
+# concentrates on the hot end. Together these decide whether caching is
+# measurable at all: a tiny key space gives ~100% hit ratio by construction,
+# a uniform draw over a large one gives ~0%. Both are equally uninformative.
+keySpace: "50000"
+accessSkew: "3"
+
 # Through the ingress rather than the Service, so the load exercises the real
 # entry point and the trace origin with it.
 target: http://ingress-nginx-controller.ingress-nginx.svc.cluster.local
