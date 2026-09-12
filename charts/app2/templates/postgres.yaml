@@ -62,6 +62,24 @@ spec:
       # every scrape target is stamped with; without this the CloudNativePG
       # dashboard's $cluster variable finds only "local-v1".
       honorLabels: true
+      # The upstream CNPG community dashboards select on cnpg_cluster,
+      # cnpg_pooler and instance_role. None of those exist on a scrape by
+      # default: Kubernetes pod labels do not become metric labels unless
+      # relabeled, and the sanitised forms (cnpg_io_cluster) are not what the
+      # dashboards ask for. Without this every panel renders "No data" while
+      # the series sit in the database - the same mismatch that left the
+      # Cilium dashboard blank.
+      #
+      # cnpg_pooler is what separates the PgBouncer pods from the Postgres
+      # instances, which this one selector deliberately scrapes together:
+      # pooler pods carry cnpg.io/cluster too.
+      relabelConfigs:
+        - sourceLabels: [__meta_kubernetes_pod_label_cnpg_io_cluster]
+          targetLabel: cnpg_cluster
+        - sourceLabels: [__meta_kubernetes_pod_label_cnpg_io_poolerName]
+          targetLabel: cnpg_pooler
+        - sourceLabels: [__meta_kubernetes_pod_label_cnpg_io_instanceRole]
+          targetLabel: instance_role
 {{- end }}
 {{- if and .Values.postgres .Values.postgres.pooler }}
 ---
