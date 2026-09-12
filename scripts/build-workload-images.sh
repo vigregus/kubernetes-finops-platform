@@ -22,7 +22,13 @@ eval "$(minikube docker-env)"
 # build context.
 for app in checkout analytics; do
   echo "==> building ${app}:${TAG} into minikube's docker daemon"
-  docker build -t "${app}:${TAG}" -f "${REPO_ROOT}/apps/${app}/Dockerfile" "${REPO_ROOT}"
+  # --network=host: with Cilium owning the node's interfaces, containers on
+  # docker's own bridge cannot reach the resolver in the node's
+  # /etc/resolv.conf (Docker Desktop's 192.168.65.254), so pip resolves
+  # nothing and the build fails with "No matching distribution found" - which
+  # reads as a bad pin rather than a DNS failure. The node itself resolves
+  # fine, so building in its network namespace sidesteps it.
+  docker build --network=host -t "${app}:${TAG}" -f "${REPO_ROOT}/apps/${app}/Dockerfile" "${REPO_ROOT}"
 done
 
 echo "==> done. Restart the deployments to pick up the new image:"
