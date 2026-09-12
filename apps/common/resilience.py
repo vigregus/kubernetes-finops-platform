@@ -117,10 +117,20 @@ class CircuitBreaker:
     failure re-opens it.
     """
 
-    def __init__(self, name: str, failure_threshold: int = 5, recovery_timeout_s: float = 10.0):
+    def __init__(
+        self,
+        name: str,
+        failure_threshold: int = 5,
+        recovery_timeout_s: float = 10.0,
+        neutral_exceptions: tuple = (),
+    ):
         self.name = name
         self.failure_threshold = failure_threshold
         self.recovery_timeout_s = recovery_timeout_s
+        # Exceptions that mean "we are busy" rather than "the dependency is
+        # broken". Counting local backpressure as dependency failure is how a
+        # breaker ends up open against a perfectly healthy database.
+        self.neutral_exceptions = neutral_exceptions
         self._state = CLOSED
         self._consecutive_failures = 0
         self._opened_at = 0.0
@@ -164,6 +174,8 @@ class CircuitBreaker:
             raise CircuitOpen(f"{self.name} circuit is open")
         try:
             yield
+        except self.neutral_exceptions:
+            raise
         except Exception:
             self._on_failure()
             raise

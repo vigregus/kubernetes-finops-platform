@@ -10,7 +10,8 @@ import uuid
 import redis as redis_lib
 from common import metrics as metrics_mod
 from common import workload
-from common.db import PooledPostgres, connect_with_retry
+import psycopg2
+from common.db import PoolBusy, PooledPostgres, connect_with_retry
 from common.resilience import CircuitBreaker, CircuitOpen, LoadShedder, RetryBudget, Shed, call_with_retry
 from confluent_kafka import Producer
 from flask import Flask, Response, request
@@ -51,6 +52,10 @@ DATABASE_NAME = os.environ.get("DATABASE_NAME", SERVICE_NAME)
 DB_POOL_MIN = int(os.environ.get("DB_POOL_MIN", "1"))
 DB_POOL_MAX = int(os.environ.get("DB_POOL_MAX", "8"))
 DB_STATEMENT_TIMEOUT_MS = int(os.environ.get("DB_STATEMENT_TIMEOUT_MS", "5000"))
+# How long a request waits for a free connection before being shed.
+# Long enough to absorb a contention spike, short enough that a
+# saturated pod answers "too busy" instead of holding the caller.
+DB_ACQUIRE_TIMEOUT_MS = int(os.environ.get("DB_ACQUIRE_TIMEOUT_MS", "250"))
 
 REDIS_URL = os.environ.get("REDIS_URL")
 REDIS_POOL_MAX = int(os.environ.get("REDIS_POOL_MAX", "32"))
@@ -111,13 +116,18 @@ CPU_CALIBRATION = Gauge(
 # is its own field precisely so "show me only errors" is a VictoriaLogs
 # field match, not a string search on message content.
 logger = logging.getLogger(SERVICE_NAME)
-logger.setLevel(logging.INFO)
+logger.setLevel(os.environ.get("LOG_LEVEL", "INFO").upper())
 _handler = logging.StreamHandler(sys.stdout)
 _handler.setFormatter(logging.Formatter("%(message)s"))
 logger.addHandler(_handler)
 logger.propagate = False
 
-_LOG_LEVELS = {"info": logging.INFO, "warning": logging.WARNING, "error": logging.ERROR}
+_LOG_LEVELS = {
+    "debug": logging.DEBUG,
+    "info": logging.INFO,
+    "warning": logging.WARNING,
+    "error": logging.ERROR,
+}
 
 
 class PaymentValidationError(Exception):
@@ -150,6 +160,7 @@ DB_BREAKER = CircuitBreaker(
     "postgres",
     failure_threshold=int(os.environ.get("DB_BREAKER_THRESHOLD", "5")),
     recovery_timeout_s=float(os.environ.get("DB_BREAKER_RECOVERY_S", "10")),
+    neutral_exceptions=(PoolBusy,),
 )
 
 # Redis gets a bounded pool rather than a connection per call, for the same
@@ -203,7 +214,7 @@ def cache_lookup(idempotency_key):
         span.set_attribute("db.operation", "GET")
         span.set_attribute("db.statement", f"GET {idempotency_key}")
         value = redis_client.get(idempotency_key)
-        log_json(span, _msg="redis GET", key=idempotency_key, hit=value is not None)
+        log_json(span, level="debug", _msg="redis GET", key=idempotency_key, hit=value is not None)
     CACHE_LATENCY.observe(time.perf_counter() - start)
     return value
 
@@ -217,7 +228,7 @@ def cache_store(idempotency_key, order_id):
         span.set_attribute("db.operation", "SET")
         span.set_attribute("db.statement", f"SET {idempotency_key}")
         redis_client.set(idempotency_key, order_id, ex=300)
-        log_json(span, _msg="redis SET", key=idempotency_key, ttl_seconds=300)
+        log_json(span, level="debug", _msg="redis SET", key=idempotency_key, ttl_seconds=300)
     CACHE_LATENCY.observe(time.perf_counter() - start)
 
 
@@ -247,7 +258,13 @@ def persist_order(order_id, span_ctx_for_sql):
         try:
             # Retries are bounded by a shared budget so a struggling database
             # cannot be turned into an outage by its own clients retrying.
-            call_with_retry(_write, attempts=2, budget=RETRY_BUDGET, breaker=DB_BREAKER)
+            call_with_retry(
+                _write,
+                attempts=2,
+                budget=RETRY_BUDGET,
+                breaker=DB_BREAKER,
+                retry_on=(psycopg2.Error,),
+            )
         except Exception as e:
             span.record_exception(e)
             span.set_status(Status(StatusCode.ERROR, str(e)))
@@ -255,7 +272,7 @@ def persist_order(order_id, span_ctx_for_sql):
             raise
         finally:
             BREAKER_STATE.labels(dependency="postgres").set(DB_BREAKER.state_code)
-        log_json(span, _msg="postgres INSERT", table="orders", order_id=order_id)
+        log_json(span, level="debug", _msg="postgres INSERT", table="orders", order_id=order_id)
     DB_LATENCY.observe(time.perf_counter() - start)
 
 
@@ -308,7 +325,7 @@ def lookup_order(order_id_str, span_ctx_for_sql, slow=False):
             log_json(span, level="warning", _msg="postgres SELECT no rows", table="orders", order_id=order_id_str)
         else:
             span.set_attribute("db.rows_returned", 1)
-            log_json(span, _msg="postgres SELECT", table="orders", order_id=order_id_str, status=row[1])
+            log_json(span, level="debug", _msg="postgres SELECT", table="orders", order_id=order_id_str, status=row[1])
     DB_LATENCY.observe(time.perf_counter() - start)
     return row
 
@@ -360,7 +377,7 @@ def publish_order_event(order_id):
             # blocking would convert a Kafka problem into a checkout outage.
             KAFKA_DELIVERY_ERRORS.inc()
             log_json(span, level="warning", _msg="kafka produce queue full", topic=KAFKA_TOPIC, order_id=order_id)
-        log_json(span, _msg="kafka enqueued", topic=KAFKA_TOPIC, order_id=order_id)
+        log_json(span, level="debug", _msg="kafka enqueued", topic=KAFKA_TOPIC, order_id=order_id)
     KAFKA_ENQUEUE_LATENCY.observe(time.perf_counter() - start)
 
 
@@ -409,6 +426,14 @@ def _checkout():
                 publish_order_event(order_id)
                 cache_store(idempotency_key, order_id)
             status = 200
+        except PoolBusy as e:
+            # At capacity, not broken: the database is fine, this pod simply
+            # has no free connection. Reporting it as 5xx would blame the
+            # dependency and, worse, make a saturated service look like a
+            # failing one in every experiment result.
+            status = 429
+            span.set_attribute("checkout.shed_reason", "db_pool")
+            log_json(span, level="warning", _msg=f"checkout shed at db pool: {e}", path="/checkout")
         except CircuitOpen as e:
             # The dependency is known-bad; fail fast and say so distinctly
             # rather than waiting for a timeout we already expect.
@@ -445,16 +470,26 @@ def _checkout():
     )
     REQUEST_COUNT.labels(method="GET", path="/checkout", status=str(status)).inc()
 
+    duration_ms = round((time.perf_counter() - start) * 1000, 2)
+    # Everything worth knowing goes in _msg, because that is the only field
+    # a log viewer renders inline - a message of "checkout request handled"
+    # forces opening every single line to learn anything. The structured
+    # fields stay alongside it so they remain filterable.
     log_json(
         span,
-        level="error" if status >= 500 else "info",
-        msg="checkout request handled",
+        level="error" if status >= 500 else ("warning" if status == 429 else "info"),
+        msg=(
+            f"checkout {status} order={order_id or '-'} "
+            f"cache={'hit' if cached_order_id else 'miss'} dur={duration_ms}ms"
+        ),
         path="/checkout",
         status=status,
         order_id=order_id if status == 200 else None,
-        duration_ms=round((time.perf_counter() - start) * 1000, 2),
+        duration_ms=duration_ms,
     )
 
+    if status == 429:
+        return Response("overloaded\n", status=429, headers={"Retry-After": "1"})
     if status == 503:
         return Response("checkout dependency unavailable\n", status=503)
     if status == 500:
@@ -496,6 +531,12 @@ def _checkout_lookup():
         try:
             row = lookup_order(order_id_str, trace_id_hex, slow=slow)
             status = 200 if row is not None else 404
+        except PoolBusy as e:
+            # Previously this landed in the generic handler below and was
+            # reported as 400 - blaming the caller's input for this pod
+            # being out of connections.
+            status = 429
+            log_json(span, level="warning", _msg=f"lookup shed at db pool: {e}", path="/checkout/lookup")
         except Exception as e:
             status = 400
             span.record_exception(e)
@@ -519,16 +560,19 @@ def _checkout_lookup():
     )
     REQUEST_COUNT.labels(method="GET", path="/checkout/lookup", status=str(status)).inc()
 
+    duration_ms = round((time.perf_counter() - start) * 1000, 2)
     log_json(
         span,
-        level="error" if status == 400 else ("warning" if status == 404 else "info"),
-        msg="checkout lookup request handled",
+        level="error" if status == 400 else ("warning" if status in (404, 429) else "info"),
+        msg=f"lookup {status} order={order_id_str} slow={int(slow)} dur={duration_ms}ms",
         path="/checkout/lookup",
         order_id=order_id_str,
         status=status,
-        duration_ms=round((time.perf_counter() - start) * 1000, 2),
+        duration_ms=duration_ms,
     )
 
+    if status == 429:
+        return Response("overloaded\n", status=429, headers={"Retry-After": "1"})
     if status == 400:
         return Response(f"invalid order id: {order_id_str}\n", status=400)
     if status == 404:
@@ -622,6 +666,7 @@ def _init_process():
             minconn=DB_POOL_MIN,
             maxconn=DB_POOL_MAX,
             statement_timeout_ms=DB_STATEMENT_TIMEOUT_MS,
+            acquire_timeout_s=DB_ACQUIRE_TIMEOUT_MS / 1000.0,
             application_name=f"{SERVICE_NAME}@{K8S_POD_NAME or 'local'}",
         )
         init_db()

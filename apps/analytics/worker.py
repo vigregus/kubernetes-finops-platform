@@ -81,6 +81,16 @@ def consume_loop():
 
             if processed:
                 consumer.commit(asynchronous=False)
+                ctx.logger.debug(
+                    json.dumps(
+                        {
+                            "_msg": f"batch committed n={processed}/{len(messages)}",
+                            "level": "debug",
+                            "batch_processed": processed,
+                            "batch_received": len(messages),
+                        }
+                    )
+                )
     finally:
         try:
             consumer.commit(asynchronous=False)
@@ -112,9 +122,15 @@ def _process(msg) -> bool:
             pass
         order_id = payload.get("order_id") if isinstance(payload, dict) else None
         trace_id_hex = format(span.get_span_context().trace_id, "032x")
+        started = time.perf_counter()
 
+        # Receipt, aggregation and the cache write are steps, not events worth
+        # a line each at INFO. Five INFO lines per message meant a 30-minute
+        # run produced ~384k of them, all reading as bare labels because the
+        # log viewer renders only _msg - and log volume is itself a cost line.
         ctx.log_json(
             span,
+            level="debug",
             _msg="kafka consume",
             topic=msg.topic(),
             partition=msg.partition(),
@@ -125,7 +141,7 @@ def _process(msg) -> bool:
         try:
             with ctx.tracer.start_as_current_span("analytics.aggregate_batch") as agg_span:
                 ctx.BATCH_PROFILE.run()
-                ctx.log_json(agg_span, _msg="aggregate batch computed", order_id=order_id)
+                ctx.log_json(agg_span, level="debug", _msg="aggregate batch computed", order_id=order_id)
 
             if isinstance(payload, dict) and order_id:
                 ctx.persist_event(payload, trace_id_hex)
@@ -138,17 +154,45 @@ def _process(msg) -> bool:
                     cache_span.set_attribute("db.statement", f"INCR {ctx.REDIS_KEY_PROCESSED}")
                     new_total = ctx.redis_client.incr(ctx.REDIS_KEY_PROCESSED)
                     ctx.log_json(
-                        cache_span, _msg="redis INCR", key=ctx.REDIS_KEY_PROCESSED, new_value=new_total
+                        cache_span,
+                        level="debug",
+                        _msg="redis INCR",
+                        key=ctx.REDIS_KEY_PROCESSED,
+                        new_value=new_total,
                     )
                 ctx.CACHE_LATENCY.observe(time.perf_counter() - start)
 
-            ctx.log_json(span, msg="order consumed", order_id=order_id)
+            dur_ms = round((time.perf_counter() - started) * 1000, 1)
+            amount = payload.get("amount_cents") if isinstance(payload, dict) else None
+            region = payload.get("region") if isinstance(payload, dict) else None
+            ctx.log_json(
+                span,
+                msg=(
+                    f"order consumed order={order_id} amount={amount} region={region} "
+                    f"p{msg.partition()}@{msg.offset()} dur={dur_ms}ms"
+                ),
+                order_id=order_id,
+                partition=msg.partition(),
+                offset=msg.offset(),
+                amount_cents=amount,
+                region=region,
+                duration_ms=dur_ms,
+            )
             ctx.ORDERS_CONSUMED.inc()
             return True
         except Exception as e:
             span.record_exception(e)
             span.set_status(Status(StatusCode.ERROR, str(e)))
-            ctx.log_json(span, level="error", _msg="order consume failed", order_id=order_id, error=str(e))
+            ctx.log_json(
+                span,
+                level="error",
+                _msg=f"order consume failed order={order_id} p{msg.partition()}@{msg.offset()}: {e}",
+                order_id=order_id,
+                partition=msg.partition(),
+                offset=msg.offset(),
+                error_type=type(e).__name__,
+                error=str(e),
+            )
             return False
 
 

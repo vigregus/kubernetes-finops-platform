@@ -15,6 +15,7 @@ servicePort: 80
 terminationGracePeriodSeconds: 45
 preStopSleepSeconds: 5
 env:
+  LOG_LEVEL: INFO
   OTEL_SERVICE_NAME: checkout
   ERROR_RATE: "0.02"
 
@@ -30,7 +31,7 @@ env:
   # Concurrency cap past which requests are rejected outright. This is the
   # knob that gives the pod a measurable saturation point instead of an
   # unbounded queue; the stress load profile is what calibrates it.
-  MAX_IN_FLIGHT: "32"
+  MAX_IN_FLIGHT: "48"
 
   # Per-request resource shape, in milliseconds. Replaces WORK_ITERATIONS,
   # which burned a fixed iteration count and therefore cost different CPU on
@@ -47,8 +48,9 @@ env:
   # Connection pools. The effective ceiling is pods x WEB_CONCURRENCY x
   # DB_POOL_MAX, which is why this stays small until PgBouncer is in front.
   DB_POOL_MIN: "1"
-  DB_POOL_MAX: "8"
+  DB_POOL_MAX: "16"
   DB_STATEMENT_TIMEOUT_MS: "5000"
+  DB_ACQUIRE_TIMEOUT_MS: "250"
   REDIS_POOL_MAX: "32"
 
   KAFKA_LINGER_MS: "20"

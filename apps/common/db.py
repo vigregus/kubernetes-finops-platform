@@ -22,6 +22,18 @@ import psycopg2
 from psycopg2 import pool as pg_pool
 
 
+class PoolBusy(Exception):
+    """No connection became available within the wait budget.
+
+    Deliberately distinct from a connection *error*: this means the service is
+    at capacity, not that Postgres is unwell. A stress run showed why the
+    distinction matters - psycopg2 raises PoolError the instant the pool is
+    empty, that was fed to the circuit breaker, and the breaker then opened
+    against a database that was working perfectly. Callers should turn this
+    into a 429, not a 5xx.
+    """
+
+
 class PooledPostgres:
     def __init__(
         self,
@@ -31,10 +43,18 @@ class PooledPostgres:
         statement_timeout_ms: int = 5000,
         connect_timeout_s: int = 3,
         application_name: str = "app",
+        acquire_timeout_s: float = 0.25,
     ):
         self.dsn = dsn
         self.maxconn = maxconn
+        self.acquire_timeout_s = acquire_timeout_s
         self._lock = threading.Lock()
+        # psycopg2's pool has no bounded wait - getconn() either returns
+        # immediately or raises. This semaphore turns it into a small queue:
+        # a brief contention spike is absorbed, sustained overload sheds.
+        # Without it the admission limit and the pool size disagree, and the
+        # service cheerfully admits work that is guaranteed to fail.
+        self._slots = threading.Semaphore(maxconn)
         # statement_timeout is set as a connection option rather than per
         # query: a hung statement should be bounded even on code paths that
         # forget to think about it.
@@ -49,8 +69,22 @@ class PooledPostgres:
 
     @contextmanager
     def cursor(self, commit: bool = False):
-        """Borrow a connection, yield a cursor, always return the connection."""
-        conn = self._pool.getconn()
+        """Borrow a connection, yield a cursor, always return the connection.
+
+        Waits up to `acquire_timeout_s` for a free connection and raises
+        PoolBusy if none appears, so that "everyone is using the database"
+        reads as backpressure rather than as a database fault.
+        """
+        if not self._slots.acquire(timeout=self.acquire_timeout_s):
+            raise PoolBusy(f"no connection within {self.acquire_timeout_s}s (pool size {self.maxconn})")
+        try:
+            conn = self._pool.getconn()
+        except pg_pool.PoolError as exc:
+            self._slots.release()
+            raise PoolBusy(str(exc)) from exc
+        except Exception:
+            self._slots.release()
+            raise
         try:
             with conn.cursor() as cur:
                 yield cur
@@ -69,13 +103,28 @@ class PooledPostgres:
             raise
         finally:
             self._pool.putconn(conn)
+            self._slots.release()
 
     def healthy(self) -> bool:
-        """Used by the readiness probe: can we actually get a usable connection?"""
+        """Used by the readiness probe: is Postgres reachable?
+
+        Busy is not unhealthy. An earlier version answered this by borrowing a
+        pooled connection, which meant the probe competed with live traffic
+        for the scarcest resource in the service: at saturation the probe
+        failed, Kubernetes pulled every pod out of the Service, and an
+        overloaded deployment became an unavailable one - visible in the
+        stress run as throughput collapsing from 231 rps to 9 rather than
+        levelling off. Saturation is what 429 is for; readiness is for "can I
+        serve at all".
+        """
         try:
             with self.cursor() as cur:
                 cur.execute("SELECT 1")
                 cur.fetchone()
+            return True
+        except PoolBusy:
+            # Every connection is in use, which means the database is very
+            # much alive and this pod is simply working hard.
             return True
         except Exception:
             return False

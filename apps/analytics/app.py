@@ -22,7 +22,7 @@ import uuid
 import redis as redis_lib
 from common import metrics as metrics_mod
 from common import workload
-from common.db import PooledPostgres, connect_with_retry
+from common.db import PoolBusy, PooledPostgres, connect_with_retry
 from common.resilience import LoadShedder, Shed
 from flask import Flask, Response, request
 from opentelemetry import trace
@@ -70,6 +70,10 @@ DATABASE_NAME = os.environ.get("DATABASE_NAME", SERVICE_NAME)
 DB_POOL_MIN = int(os.environ.get("DB_POOL_MIN", "1"))
 DB_POOL_MAX = int(os.environ.get("DB_POOL_MAX", "8"))
 DB_STATEMENT_TIMEOUT_MS = int(os.environ.get("DB_STATEMENT_TIMEOUT_MS", "5000"))
+# How long a request waits for a free connection before being shed.
+# Long enough to absorb a contention spike, short enough that a
+# saturated pod answers "too busy" instead of holding the caller.
+DB_ACQUIRE_TIMEOUT_MS = int(os.environ.get("DB_ACQUIRE_TIMEOUT_MS", "250"))
 
 # Every order on this topic belongs to the same product - checkout is its only
 # producer. Hardcoding that is more honest than deriving it from analytics'
@@ -120,13 +124,18 @@ CPU_CALIBRATION = Gauge(
 # is its own field precisely so "show me only errors" is a VictoriaLogs
 # field match, not a string search on message content.
 logger = logging.getLogger(SERVICE_NAME)
-logger.setLevel(logging.INFO)
+logger.setLevel(os.environ.get("LOG_LEVEL", "INFO").upper())
 _handler = logging.StreamHandler(sys.stdout)
 _handler.setFormatter(logging.Formatter("%(message)s"))
 logger.addHandler(_handler)
 logger.propagate = False
 
-_LOG_LEVELS = {"info": logging.INFO, "warning": logging.WARNING, "error": logging.ERROR}
+_LOG_LEVELS = {
+    "debug": logging.DEBUG,
+    "info": logging.INFO,
+    "warning": logging.WARNING,
+    "error": logging.ERROR,
+}
 
 
 class QueryError(Exception):
@@ -230,7 +239,7 @@ def persist_event(payload, span_ctx_for_sql):
                 ),
             )
         EVENTS_PERSISTED.inc()
-        log_json(span, _msg="order_events INSERT", order_id=payload.get("order_id"))
+        log_json(span, level="debug", _msg="order_events INSERT", order_id=payload.get("order_id"))
     DB_LATENCY.observe(time.perf_counter() - start)
 
 
@@ -271,7 +280,7 @@ def _analytics():
                     cache_span.set_attribute("db.operation", "GET")
                     cache_span.set_attribute("db.statement", f"GET {REDIS_KEY_PROCESSED}")
                     processed = redis_client.get(REDIS_KEY_PROCESSED)
-                    log_json(cache_span, _msg="redis GET", key=REDIS_KEY_PROCESSED, hit=processed is not None)
+                    log_json(cache_span, level="debug", _msg="redis GET", key=REDIS_KEY_PROCESSED, hit=processed is not None)
                 CACHE_LATENCY.observe(time.perf_counter() - cache_start)
 
             QUERY_PROFILE.run()
@@ -279,6 +288,9 @@ def _analytics():
             if random.random() < ERROR_RATE:
                 raise QueryError("analytics backend query timed out")
             status = 200
+        except PoolBusy as e:
+            status = 429
+            log_json(span, level="warning", _msg=f"analytics shed at db pool: {e}", path="/analytics")
         except Exception as e:
             status = 500
             span.record_exception(e)
@@ -305,15 +317,18 @@ def _analytics():
     )
     REQUEST_COUNT.labels(method="GET", path="/analytics", status=str(status)).inc()
 
+    duration_ms = round((time.perf_counter() - start) * 1000, 2)
     log_json(
         span,
-        level="error" if status == 500 else "info",
-        msg="analytics request handled",
+        level="error" if status == 500 else ("warning" if status == 429 else "info"),
+        msg=f"analytics {status} processed={(processed or b'0').decode()} dur={duration_ms}ms",
         path="/analytics",
         status=status,
-        duration_ms=round((time.perf_counter() - start) * 1000, 2),
+        duration_ms=duration_ms,
     )
 
+    if status == 429:
+        return Response("overloaded\n", status=429, headers={"Retry-After": "1"})
     if status == 500:
         return Response("analytics query failed\n", status=500)
     count = processed.decode() if processed else "0"
@@ -365,6 +380,7 @@ def init_clients(run_init_db: bool = True):
             minconn=DB_POOL_MIN,
             maxconn=DB_POOL_MAX,
             statement_timeout_ms=DB_STATEMENT_TIMEOUT_MS,
+            acquire_timeout_s=DB_ACQUIRE_TIMEOUT_MS / 1000.0,
             application_name=f"{SERVICE_NAME}@{K8S_POD_NAME or 'local'}",
         )
         if run_init_db:

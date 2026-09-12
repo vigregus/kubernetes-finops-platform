@@ -14,13 +14,14 @@ servicePort: 80
 terminationGracePeriodSeconds: 45
 preStopSleepSeconds: 5
 env:
+  LOG_LEVEL: INFO
   OTEL_SERVICE_NAME: analytics
   ERROR_RATE: "0.01"
 
   WEB_CONCURRENCY: "1"
   GUNICORN_WORKER_CLASS: gevent
   WORKER_CONNECTIONS: "1000"
-  MAX_IN_FLIGHT: "32"
+  MAX_IN_FLIGHT: "48"
 
   PROFILE_ANALYTICS_CPU_MS: "7"
   PROFILE_ANALYTICS_IO_MS: "90"
@@ -28,8 +29,9 @@ env:
   PROFILE_ANALYTICS_MEM_MB: "2"
 
   DB_POOL_MIN: "1"
-  DB_POOL_MAX: "8"
+  DB_POOL_MAX: "16"
   DB_STATEMENT_TIMEOUT_MS: "5000"
+  DB_ACQUIRE_TIMEOUT_MS: "250"
   REDIS_POOL_MAX: "32"
 resources:
   requests:
