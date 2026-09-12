@@ -34,22 +34,33 @@ import urllib.request
 SCRAPE_INTERVAL_S = 15
 
 
-def query(vm: str, expr: str, timeout: float = 5.0) -> float:
-    """Run one instant query and return a single number (0.0 if no series)."""
+def query(vm: str, expr: str, timeout: float = 5.0) -> float | None:
+    """Run one instant query.
+
+    Returns the value, 0.0 for "queried fine, no series matched", or None for
+    "could not ask". Those last two must not collapse into each other: an
+    earlier run reported a full screen of 0.00 that read as a system serving
+    nothing, when in fact the port-forward had died mid-run and the system was
+    serving ~288 rps. A dead sampler that reports zeros is worse than one that
+    crashes, because its output is publishable.
+    """
     url = f"{vm}/api/v1/query?" + urllib.parse.urlencode({"query": expr})
     try:
         with urllib.request.urlopen(url, timeout=timeout) as resp:
             import json
 
-            result = json.load(resp)["data"]["result"]
+            payload = json.load(resp)
     except Exception:
-        return 0.0
+        return None
+    if payload.get("status") != "success":
+        return None
+    result = payload.get("data", {}).get("result", [])
     if not result:
         return 0.0
     try:
         return float(result[0]["value"][1])
     except (KeyError, IndexError, ValueError):
-        return 0.0
+        return None
 
 
 def build_queries(namespace: str, job: str, window: str) -> dict[str, str]:
@@ -111,21 +122,46 @@ def main() -> int:
     rows = []
     started = time.monotonic()
     deadline = started + args.duration
+    # A sample where nothing could be asked is not a sample. Tolerate a couple
+    # in a row - VM restarts, a scrape gap - then stop, because past that the
+    # run is no longer being observed and continuing only produces a longer
+    # file of things that were never measured.
+    consecutive_failures = 0
     while time.monotonic() < deadline:
         elapsed = int(time.monotonic() - started)
         values = {c: query(args.vm, q) for c, q in queries.items()}
         rows.append({"elapsed": elapsed, **values})
-        print(f"{elapsed:>7}s | " + " | ".join(f"{values[c]:>7.2f}" for c in columns), flush=True)
+        cells = " | ".join(
+            f"{'   err':>7}" if values[c] is None else f"{values[c]:>7.2f}" for c in columns
+        )
+        print(f"{elapsed:>7}s | " + cells, flush=True)
+
+        if all(values[c] is None for c in columns):
+            consecutive_failures += 1
+            if consecutive_failures >= 3:
+                print(
+                    f"\naborting: {consecutive_failures} consecutive samples could not reach "
+                    f"{args.vm}. Check the port-forward - the run itself may well be fine, "
+                    f"but nothing from here on would be measured.",
+                    file=sys.stderr,
+                )
+                break
+        else:
+            consecutive_failures = 0
         time.sleep(args.interval)
 
     if args.csv and rows:
         with open(args.csv, "w", newline="") as fh:
             writer = csv.DictWriter(fh, fieldnames=["elapsed"] + columns)
             writer.writeheader()
+            # None lands as an empty cell, which every reader treats as
+            # missing - distinct from a 0 that was actually measured.
             writer.writerows(rows)
         print(f"\nwrote {len(rows)} samples to {args.csv}", file=sys.stderr)
 
-    return 0
+    # Non-zero when the run ended blind, so a wrapper script cannot mistake an
+    # unobserved run for a completed one.
+    return 1 if consecutive_failures >= 3 else 0
 
 
 if __name__ == "__main__":
