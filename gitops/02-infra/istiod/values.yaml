@@ -1,0 +1,28 @@
+# The control plane, in ambient mode.
+#
+# ambient rather than sidecar for a reason this stand can measure: a sidecar
+# costs roughly 0.20 vCPU and 60-100MB per pod, which across ~20 pods is about
+# 4 vCPU spent on proxies before a single request is served. Ambient runs one
+# ztunnel per node (~0.06 vCPU, ~12MB) and pays for L7 only where a waypoint
+# is actually deployed. Sidecar mode stays available as an experiment variant -
+# the difference between them is one of the larger cost deltas available here.
+profile: ambient
+
+# Cilium owns the datapath; istio-cni chains onto it (see cni.exclusive in
+# gitops/02-infra/cilium/values.yaml).
+platform: ""
+
+pilot:
+  podLabels:
+    app.kubernetes.io/component: platform
+    finops.internal/product: platform
+    finops.internal/team: platform-engineering
+    finops.internal/environment: prod
+    finops.internal/component: platform
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi

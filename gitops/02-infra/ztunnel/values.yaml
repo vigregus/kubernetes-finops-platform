@@ -1,0 +1,19 @@
+# The L4 dataplane: one per node, not one per pod. This is the component whose
+# per-node cost the allocation model charges by node share rather than by
+# traffic - see the design's cost-split section.
+profile: ambient
+
+podLabels:
+  app.kubernetes.io/component: platform
+  finops.internal/product: platform
+  finops.internal/team: platform-engineering
+  finops.internal/environment: prod
+  finops.internal/component: platform
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi

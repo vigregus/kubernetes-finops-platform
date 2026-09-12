@@ -1,0 +1,4 @@
+# Cluster-wide CRDs and the mesh's root resources. No workloads of its own,
+# so nothing to label or cost here - it exists so the other three have
+# something to install against.
+defaultRevision: default

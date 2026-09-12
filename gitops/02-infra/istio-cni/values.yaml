@@ -1,0 +1,21 @@
+# Redirects pod traffic into ztunnel. Installed as a *chained* plugin so it
+# composes with Cilium rather than replacing it - which only works because
+# Cilium's cni.exclusive is off.
+profile: ambient
+
+cni:
+  # Chained: Cilium keeps the datapath, istio-cni adds redirection on top.
+  chained: true
+  podLabels:
+    app.kubernetes.io/component: platform
+    finops.internal/product: platform
+    finops.internal/team: platform-engineering
+    finops.internal/environment: prod
+    finops.internal/component: platform
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
