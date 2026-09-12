@@ -43,6 +43,28 @@ podLabels:
   finops.internal/environment: prod
   finops.internal/component: platform
 
+# The agent's own metrics - datapath, BPF maps, policy and endpoint
+# regeneration. Off by default in the chart, which is why the Cilium Metrics
+# dashboard had no cilium_* series to draw: Hubble metrics describe the traffic,
+# these describe the thing carrying it, and a CNI whose own health is unmeasured
+# is the component you will be debugging blind at the worst moment.
+#
+# serviceMonitor stays off: this repository scrapes with VictoriaMetrics CRDs
+# (VMPodScrape in gitops/02-infra/cilium-observability), not prometheus-operator
+# ones, and enabling it here would create an object nothing reads.
+prometheus:
+  enabled: true
+  port: 9962
+  serviceMonitor:
+    enabled: false
+
+operator:
+  prometheus:
+    enabled: true
+    port: 9963
+    serviceMonitor:
+      enabled: false
+
 hubble:
   enabled: true
   relay:

@@ -1,0 +1,48 @@
+# The Cilium agent's and operator's own metrics, separate from Hubble's.
+#
+# Hubble's metrics describe the traffic; these describe the thing carrying it -
+# datapath, BPF map pressure, policy and endpoint regeneration, identity
+# allocation. The Cilium Metrics dashboard draws entirely from cilium_*, which
+# is why it rendered empty until prometheus.enabled was turned on in
+# cilium/values.yaml: nothing was serving port 9962 at all.
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMPodScrape
+metadata:
+  name: cilium-agent
+  namespace: kube-system
+  labels:
+    finops.internal/product: platform
+    finops.internal/team: platform-engineering
+    finops.internal/environment: prod
+    finops.internal/component: cni
+    finops.internal/cost-center: platform-infra
+    finops.internal/owner: platform-team
+spec:
+  selector:
+    matchLabels:
+      k8s-app: cilium
+  podMetricsEndpoints:
+    - port: prometheus
+      path: /metrics
+      interval: 15s
+---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMPodScrape
+metadata:
+  name: cilium-operator
+  namespace: kube-system
+  labels:
+    finops.internal/product: platform
+    finops.internal/team: platform-engineering
+    finops.internal/environment: prod
+    finops.internal/component: cni
+    finops.internal/cost-center: platform-infra
+    finops.internal/owner: platform-team
+spec:
+  selector:
+    matchLabels:
+      io.cilium/app: operator
+  podMetricsEndpoints:
+    - port: prometheus
+      path: /metrics
+      interval: 15s
