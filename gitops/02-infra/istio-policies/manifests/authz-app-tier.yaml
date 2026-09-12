@@ -1,0 +1,94 @@
+# Who may reach the application tier in prod.
+#
+# The entry point is the ingress controller and nothing else. Traffic that
+# arrives any other way - a pod in another namespace, a workload that acquired
+# a mesh identity, a debug container someone left running - is refused at the
+# transport, before the application sees a byte of it.
+#
+# "frontend only to the backend" does not apply literally on this stand: the
+# frontend is a stock nginx serving a static index.html and has no upstream at
+# all. Rather than write a rule that reads as protection but constrains nothing,
+# its *inbound* is restricted here, and if it ever gains an upstream the rule to
+# add is on the callee, not on it.
+
+# --- checkout: ingress and scrapes ---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: checkout-allow
+  namespace: prod
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: checkout
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - "cluster.local/ns/ingress-nginx/sa/ingress-nginx"
+              # Same port serves the application and /metrics, so the scrape
+              # cannot be separated from the traffic by port here.
+              - "cluster.local/ns/observability/sa/vmagent-vm-local-victoria-metrics-k8s-stack"
+      to:
+        - operation:
+            ports: ["8080"]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: analytics-allow
+  namespace: prod
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: analytics
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - "cluster.local/ns/ingress-nginx/sa/ingress-nginx"
+              - "cluster.local/ns/observability/sa/vmagent-vm-local-victoria-metrics-k8s-stack"
+      to:
+        - operation:
+            ports: ["8080"]
+---
+# --- the worker serves no traffic at all ---
+# It consumes from Kafka and writes to Postgres; the only thing that should
+# ever connect *to* it is the scrape of its metrics port.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: analytics-worker-allow
+  namespace: prod
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: analytics-worker
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/observability/sa/vmagent-vm-local-victoria-metrics-k8s-stack"]
+      to:
+        - operation:
+            ports: ["9090"]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: frontend-allow
+  namespace: prod
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: frontend
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/ingress-nginx/sa/ingress-nginx"]
+      to:
+        - operation:
+            ports: ["80"]

@@ -1,0 +1,183 @@
+# Who may reach the data stores in prod.
+#
+# STRICT mTLS already proves *who* is calling. These say where each caller is
+# allowed to go, which is the half mTLS does not cover: before this, any
+# workload holding any mesh identity could open a connection to either
+# database.
+#
+# Every policy here is an ALLOW, and in Istio an ALLOW policy attached to a
+# workload makes that workload deny-by-default: anything not listed is refused.
+# That is the point, and it is also the risk - a caller omitted here stops
+# working the moment this is applied, not at some later failure. The lists were
+# built from the traffic ztunnel actually logged under load plus the
+# dependencies declared in gitops/04-business-app/*/values.yaml, because a
+# policy written only from observed traffic silently omits whatever did not
+# happen during the observation window.
+#
+# Enforced by ztunnel at L4: identity, port, direction. Method and path would
+# need a waypoint, which this cluster has no Gateway API CRDs for.
+#
+# Selectors are worth reading carefully. CNPG pooler pods carry *both*
+# cnpg.io/cluster and cnpg.io/poolerName, so selecting a database by cluster
+# alone silently also selects its pooler. The instances are selected by
+# cnpg.io/podRole: instance for that reason.
+
+# --- checkout's PgBouncer: only checkout, plus metrics ---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: checkout-pooler-allow
+  namespace: prod
+spec:
+  selector:
+    matchLabels:
+      cnpg.io/poolerName: checkout-db-pooler
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/prod/sa/checkout"]
+      to:
+        - operation:
+            ports: ["5432"]
+    # The pooler exports PgBouncer's own counters; without this the scrape is
+    # refused and the panel that shows pool saturation goes blank exactly when
+    # the pool is the thing under investigation.
+    - from:
+        - source:
+            principals: ["cluster.local/ns/observability/sa/vmagent-vm-local-victoria-metrics-k8s-stack"]
+      to:
+        - operation:
+            ports: ["9127"]
+---
+# --- analytics' PgBouncer ---
+# analytics and analytics-worker share the ServiceAccount `analytics`, so this
+# cannot distinguish the API from the consumer. Splitting them needs separate
+# ServiceAccounts first - noted rather than silently ignored, because the
+# policy reads stricter than it is.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: analytics-pooler-allow
+  namespace: prod
+spec:
+  selector:
+    matchLabels:
+      cnpg.io/poolerName: analytics-events-db-pooler
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/prod/sa/analytics"]
+      to:
+        - operation:
+            ports: ["5432"]
+    - from:
+        - source:
+            principals: ["cluster.local/ns/observability/sa/vmagent-vm-local-victoria-metrics-k8s-stack"]
+      to:
+        - operation:
+            ports: ["9127"]
+---
+# --- the databases themselves: only their own pooler ---
+# This is what stops a caller from bypassing PgBouncer and connecting straight
+# to Postgres, which would defeat the connection ceiling the pooler exists to
+# enforce and would not show up in any pool metric.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: checkout-db-allow
+  namespace: prod
+spec:
+  selector:
+    matchLabels:
+      cnpg.io/cluster: checkout-db
+      cnpg.io/podRole: instance
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/prod/sa/checkout-db-pooler"]
+      to:
+        - operation:
+            ports: ["5432"]
+    - from:
+        - source:
+            principals: ["cluster.local/ns/observability/sa/vmagent-vm-local-victoria-metrics-k8s-stack"]
+      to:
+        - operation:
+            ports: ["9187"]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: analytics-db-allow
+  namespace: prod
+spec:
+  selector:
+    matchLabels:
+      cnpg.io/cluster: analytics-events-db
+      cnpg.io/podRole: instance
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/prod/sa/analytics-events-db-pooler"]
+      to:
+        - operation:
+            ports: ["5432"]
+    - from:
+        - source:
+            principals: ["cluster.local/ns/observability/sa/vmagent-vm-local-victoria-metrics-k8s-stack"]
+      to:
+        - operation:
+            ports: ["9187"]
+---
+# --- the caches ---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: checkout-redis-allow
+  namespace: prod
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: checkout-redis
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/prod/sa/checkout"]
+      to:
+        - operation:
+            ports: ["6379"]
+    - from:
+        - source:
+            principals: ["cluster.local/ns/observability/sa/vmagent-vm-local-victoria-metrics-k8s-stack"]
+      to:
+        - operation:
+            ports: ["9121"]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: analytics-redis-allow
+  namespace: prod
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: analytics-redis
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/prod/sa/analytics"]
+      to:
+        - operation:
+            ports: ["6379"]
+    - from:
+        - source:
+            principals: ["cluster.local/ns/observability/sa/vmagent-vm-local-victoria-metrics-k8s-stack"]
+      to:
+        - operation:
+            ports: ["9121"]
