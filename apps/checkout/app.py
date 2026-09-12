@@ -1,14 +1,17 @@
-import hashlib
 import json
 import logging
 import os
 import random
 import sys
+import threading
 import time
 import uuid
 
-import psycopg2
 import redis as redis_lib
+from common import metrics as metrics_mod
+from common import workload
+from common.db import PooledPostgres, connect_with_retry
+from common.resilience import CircuitBreaker, CircuitOpen, LoadShedder, RetryBudget, Shed, call_with_retry
 from confluent_kafka import Producer
 from flask import Flask, Response, request
 from opentelemetry import propagate, trace
@@ -17,8 +20,7 @@ from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.trace import SpanKind, Status, StatusCode
-from prometheus_client import REGISTRY, Counter, Histogram
-from prometheus_client.openmetrics.exposition import CONTENT_TYPE_LATEST, generate_latest
+from prometheus_client import Counter, Gauge, Histogram
 
 SERVICE_NAME = os.environ.get("OTEL_SERVICE_NAME", "checkout")
 SERVICE_VERSION = os.environ.get("SERVICE_VERSION", "0.1.0")
@@ -33,16 +35,33 @@ OTLP_ENDPOINT = os.environ.get(
     "http://tempo-local.observability.svc.cluster.local:4318",
 )
 PORT = int(os.environ.get("PORT", "8080"))
-LATENCY_MS_MEAN = float(os.environ.get("LATENCY_MS_MEAN", "40"))
-LATENCY_MS_JITTER = float(os.environ.get("LATENCY_MS_JITTER", "15"))
 ERROR_RATE = float(os.environ.get("ERROR_RATE", "0.02"))
-WORK_ITERATIONS = int(os.environ.get("WORK_ITERATIONS", "150000"))
+
+# Per-request resource shape, in milliseconds of CPU / MB of allocation / ms
+# of simulated downstream wait. See apps/common/workload.py for why this is
+# expressed in time rather than in a fixed iteration count.
+CHECKOUT_PROFILE = workload.Profile.from_env(os.environ, "PROFILE_CHECKOUT")
+LOOKUP_PROFILE = workload.Profile.from_env(os.environ, "PROFILE_LOOKUP")
+
+# Concurrency cap past which requests are rejected rather than queued.
+MAX_IN_FLIGHT = int(os.environ.get("MAX_IN_FLIGHT", "64"))
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 DATABASE_NAME = os.environ.get("DATABASE_NAME", SERVICE_NAME)
+DB_POOL_MIN = int(os.environ.get("DB_POOL_MIN", "1"))
+DB_POOL_MAX = int(os.environ.get("DB_POOL_MAX", "8"))
+DB_STATEMENT_TIMEOUT_MS = int(os.environ.get("DB_STATEMENT_TIMEOUT_MS", "5000"))
+
 REDIS_URL = os.environ.get("REDIS_URL")
+REDIS_POOL_MAX = int(os.environ.get("REDIS_POOL_MAX", "32"))
+REDIS_TIMEOUT_S = float(os.environ.get("REDIS_TIMEOUT_S", "2"))
+
 KAFKA_BOOTSTRAP_SERVERS = os.environ.get("KAFKA_BOOTSTRAP_SERVERS")
 KAFKA_TOPIC = os.environ.get("KAFKA_TOPIC", "orders")
+KAFKA_LINGER_MS = int(os.environ.get("KAFKA_LINGER_MS", "20"))
+KAFKA_BATCH_SIZE = int(os.environ.get("KAFKA_BATCH_SIZE", "65536"))
+KAFKA_COMPRESSION = os.environ.get("KAFKA_COMPRESSION", "lz4")
+KAFKA_QUEUE_MAX_MESSAGES = int(os.environ.get("KAFKA_QUEUE_MAX_MESSAGES", "100000"))
 
 provider = TracerProvider(
     resource=Resource.create(
@@ -71,7 +90,21 @@ REQUEST_LATENCY = Histogram(
 )
 DB_LATENCY = Histogram("db_query_duration_seconds", "Postgres query latency in seconds")
 CACHE_LATENCY = Histogram("cache_call_duration_seconds", "Redis call latency in seconds")
-KAFKA_LATENCY = Histogram("kafka_publish_duration_seconds", "Kafka publish latency in seconds")
+KAFKA_ENQUEUE_LATENCY = Histogram(
+    "kafka_enqueue_duration_seconds", "Time spent handing a message to the producer queue"
+)
+# Shed requests are the signal that a pod is at capacity. Without this being
+# its own counter they would be indistinguishable from application errors,
+# and "the service is saturated" would look identical to "the service is
+# broken" on every dashboard and in every experiment result.
+REQUESTS_SHED = Counter("http_requests_shed_total", "Requests rejected because the pod was at capacity")
+IN_FLIGHT = Gauge("http_requests_in_flight", "Requests currently being served by this process")
+KAFKA_DELIVERY_ERRORS = Counter("kafka_delivery_errors_total", "Kafka messages the broker never acked")
+BREAKER_STATE = Gauge("dependency_circuit_state", "0=closed 1=half-open 2=open", ["dependency"])
+CPU_CALIBRATION = Gauge(
+    "workload_cpu_iters_per_ms",
+    "Calibrated synthetic-work iterations per millisecond on this node",
+)
 
 # Routed through logging (not bare print) so ERROR lines are a real,
 # filterable severity instead of just another line of JSON text - level
@@ -111,12 +144,31 @@ def log_json(span, level="info", **fields):
     logger.log(_LOG_LEVELS.get(level, logging.INFO), json.dumps(fields))
 
 
-redis_client = redis_lib.from_url(REDIS_URL, socket_timeout=2) if REDIS_URL else None
-kafka_producer = (
-    Producer({"bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS}) if KAFKA_BOOTSTRAP_SERVERS else None
+SHEDDER = LoadShedder(MAX_IN_FLIGHT)
+RETRY_BUDGET = RetryBudget(ratio=float(os.environ.get("RETRY_BUDGET_RATIO", "0.1")))
+DB_BREAKER = CircuitBreaker(
+    "postgres",
+    failure_threshold=int(os.environ.get("DB_BREAKER_THRESHOLD", "5")),
+    recovery_timeout_s=float(os.environ.get("DB_BREAKER_RECOVERY_S", "10")),
 )
 
+# Redis gets a bounded pool rather than a connection per call, for the same
+# reason Postgres does: otherwise the connection count tracks request rate.
+redis_client = (
+    redis_lib.Redis(
+        connection_pool=redis_lib.ConnectionPool.from_url(
+            REDIS_URL, max_connections=REDIS_POOL_MAX, socket_timeout=REDIS_TIMEOUT_S
+        )
+    )
+    if REDIS_URL
+    else None
+)
 
+db: PooledPostgres | None = None
+kafka_producer: Producer | None = None
+_shutting_down = threading.Event()
+
+REGIONS = ["us-east", "us-west", "eu-central", "ap-south"]
 
 # Always present after init_db() - gives /checkout/lookup a real row to
 # find without depending on request ordering or cross-request state.
@@ -124,24 +176,22 @@ SEED_ORDER_ID = "00000000-0000-0000-0000-000000000001"
 
 
 def init_db():
-    if not DATABASE_URL:
+    if not db:
         return
-    with psycopg2.connect(DATABASE_URL) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS orders (
-                    id UUID PRIMARY KEY,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                    status TEXT NOT NULL
-                )
-                """
+    with db.cursor(commit=True) as cur:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS orders (
+                id UUID PRIMARY KEY,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                status TEXT NOT NULL
             )
-            cur.execute(
-                "INSERT INTO orders (id, status) VALUES (%s, %s) ON CONFLICT (id) DO NOTHING",
-                (SEED_ORDER_ID, "placed"),
-            )
-        conn.commit()
+            """
+        )
+        cur.execute(
+            "INSERT INTO orders (id, status) VALUES (%s, %s) ON CONFLICT (id) DO NOTHING",
+            (SEED_ORDER_ID, "placed"),
+        )
 
 
 def cache_lookup(idempotency_key):
@@ -172,7 +222,7 @@ def cache_store(idempotency_key, order_id):
 
 
 def persist_order(order_id, span_ctx_for_sql):
-    if not DATABASE_URL:
+    if not db:
         return
     start = time.perf_counter()
     with tracer.start_as_current_span("checkout.persist_order") as span:
@@ -189,16 +239,22 @@ def persist_order(order_id, span_ctx_for_sql):
         span.set_attribute("db.operation", "INSERT")
         span.set_attribute("db.sql.table", "orders")
         span.set_attribute("db.statement", sql)
+
+        def _write():
+            with db.cursor(commit=True) as cur:
+                cur.execute(sql, (order_id, "placed"))
+
         try:
-            with psycopg2.connect(DATABASE_URL) as conn:
-                with conn.cursor() as cur:
-                    cur.execute(sql, (order_id, "placed"))
-                conn.commit()
+            # Retries are bounded by a shared budget so a struggling database
+            # cannot be turned into an outage by its own clients retrying.
+            call_with_retry(_write, attempts=2, budget=RETRY_BUDGET, breaker=DB_BREAKER)
         except Exception as e:
             span.record_exception(e)
             span.set_status(Status(StatusCode.ERROR, str(e)))
             log_json(span, level="error", _msg="postgres INSERT failed", table="orders", order_id=order_id, error=str(e))
             raise
+        finally:
+            BREAKER_STATE.labels(dependency="postgres").set(DB_BREAKER.state_code)
         log_json(span, _msg="postgres INSERT", table="orders", order_id=order_id)
     DB_LATENCY.observe(time.perf_counter() - start)
 
@@ -210,7 +266,7 @@ def lookup_order(order_id_str, span_ctx_for_sql, slow=False):
     # a real empty result, not an error, (3) not a UUID at all - Postgres
     # itself rejects the value (invalid input syntax for type uuid), a
     # real driver-level exception, not an app-level check we chose to add.
-    if not DATABASE_URL:
+    if not db:
         return None
     start = time.perf_counter()
     with tracer.start_as_current_span("checkout.lookup_order") as span:
@@ -221,18 +277,17 @@ def lookup_order(order_id_str, span_ctx_for_sql, slow=False):
         span.set_attribute("db.sql.table", "orders")
         span.set_attribute("db.statement", sql)
         try:
-            with psycopg2.connect(DATABASE_URL) as conn:
-                with conn.cursor() as cur:
-                    if slow:
-                        # Deliberately crosses Postgres's own 200ms
-                        # log_min_duration_statement threshold (see
-                        # charts/app1/templates/postgres.yaml) so a real
-                        # slow-query log line - not just a fast SELECT -
-                        # shows up on the Postgres side too, distinct
-                        # from the always-logged writes.
-                        cur.execute(f"/* trace_id={span_ctx_for_sql} */ SELECT pg_sleep(0.25)")
-                    cur.execute(sql, (order_id_str,))
-                    row = cur.fetchone()
+            with db.cursor() as cur:
+                if slow:
+                    # Deliberately crosses Postgres's own 200ms
+                    # log_min_duration_statement threshold (see
+                    # charts/app1/templates/postgres.yaml) so a real
+                    # slow-query log line - not just a fast SELECT -
+                    # shows up on the Postgres side too, distinct
+                    # from the always-logged writes.
+                    cur.execute(f"/* trace_id={span_ctx_for_sql} */ SELECT pg_sleep(0.25)")
+                cur.execute(sql, (order_id_str,))
+                row = cur.fetchone()
         except Exception as e:
             span.record_exception(e)
             span.set_status(Status(StatusCode.ERROR, str(e)))
@@ -258,6 +313,11 @@ def lookup_order(order_id_str, span_ctx_for_sql, slow=False):
     return row
 
 
+def _on_delivery(err, msg):
+    if err is not None:
+        KAFKA_DELIVERY_ERRORS.inc()
+
+
 def publish_order_event(order_id):
     if not kafka_producer:
         return
@@ -271,47 +331,55 @@ def publish_order_event(order_id):
         propagate.inject(headers)
         kafka_headers = [(k, v.encode("utf-8")) for k, v in headers.items()]
 
-        delivery = {}
-
-        def on_delivery(err, msg):
-            if err is not None:
-                delivery["error"] = str(err)
-            else:
-                delivery["partition"] = msg.partition()
-                delivery["offset"] = msg.offset()
-
-        kafka_producer.produce(
-            KAFKA_TOPIC,
-            value=json.dumps({"order_id": order_id}).encode("utf-8"),
-            headers=kafka_headers,
-            on_delivery=on_delivery,
-        )
-        # Blocks until the broker acks (or the 2s timeout) so the delivery
-        # report (partition/offset, or the error) is available to log
-        # immediately - poll(0) alone doesn't guarantee the callback has
-        # fired yet.
-        kafka_producer.flush(2.0)
-        if "error" in delivery:
-            span.set_status(Status(StatusCode.ERROR, delivery["error"]))
-            log_json(span, level="error", _msg="kafka produce failed", topic=KAFKA_TOPIC, order_id=order_id, **delivery)
-        else:
-            span.set_attribute("messaging.kafka.partition", delivery.get("partition", -1))
-            log_json(span, _msg="kafka produce", topic=KAFKA_TOPIC, order_id=order_id, **delivery)
-    KAFKA_LATENCY.observe(time.perf_counter() - start)
-
-
-def validate_payment():
-    # Burns real CPU so container_cpu_usage_seconds_total carries a signal
-    # that scales with traffic, instead of every request costing ~nothing.
-    digest = hashlib.sha256()
-    for _ in range(WORK_ITERATIONS):
-        digest.update(b"checkout")
-    return digest.hexdigest()
+        # amount_cents/region are the fields analytics writes into its
+        # order_events table - without them here that table would have
+        # nothing to derive them from and the consumer would be inventing
+        # data rather than recording what actually flowed through.
+        event = {
+            "order_id": order_id,
+            "amount_cents": random.randint(500, 50000),
+            "region": random.choice(REGIONS),
+        }
+        # Enqueue only. The previous version called flush(2.0) here, which
+        # blocked the request until the broker acked - capping producer
+        # throughput at (concurrency / round-trip latency) regardless of what
+        # the broker could actually take, and putting a 2s worst case on a
+        # request that has already done its real work. Delivery reports are
+        # served by the background poll thread instead, and failures surface
+        # as kafka_delivery_errors_total rather than as request latency.
+        try:
+            kafka_producer.produce(
+                KAFKA_TOPIC,
+                value=json.dumps(event).encode("utf-8"),
+                headers=kafka_headers,
+                on_delivery=_on_delivery,
+            )
+        except BufferError:
+            # The local queue is full: the broker is slower than we are
+            # producing. Dropping here (and counting it) is deliberate -
+            # blocking would convert a Kafka problem into a checkout outage.
+            KAFKA_DELIVERY_ERRORS.inc()
+            log_json(span, level="warning", _msg="kafka produce queue full", topic=KAFKA_TOPIC, order_id=order_id)
+        log_json(span, _msg="kafka enqueued", topic=KAFKA_TOPIC, order_id=order_id)
+    KAFKA_ENQUEUE_LATENCY.observe(time.perf_counter() - start)
 
 
 @app.route("/", methods=["GET"])
 @app.route("/checkout", methods=["GET"])
 def checkout():
+    try:
+        with SHEDDER.admit():
+            IN_FLIGHT.set(SHEDDER.in_flight)
+            return _checkout()
+    except Shed:
+        REQUESTS_SHED.inc()
+        REQUEST_COUNT.labels(method="GET", path="/checkout", status="429").inc()
+        return Response("overloaded\n", status=429, headers={"Retry-After": "1"})
+    finally:
+        IN_FLIGHT.set(SHEDDER.in_flight)
+
+
+def _checkout():
     start = time.perf_counter()
     # Werkzeug reconstructs header names title-cased ("Traceparent"), but
     # the W3C propagator's default getter does a case-sensitive lookup for
@@ -329,10 +397,7 @@ def checkout():
         cached_order_id = cache_lookup(idempotency_key)
 
         with tracer.start_as_current_span("checkout.validate_payment"):
-            validate_payment()
-
-        delay_seconds = max(0.0, random.gauss(LATENCY_MS_MEAN, LATENCY_MS_JITTER)) / 1000.0
-        time.sleep(delay_seconds)
+            CHECKOUT_PROFILE.run()
 
         order_id = None
         try:
@@ -344,6 +409,13 @@ def checkout():
                 publish_order_event(order_id)
                 cache_store(idempotency_key, order_id)
             status = 200
+        except CircuitOpen as e:
+            # The dependency is known-bad; fail fast and say so distinctly
+            # rather than waiting for a timeout we already expect.
+            status = 503
+            span.record_exception(e)
+            span.set_status(Status(StatusCode.ERROR, str(e)))
+            log_json(span, level="error", _msg="checkout dependency circuit open", path="/checkout", error=str(e))
         except Exception as e:
             status = 500
             span.record_exception(e)
@@ -363,16 +435,19 @@ def checkout():
     # (trace_id here) alongside the value it fell into that bucket - each
     # bucket keeps whichever exemplar was freshest as of the last scrape.
     # That's what lets Grafana show a *different*, actually representative
-    # trace for the p50 point vs the p99 point on the same graph, instead
-    # of only being able to jump to "some trace from this time range."
-    REQUEST_LATENCY.labels(method="GET", path="/checkout").observe(
-        time.perf_counter() - start, exemplar={"trace_id": trace_id_hex}
+    # trace for the p50 point vs the p99 point on the same graph. Attached
+    # only when the process is exporting a format that can carry it - see
+    # apps/common/metrics.py.
+    metrics_mod.observe(
+        REQUEST_LATENCY.labels(method="GET", path="/checkout"),
+        time.perf_counter() - start,
+        trace_id_hex,
     )
     REQUEST_COUNT.labels(method="GET", path="/checkout", status=str(status)).inc()
 
     log_json(
         span,
-        level="error" if status == 500 else "info",
+        level="error" if status >= 500 else "info",
         msg="checkout request handled",
         path="/checkout",
         status=status,
@@ -380,6 +455,8 @@ def checkout():
         duration_ms=round((time.perf_counter() - start) * 1000, 2),
     )
 
+    if status == 503:
+        return Response("checkout dependency unavailable\n", status=503)
     if status == 500:
         return Response("checkout failed\n", status=500)
     return Response(f"checkout ok order_id={order_id}\n", status=200)
@@ -387,6 +464,19 @@ def checkout():
 
 @app.route("/checkout/lookup", methods=["GET"])
 def checkout_lookup():
+    try:
+        with SHEDDER.admit():
+            IN_FLIGHT.set(SHEDDER.in_flight)
+            return _checkout_lookup()
+    except Shed:
+        REQUESTS_SHED.inc()
+        REQUEST_COUNT.labels(method="GET", path="/checkout/lookup", status="429").inc()
+        return Response("overloaded\n", status=429, headers={"Retry-After": "1"})
+    finally:
+        IN_FLIGHT.set(SHEDDER.in_flight)
+
+
+def _checkout_lookup():
     start = time.perf_counter()
     ctx = propagate.extract({k.lower(): v for k, v in request.headers.items()})
     order_id_str = request.args.get("id", SEED_ORDER_ID)
@@ -399,6 +489,8 @@ def checkout_lookup():
         span.set_attribute("http.target", request.path)
         span.set_attribute("http.scheme", request.scheme)
         trace_id_hex = format(span.get_span_context().trace_id, "032x")
+
+        LOOKUP_PROFILE.run()
 
         row = None
         try:
@@ -420,8 +512,10 @@ def checkout_lookup():
 
         span.set_attribute("http.status_code", status)
 
-    REQUEST_LATENCY.labels(method="GET", path="/checkout/lookup").observe(
-        time.perf_counter() - start, exemplar={"trace_id": trace_id_hex}
+    metrics_mod.observe(
+        REQUEST_LATENCY.labels(method="GET", path="/checkout/lookup"),
+        time.perf_counter() - start,
+        trace_id_hex,
     )
     REQUEST_COUNT.labels(method="GET", path="/checkout/lookup", status=str(status)).inc()
 
@@ -444,14 +538,128 @@ def checkout_lookup():
 
 @app.route("/metrics")
 def metrics():
-    return Response(generate_latest(REGISTRY), mimetype=CONTENT_TYPE_LATEST)
+    payload, content_type = metrics_mod.render()
+    return Response(payload, mimetype=content_type)
 
 
 @app.route("/healthz")
 def healthz():
+    """Liveness: is this process itself alive?
+
+    Deliberately does not touch dependencies. A liveness probe that fails
+    when Postgres is slow restarts every healthy pod in the deployment at
+    exactly the moment the database can least afford a reconnect storm.
+    """
     return Response("ok\n", status=200)
 
 
+@app.route("/readyz")
+def readyz():
+    """Readiness: can this process actually serve a request right now?
+
+    This is where dependency health belongs - a pod that cannot reach its
+    database should stop receiving traffic without being restarted.
+    """
+    problems = []
+    if db is not None and not db.healthy():
+        problems.append("postgres")
+    if redis_client is not None:
+        try:
+            redis_client.ping()
+        except Exception:
+            problems.append("redis")
+    if problems:
+        return Response(json.dumps({"ready": False, "failing": problems}) + "\n", status=503)
+    return Response(json.dumps({"ready": True}) + "\n", status=200)
+
+
+def _kafka_poll_loop():
+    """Serve delivery callbacks without blocking any request.
+
+    poll(0) rather than poll(timeout): a blocking poll would hold the gevent
+    hub for its whole timeout and stall every other greenlet in the worker.
+    """
+    while not _shutting_down.is_set():
+        try:
+            kafka_producer.poll(0)
+        except Exception:
+            pass
+        time.sleep(0.05)
+
+
+def _shutdown(signum=None, frame=None):
+    """Drain on SIGTERM so scale-down does not show up as errors.
+
+    Kubernetes sends SIGTERM, waits terminationGracePeriodSeconds, then
+    SIGKILLs. Anything still buffered in the Kafka producer at that point is
+    silently lost, and any in-flight request dies mid-response - which would
+    make every autoscaling strategy look worse the more often it scales in.
+    """
+    _shutting_down.set()
+    try:
+        if kafka_producer is not None:
+            kafka_producer.flush(10.0)
+    except Exception:
+        pass
+    try:
+        if db is not None:
+            db.close()
+    except Exception:
+        pass
+
+
+def _init_process():
+    """Per-worker startup. Runs once per gunicorn worker (preload_app=False)."""
+    global db, kafka_producer
+
+    iters = workload.calibrate()
+    CPU_CALIBRATION.set(iters)
+
+    if DATABASE_URL:
+        connect_with_retry(DATABASE_URL)
+        db = PooledPostgres(
+            DATABASE_URL,
+            minconn=DB_POOL_MIN,
+            maxconn=DB_POOL_MAX,
+            statement_timeout_ms=DB_STATEMENT_TIMEOUT_MS,
+            application_name=f"{SERVICE_NAME}@{K8S_POD_NAME or 'local'}",
+        )
+        init_db()
+
+    if KAFKA_BOOTSTRAP_SERVERS:
+        kafka_producer = Producer(
+            {
+                "bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS,
+                # Batch rather than send-per-message: linger briefly so the
+                # producer can coalesce, which is the difference between a
+                # few hundred and a few tens of thousands of messages/sec.
+                "linger.ms": KAFKA_LINGER_MS,
+                "batch.size": KAFKA_BATCH_SIZE,
+                "compression.type": KAFKA_COMPRESSION,
+                "queue.buffering.max.messages": KAFKA_QUEUE_MAX_MESSAGES,
+                "enable.idempotence": True,
+            }
+        )
+        threading.Thread(target=_kafka_poll_loop, daemon=True).start()
+
+    BREAKER_STATE.labels(dependency="postgres").set(DB_BREAKER.state_code)
+
+    import atexit
+    import signal
+
+    atexit.register(_shutdown)
+    try:
+        signal.signal(signal.SIGTERM, _shutdown)
+    except ValueError:
+        # Not on the main thread (some worker classes) - atexit still covers it.
+        pass
+
+
+_init_process()
+
+
 if __name__ == "__main__":
-    init_db()
+    # Local debugging only. In the cluster this module is served by gunicorn
+    # (see apps/common/gunicorn_conf.py); the Werkzeug server below is
+    # single-process and explicitly not for load.
     app.run(host="0.0.0.0", port=PORT, threaded=True)

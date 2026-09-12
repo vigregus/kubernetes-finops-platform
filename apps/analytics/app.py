@@ -1,23 +1,38 @@
-import hashlib
+"""analytics - HTTP API.
+
+The Kafka consumer used to run as a daemon thread inside this same process.
+That arrangement cannot survive gunicorn: the module is imported once per
+worker, so `WEB_CONCURRENCY=4` would silently start four consumers in the
+same group inside one pod. It also meant the queue could never be scaled
+independently of HTTP traffic, and the worker's cost could not be separated
+from the API's.
+
+The consumer now lives in worker.py and runs as its own Deployment from this
+same image. Everything below the HTTP handlers is shared setup that both
+entrypoints import.
+"""
 import json
 import logging
 import os
 import random
 import sys
-import threading
 import time
+import uuid
 
 import redis as redis_lib
-from confluent_kafka import Consumer
+from common import metrics as metrics_mod
+from common import workload
+from common.db import PooledPostgres, connect_with_retry
+from common.resilience import LoadShedder, Shed
 from flask import Flask, Response, request
-from opentelemetry import propagate, trace
+from opentelemetry import trace
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.trace import SpanKind, Status, StatusCode
-from prometheus_client import REGISTRY, Counter, Histogram
-from prometheus_client.openmetrics.exposition import CONTENT_TYPE_LATEST, generate_latest
+from opentelemetry import propagate
+from prometheus_client import Counter, Gauge, Histogram
 
 SERVICE_NAME = os.environ.get("OTEL_SERVICE_NAME", "analytics")
 SERVICE_VERSION = os.environ.get("SERVICE_VERSION", "0.1.0")
@@ -32,16 +47,35 @@ OTLP_ENDPOINT = os.environ.get(
     "http://tempo-local.observability.svc.cluster.local:4318",
 )
 PORT = int(os.environ.get("PORT", "8080"))
-LATENCY_MS_MEAN = float(os.environ.get("LATENCY_MS_MEAN", "20"))
-LATENCY_MS_JITTER = float(os.environ.get("LATENCY_MS_JITTER", "10"))
 ERROR_RATE = float(os.environ.get("ERROR_RATE", "0.01"))
-WORK_ITERATIONS = int(os.environ.get("WORK_ITERATIONS", "300000"))
-BATCH_ROWS = int(os.environ.get("BATCH_ROWS", "5000"))
+MAX_IN_FLIGHT = int(os.environ.get("MAX_IN_FLIGHT", "64"))
+
+# Per-request resource shape. analytics is deliberately given a heavier CPU
+# profile than checkout - see apps/common/workload.py; the point of the stand
+# is that the tiers do not all look alike to a rightsizing decision.
+QUERY_PROFILE = workload.Profile.from_env(os.environ, "PROFILE_ANALYTICS")
+BATCH_PROFILE = workload.Profile.from_env(os.environ, "PROFILE_BATCH")
 
 REDIS_URL = os.environ.get("REDIS_URL")
+REDIS_POOL_MAX = int(os.environ.get("REDIS_POOL_MAX", "32"))
+REDIS_TIMEOUT_S = float(os.environ.get("REDIS_TIMEOUT_S", "2"))
+
 KAFKA_BOOTSTRAP_SERVERS = os.environ.get("KAFKA_BOOTSTRAP_SERVERS")
 KAFKA_TOPIC = os.environ.get("KAFKA_TOPIC", "orders")
 KAFKA_CONSUMER_GROUP = os.environ.get("KAFKA_CONSUMER_GROUP", "analytics")
+KAFKA_BATCH_SIZE = int(os.environ.get("KAFKA_CONSUME_BATCH", "100"))
+
+DATABASE_URL = os.environ.get("DATABASE_URL")
+DATABASE_NAME = os.environ.get("DATABASE_NAME", SERVICE_NAME)
+DB_POOL_MIN = int(os.environ.get("DB_POOL_MIN", "1"))
+DB_POOL_MAX = int(os.environ.get("DB_POOL_MAX", "8"))
+DB_STATEMENT_TIMEOUT_MS = int(os.environ.get("DB_STATEMENT_TIMEOUT_MS", "5000"))
+
+# Every order on this topic belongs to the same product - checkout is its only
+# producer. Hardcoding that is more honest than deriving it from analytics'
+# own finops.internal/product label, which describes who processes the event,
+# not what the order was for.
+EVENT_PRODUCT = "commerce"
 
 REDIS_KEY_PROCESSED = "analytics:orders_processed"
 
@@ -71,7 +105,15 @@ REQUEST_LATENCY = Histogram(
     "http_request_duration_seconds", "HTTP request latency in seconds", ["method", "path"]
 )
 CACHE_LATENCY = Histogram("cache_call_duration_seconds", "Redis call latency in seconds")
+DB_LATENCY = Histogram("db_query_duration_seconds", "Postgres query latency in seconds")
 ORDERS_CONSUMED = Counter("orders_consumed_total", "Order events consumed from Kafka")
+EVENTS_PERSISTED = Counter("order_events_persisted_total", "Rows written to order_events")
+REQUESTS_SHED = Counter("http_requests_shed_total", "Requests rejected because the pod was at capacity")
+IN_FLIGHT = Gauge("http_requests_in_flight", "Requests currently being served by this process")
+CPU_CALIBRATION = Gauge(
+    "workload_cpu_iters_per_ms",
+    "Calibrated synthetic-work iterations per millisecond on this node",
+)
 
 # Routed through logging (not bare print) so ERROR lines are a real,
 # filterable severity instead of just another line of JSON text - level
@@ -109,103 +151,105 @@ def log_json(span, level="info", **fields):
     logger.log(_LOG_LEVELS.get(level, logging.INFO), json.dumps(fields))
 
 
-redis_client = redis_lib.from_url(REDIS_URL, socket_timeout=2) if REDIS_URL else None
+SHEDDER = LoadShedder(MAX_IN_FLIGHT)
 
-
-def aggregate_batch():
-    # Heavier than checkout's per-request work on purpose - this now runs
-    # once per consumed order event rather than once per HTTP request, so
-    # analytics' CPU usage tracks checkout's traffic through Kafka instead
-    # of direct hits on /analytics. That's the point: a derived/shared
-    # cost signal, not just a per-endpoint one.
-    digest = hashlib.sha256()
-    rows = []
-    for i in range(BATCH_ROWS):
-        digest.update(str(i).encode())
-        rows.append(digest.hexdigest())
-    for _ in range(WORK_ITERATIONS):
-        digest.update(b"analytics")
-    return len(rows)
-
-
-def consume_loop():
-    if not KAFKA_BOOTSTRAP_SERVERS:
-        return
-    consumer = Consumer(
-        {
-            "bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS,
-            "group.id": KAFKA_CONSUMER_GROUP,
-            "auto.offset.reset": "earliest",
-        }
+redis_client = (
+    redis_lib.Redis(
+        connection_pool=redis_lib.ConnectionPool.from_url(
+            REDIS_URL, max_connections=REDIS_POOL_MAX, socket_timeout=REDIS_TIMEOUT_S
+        )
     )
-    consumer.subscribe([KAFKA_TOPIC])
-    try:
-        while True:
-            msg = consumer.poll(1.0)
-            if msg is None:
-                continue
-            if msg.error():
-                logger.error(json.dumps({"level": "error", "_msg": "kafka poll error", "error": str(msg.error())}))
-                continue
+    if REDIS_URL
+    else None
+)
 
-            headers = {k: v.decode("utf-8") for k, v in (msg.headers() or [])}
-            ctx = propagate.extract(headers)
-            with tracer.start_as_current_span(
-                "analytics.consume_order", context=ctx, kind=SpanKind.CONSUMER
-            ) as span:
-                span.set_attribute("messaging.system", "kafka")
-                span.set_attribute("messaging.destination", msg.topic())
-                span.set_attribute("messaging.destination_kind", "topic")
-                span.set_attribute("messaging.operation", "receive")
-                span.set_attribute("messaging.kafka.partition", msg.partition())
-                span.set_attribute("messaging.kafka.consumer_group", KAFKA_CONSUMER_GROUP)
-                payload = {}
-                try:
-                    payload = json.loads(msg.value())
-                    span.set_attribute("order.id", payload.get("order_id", ""))
-                except (json.JSONDecodeError, TypeError):
-                    pass
-                order_id = payload.get("order_id") if isinstance(payload, dict) else None
+db: PooledPostgres | None = None
 
-                log_json(
-                    span,
-                    _msg="kafka consume",
-                    topic=msg.topic(),
-                    partition=msg.partition(),
-                    offset=msg.offset(),
-                    order_id=order_id,
-                )
 
-                try:
-                    with tracer.start_as_current_span("analytics.aggregate_batch") as agg_span:
-                        row_count = aggregate_batch()
-                        span.set_attribute("analytics.batch_rows", row_count)
-                        log_json(agg_span, _msg="aggregate batch computed", rows=row_count, order_id=order_id)
+def init_db():
+    """Own the order_events schema here.
 
-                    if redis_client:
-                        start = time.perf_counter()
-                        with tracer.start_as_current_span("analytics.cache_update") as cache_span:
-                            cache_span.set_attribute("db.system", "redis")
-                            cache_span.set_attribute("db.operation", "INCR")
-                            cache_span.set_attribute("db.statement", f"INCR {REDIS_KEY_PROCESSED}")
-                            new_total = redis_client.incr(REDIS_KEY_PROCESSED)
-                            log_json(cache_span, _msg="redis INCR", key=REDIS_KEY_PROCESSED, new_value=new_total)
-                        CACHE_LATENCY.observe(time.perf_counter() - start)
+    analytics is what writes this table on its real consume path, so the DDL
+    belongs with the service that owns it rather than in a migration tool the
+    rest of this repository does not have.
+    """
+    if not db:
+        return
+    with db.cursor(commit=True) as cur:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS order_events (
+                event_id UUID PRIMARY KEY,
+                order_id UUID NOT NULL,
+                event_type TEXT NOT NULL,
+                product TEXT NOT NULL,
+                amount_cents BIGINT NOT NULL,
+                occurred_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                region TEXT NOT NULL
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS order_events_occurred_at_idx ON order_events (occurred_at)")
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS order_events_product_occurred_at_idx "
+            "ON order_events (product, occurred_at)"
+        )
 
-                    log_json(span, msg="order consumed", order_id=order_id)
-                except Exception as e:
-                    span.record_exception(e)
-                    span.set_status(Status(StatusCode.ERROR, str(e)))
-                    log_json(span, level="error", _msg="order consume failed", order_id=order_id, error=str(e))
 
-            ORDERS_CONSUMED.inc()
-    finally:
-        consumer.close()
+def persist_event(payload, span_ctx_for_sql):
+    """Write one consumed order event as a row.
+
+    This is what turns the fact table into a real part of the system rather
+    than a prop: the volume it accumulates comes from traffic that actually
+    flowed through checkout -> Kafka -> here.
+    """
+    if not db:
+        return
+    start = time.perf_counter()
+    with tracer.start_as_current_span("analytics.persist_event") as span:
+        sql = (
+            f"/* trace_id={span_ctx_for_sql} */ "
+            "INSERT INTO order_events "
+            "(event_id, order_id, event_type, product, amount_cents, region) "
+            "VALUES (%s, %s, %s, %s, %s, %s)"
+        )
+        span.set_attribute("db.system", "postgresql")
+        span.set_attribute("db.name", DATABASE_NAME)
+        span.set_attribute("db.operation", "INSERT")
+        span.set_attribute("db.sql.table", "order_events")
+        with db.cursor(commit=True) as cur:
+            cur.execute(
+                sql,
+                (
+                    str(uuid.uuid4()),
+                    payload.get("order_id"),
+                    "order_created",
+                    EVENT_PRODUCT,
+                    int(payload.get("amount_cents", 0)),
+                    payload.get("region", "unknown"),
+                ),
+            )
+        EVENTS_PERSISTED.inc()
+        log_json(span, _msg="order_events INSERT", order_id=payload.get("order_id"))
+    DB_LATENCY.observe(time.perf_counter() - start)
 
 
 @app.route("/", methods=["GET"])
 @app.route("/analytics", methods=["GET"])
 def analytics():
+    try:
+        with SHEDDER.admit():
+            IN_FLIGHT.set(SHEDDER.in_flight)
+            return _analytics()
+    except Shed:
+        REQUESTS_SHED.inc()
+        REQUEST_COUNT.labels(method="GET", path="/analytics", status="429").inc()
+        return Response("overloaded\n", status=429, headers={"Retry-After": "1"})
+    finally:
+        IN_FLIGHT.set(SHEDDER.in_flight)
+
+
+def _analytics():
     start = time.perf_counter()
     # See apps/checkout/app.py: Werkzeug title-cases header names, which
     # breaks the propagator's case-sensitive "traceparent" lookup unless
@@ -230,8 +274,7 @@ def analytics():
                     log_json(cache_span, _msg="redis GET", key=REDIS_KEY_PROCESSED, hit=processed is not None)
                 CACHE_LATENCY.observe(time.perf_counter() - cache_start)
 
-            delay_seconds = max(0.0, random.gauss(LATENCY_MS_MEAN, LATENCY_MS_JITTER)) / 1000.0
-            time.sleep(delay_seconds)
+            QUERY_PROFILE.run()
 
             if random.random() < ERROR_RATE:
                 raise QueryError("analytics backend query timed out")
@@ -253,9 +296,12 @@ def analytics():
 
     # exemplar: see apps/checkout/app.py for why this is what lets Grafana
     # show a different, representative trace per percentile point (p50 vs
-    # p99) instead of only "some trace from this time range."
-    REQUEST_LATENCY.labels(method="GET", path="/analytics").observe(
-        time.perf_counter() - start, exemplar={"trace_id": trace_id_hex}
+    # p99). Attached only when the exposition format can carry it - see
+    # apps/common/metrics.py.
+    metrics_mod.observe(
+        REQUEST_LATENCY.labels(method="GET", path="/analytics"),
+        time.perf_counter() - start,
+        trace_id_hex,
     )
     REQUEST_COUNT.labels(method="GET", path="/analytics", status=str(status)).inc()
 
@@ -276,15 +322,58 @@ def analytics():
 
 @app.route("/metrics")
 def metrics():
-    return Response(generate_latest(REGISTRY), mimetype=CONTENT_TYPE_LATEST)
+    payload, content_type = metrics_mod.render()
+    return Response(payload, mimetype=content_type)
 
 
 @app.route("/healthz")
 def healthz():
+    """Liveness: this process only. Deliberately does not touch dependencies -
+    a liveness probe that fails on a slow database restarts every healthy pod
+    exactly when the database can least afford a reconnect storm."""
     return Response("ok\n", status=200)
 
 
+@app.route("/readyz")
+def readyz():
+    """Readiness: can this process serve right now? Dependency health belongs
+    here, where failing means "stop sending traffic" rather than "restart"."""
+    problems = []
+    if db is not None and not db.healthy():
+        problems.append("postgres")
+    if redis_client is not None:
+        try:
+            redis_client.ping()
+        except Exception:
+            problems.append("redis")
+    if problems:
+        return Response(json.dumps({"ready": False, "failing": problems}) + "\n", status=503)
+    return Response(json.dumps({"ready": True}) + "\n", status=200)
+
+
+def init_clients(run_init_db: bool = True):
+    """Shared startup for both entrypoints (this module and worker.py)."""
+    global db
+
+    iters = workload.calibrate()
+    CPU_CALIBRATION.set(iters)
+
+    if DATABASE_URL:
+        connect_with_retry(DATABASE_URL)
+        db = PooledPostgres(
+            DATABASE_URL,
+            minconn=DB_POOL_MIN,
+            maxconn=DB_POOL_MAX,
+            statement_timeout_ms=DB_STATEMENT_TIMEOUT_MS,
+            application_name=f"{SERVICE_NAME}@{K8S_POD_NAME or 'local'}",
+        )
+        if run_init_db:
+            init_db()
+
+
+init_clients()
+
+
 if __name__ == "__main__":
-    consumer_thread = threading.Thread(target=consume_loop, daemon=True)
-    consumer_thread.start()
+    # Local debugging only - in the cluster this is served by gunicorn.
     app.run(host="0.0.0.0", port=PORT, threaded=True)

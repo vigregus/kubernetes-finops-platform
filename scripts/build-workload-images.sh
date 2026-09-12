@@ -16,9 +16,13 @@ TAG="${1:-local}"
 
 eval "$(minikube docker-env)"
 
+# Context is the repository root rather than apps/<app>: both images copy
+# apps/common/ (calibrated workload profiles, pooling, resilience, metrics
+# exposition, the shared gunicorn config), and COPY cannot reach outside its
+# build context.
 for app in checkout analytics; do
   echo "==> building ${app}:${TAG} into minikube's docker daemon"
-  docker build -t "${app}:${TAG}" "${REPO_ROOT}/apps/${app}"
+  docker build -t "${app}:${TAG}" -f "${REPO_ROOT}/apps/${app}/Dockerfile" "${REPO_ROOT}"
 done
 
 echo "==> done. Restart the deployments to pick up the new image:"
