@@ -24,6 +24,15 @@ spec:
 {{ toYaml .Values.labels | indent 8 }}
     spec:
       serviceAccountName: {{ .Values.name }}
+      # Must exceed preStop + gunicorn's graceful_timeout, or Kubernetes
+      # SIGKILLs mid-drain and every scale-in event shows up as 5xx - which
+      # would penalise whichever autoscaling strategy scales most often.
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds | default 45 }}
+      volumes:
+        # Only used when WEB_CONCURRENCY > 1, where prometheus_client
+        # aggregates per-worker mmap files (see apps/common/gunicorn_conf.py).
+        - name: prometheus-multiproc
+          emptyDir: {}
       containers:
         - name: {{ .Values.name }}
           image: {{ .Values.image }}
@@ -75,12 +84,26 @@ spec:
             - name: KAFKA_TOPIC
               value: {{ .Values.kafka.topic | quote }}
 {{- end }}
+            - name: PROMETHEUS_MULTIPROC_DIR
+              value: /tmp/prometheus
+          lifecycle:
+            preStop:
+              exec:
+                # Endpoints are removed asynchronously, so without this pause
+                # the process stops accepting while kube-proxy is still
+                # sending it traffic - the requests that lose that race are
+                # indistinguishable from real errors in an experiment result.
+                command: ["/bin/sh", "-c", "sleep {{ .Values.preStopSleepSeconds | default 5 }}"]
+          # Readiness reports dependencies; liveness deliberately does not.
+          # A liveness probe that fails when Postgres is slow restarts every
+          # healthy pod exactly when the database can least afford it.
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /readyz
               port: http
             initialDelaySeconds: 2
             periodSeconds: 5
+            failureThreshold: 3
           livenessProbe:
             httpGet:
               path: /healthz
@@ -89,6 +112,9 @@ spec:
             periodSeconds: 15
           resources:
 {{ toYaml .Values.resources | indent 12 }}
+          volumeMounts:
+            - name: prometheus-multiproc
+              mountPath: /tmp/prometheus
 ---
 apiVersion: v1
 kind: Service

@@ -11,12 +11,48 @@ replicas: 2
 image: checkout:local
 containerPort: 8080
 servicePort: 80
+# Must leave room for preStop plus gunicorn's graceful_timeout.
+terminationGracePeriodSeconds: 45
+preStopSleepSeconds: 5
 env:
   OTEL_SERVICE_NAME: checkout
-  LATENCY_MS_MEAN: "40"
-  LATENCY_MS_JITTER: "15"
   ERROR_RATE: "0.02"
-  WORK_ITERATIONS: "150000"
+
+  # Serving runtime. One process plus gevent keeps the ordinary Prometheus
+  # registry, which is what allows exemplars (a p99 point linking to its
+  # trace). Raising WEB_CONCURRENCY switches to multiprocess metrics and
+  # drops exemplars - see apps/common/gunicorn_conf.py. Both are legitimate
+  # configurations to compare; the default keeps the traces.
+  WEB_CONCURRENCY: "1"
+  GUNICORN_WORKER_CLASS: gevent
+  WORKER_CONNECTIONS: "1000"
+
+  # Concurrency cap past which requests are rejected outright. This is the
+  # knob that gives the pod a measurable saturation point instead of an
+  # unbounded queue; the stress load profile is what calibrates it.
+  MAX_IN_FLIGHT: "32"
+
+  # Per-request resource shape, in milliseconds. Replaces WORK_ITERATIONS,
+  # which burned a fixed iteration count and therefore cost different CPU on
+  # different nodes. 3ms is roughly what the previous 150000 iterations cost
+  # on this cluster, so behaviour carries over; the IO figures match the
+  # previous LATENCY_MS_MEAN/JITTER so existing k6 thresholds still apply.
+  PROFILE_CHECKOUT_CPU_MS: "3"
+  PROFILE_CHECKOUT_IO_MS: "40"
+  PROFILE_CHECKOUT_IO_JITTER_MS: "15"
+  PROFILE_LOOKUP_CPU_MS: "1"
+  PROFILE_LOOKUP_IO_MS: "5"
+  PROFILE_LOOKUP_IO_JITTER_MS: "2"
+
+  # Connection pools. The effective ceiling is pods x WEB_CONCURRENCY x
+  # DB_POOL_MAX, which is why this stays small until PgBouncer is in front.
+  DB_POOL_MIN: "1"
+  DB_POOL_MAX: "8"
+  DB_STATEMENT_TIMEOUT_MS: "5000"
+  REDIS_POOL_MAX: "32"
+
+  KAFKA_LINGER_MS: "20"
+  KAFKA_COMPRESSION: lz4
 resources:
   requests:
     cpu: 150m

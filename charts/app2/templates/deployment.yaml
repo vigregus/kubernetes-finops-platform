@@ -24,6 +24,10 @@ spec:
 {{ toYaml .Values.labels | indent 8 }}
     spec:
       serviceAccountName: {{ .Values.name }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds | default 45 }}
+      volumes:
+        - name: prometheus-multiproc
+          emptyDir: {}
       containers:
         - name: {{ .Values.name }}
           image: {{ .Values.image }}
@@ -68,12 +72,19 @@ spec:
             - name: KAFKA_CONSUMER_GROUP
               value: {{ .Values.kafka.consumerGroup | quote }}
 {{- end }}
+            - name: PROMETHEUS_MULTIPROC_DIR
+              value: /tmp/prometheus
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep {{ .Values.preStopSleepSeconds | default 5 }}"]
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /readyz
               port: http
             initialDelaySeconds: 2
             periodSeconds: 5
+            failureThreshold: 3
           livenessProbe:
             httpGet:
               path: /healthz
@@ -82,6 +93,9 @@ spec:
             periodSeconds: 15
           resources:
 {{ toYaml .Values.resources | indent 12 }}
+          volumeMounts:
+            - name: prometheus-multiproc
+              mountPath: /tmp/prometheus
 ---
 apiVersion: v1
 kind: Service

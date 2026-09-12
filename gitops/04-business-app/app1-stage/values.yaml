@@ -8,15 +8,30 @@ labels:
   finops.internal/environment: stage
   finops.internal/component: application
 replicas: 1
+terminationGracePeriodSeconds: 45
+preStopSleepSeconds: 5
 image: checkout:local
 containerPort: 8080
 servicePort: 80
 env:
   OTEL_SERVICE_NAME: checkout
-  LATENCY_MS_MEAN: "40"
-  LATENCY_MS_JITTER: "15"
   ERROR_RATE: "0.02"
-  WORK_ITERATIONS: "150000"
+  WEB_CONCURRENCY: "1"
+  GUNICORN_WORKER_CLASS: gevent
+  WORKER_CONNECTIONS: "1000"
+  MAX_IN_FLIGHT: "32"
+  PROFILE_CHECKOUT_CPU_MS: "3"
+  PROFILE_CHECKOUT_IO_MS: "40"
+  PROFILE_CHECKOUT_IO_JITTER_MS: "15"
+  PROFILE_LOOKUP_CPU_MS: "1"
+  PROFILE_LOOKUP_IO_MS: "5"
+  PROFILE_LOOKUP_IO_JITTER_MS: "2"
+  DB_POOL_MIN: "1"
+  DB_POOL_MAX: "8"
+  DB_STATEMENT_TIMEOUT_MS: "5000"
+  REDIS_POOL_MAX: "32"
+  KAFKA_LINGER_MS: "20"
+  KAFKA_COMPRESSION: lz4
 resources:
   requests:
     cpu: 150m

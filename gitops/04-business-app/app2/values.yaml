@@ -11,13 +11,26 @@ replicas: 1
 image: analytics:local
 containerPort: 8080
 servicePort: 80
+terminationGracePeriodSeconds: 45
+preStopSleepSeconds: 5
 env:
   OTEL_SERVICE_NAME: analytics
-  LATENCY_MS_MEAN: "90"
-  LATENCY_MS_JITTER: "30"
   ERROR_RATE: "0.01"
-  WORK_ITERATIONS: "300000"
-  BATCH_ROWS: "5000"
+
+  WEB_CONCURRENCY: "1"
+  GUNICORN_WORKER_CLASS: gevent
+  WORKER_CONNECTIONS: "1000"
+  MAX_IN_FLIGHT: "32"
+
+  PROFILE_ANALYTICS_CPU_MS: "7"
+  PROFILE_ANALYTICS_IO_MS: "90"
+  PROFILE_ANALYTICS_IO_JITTER_MS: "30"
+  PROFILE_ANALYTICS_MEM_MB: "2"
+
+  DB_POOL_MIN: "1"
+  DB_POOL_MAX: "8"
+  DB_STATEMENT_TIMEOUT_MS: "5000"
+  REDIS_POOL_MAX: "32"
 resources:
   requests:
     cpu: 250m
@@ -26,6 +39,37 @@ resources:
     cpu: 700m
     memory: 768Mi
 ingressHost: analytics-stage.finops.local
+
+worker:
+  replicas: 1
+  metricsPort: 9090
+  terminationGracePeriodSeconds: 60
+  env:
+    PROFILE_BATCH_CPU_MS: "25"
+    PROFILE_BATCH_MEM_MB: "8"
+    KAFKA_CONSUME_BATCH: "100"
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 768Mi
+
+postgres:
+  clusterName: analytics-events-db-stage
+  instances: 1
+  storageSize: 1Gi
+  database: analytics
+  owner: analytics
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
 redis:
   image: redis:7-alpine
   resources:
