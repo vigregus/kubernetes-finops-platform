@@ -18,6 +18,18 @@ env:
   LOG_LEVEL: INFO
   OTEL_SERVICE_NAME: checkout
   ERROR_RATE: "0.02"
+  # The payment gateway, outside the mesh in its own namespace. Setting this
+  # switches checkout from the in-process coin flip to a real network call
+  # with timeouts, a retry budget and a circuit breaker; unset it and the
+  # simulated decline path comes back, which is how an experiment removes the
+  # dependency without changing code.
+  GATEWAY_URL: "http://gateway-sim.external.svc.cluster.local"
+  # Two attempts, not three. The gateway is the slowest thing in the request,
+  # so a third attempt turns one slow call into a request that breaches the
+  # latency SLO by itself.
+  GATEWAY_ATTEMPTS: "2"
+  GATEWAY_CONNECT_TIMEOUT_S: "1"
+  GATEWAY_READ_TIMEOUT_S: "2"
 
   # Serving runtime. One process plus gevent keeps the ordinary Prometheus
   # registry, which is what allows exemplars (a p99 point linking to its

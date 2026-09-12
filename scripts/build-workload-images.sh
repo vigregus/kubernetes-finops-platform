@@ -20,7 +20,7 @@ eval "$(minikube docker-env)"
 # apps/common/ (calibrated workload profiles, pooling, resilience, metrics
 # exposition, the shared gunicorn config), and COPY cannot reach outside its
 # build context.
-for app in checkout analytics; do
+for app in checkout analytics gateway-sim; do
   echo "==> building ${app}:${TAG} into minikube's docker daemon"
   # --network=host: with Cilium owning the node's interfaces, containers on
   # docker's own bridge cannot reach the resolver in the node's

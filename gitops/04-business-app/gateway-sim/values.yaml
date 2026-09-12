@@ -1,0 +1,51 @@
+name: gateway-sim
+# Its own namespace, and deliberately NOT enrolled in the ambient mesh. The
+# call from checkout is then a real egress hop: no mTLS, no AuthorizationPolicy
+# between the two, and subject to whatever DNS/egress policy is written for
+# prod - which is what makes it a stand-in for a third party rather than just
+# another internal service with a different name.
+namespace: external
+
+labels:
+  app.kubernetes.io/name: gateway-sim
+  app.kubernetes.io/component: external-api
+  # A distinct product and cost centre, so its cost never lands on commerce.
+  # A real payment gateway is somebody else's bill; here the bill is CPU, and
+  # keeping it separate is what lets "cost per 1M requests" be split into what
+  # we run and what we call.
+  finops.internal/product: third-party
+  finops.internal/team: platform-engineering
+  finops.internal/environment: prod
+  finops.internal/component: external-api
+  finops.internal/cost-center: third-party-apis
+  finops.internal/owner: platform-team
+
+image: gateway-sim:local
+replicas: 2
+containerPort: 8080
+servicePort: 80
+
+env:
+  # A healthy gateway by default. These are the knobs an experiment turns:
+  # raise ERROR_RATE or TIMEOUT_RATE and the circuit breaker, the retry budget
+  # and the 503 path in checkout stop being theoretical.
+  DECLINE_RATE: "0.02"
+  ERROR_RATE: "0.01"
+  TIMEOUT_RATE: "0.005"
+  LATENCY_MS: "15"
+  # The tail is what actually causes timeouts. A gateway with one flat latency
+  # never produces one, and a timeout knob alone would be a step function
+  # rather than the long tail a real dependency has.
+  LATENCY_TAIL_MS: "250"
+  TAIL_RATE: "0.02"
+  # Single worker for the same reason checkout runs one: prometheus_client
+  # cannot attach exemplars in multiprocess mode.
+  WEB_CONCURRENCY: "1"
+  GUNICORN_WORKER_CLASS: "gevent"
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 96Mi
+  limits:
+    memory: 256Mi

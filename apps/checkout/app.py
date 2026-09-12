@@ -13,6 +13,8 @@ from common import workload
 from common.cache import CacheResult, ResponseCache
 import psycopg2
 from common.db import PoolBusy, PooledPostgres, connect_with_retry, dsn_from_env
+import requests
+
 from common.resilience import CircuitBreaker, CircuitOpen, LoadShedder, RetryBudget, Shed, call_with_retry
 from confluent_kafka import Producer
 from flask import Flask, Response, request
@@ -201,6 +203,91 @@ DB_BREAKER = CircuitBreaker(
     recovery_timeout_s=float(os.environ.get("DB_BREAKER_RECOVERY_S", "10")),
     neutral_exceptions=(PoolBusy,),
 )
+
+# The payment gateway, over the network.
+#
+# Previously this was `random.random() < ERROR_RATE` and never left the
+# process, which made the resilience machinery below decorative: the breaker
+# and the retry budget only ever saw the database, whose failure mode is "no
+# free connection" rather than "the remote end stopped answering". A remote
+# dependency fails in ways a local pool cannot - it hangs.
+GATEWAY_URL = os.environ.get("GATEWAY_URL", "")
+# Two numbers, and the gap between them is deliberate. connect is short
+# because a TCP handshake that has not completed in a second is not going to;
+# read is the budget for the gateway to think, and it is what turns the
+# gateway's hung requests into our timeouts.
+GATEWAY_CONNECT_TIMEOUT_S = float(os.environ.get("GATEWAY_CONNECT_TIMEOUT_S", "1"))
+GATEWAY_READ_TIMEOUT_S = float(os.environ.get("GATEWAY_READ_TIMEOUT_S", "2"))
+GATEWAY_ATTEMPTS = int(os.environ.get("GATEWAY_ATTEMPTS", "2"))
+
+gateway_session = requests.Session()
+# Pooled, like every other dependency here. Without this urllib3 opens a
+# connection per call and the socket count tracks request rate - the same
+# mistake the per-request psycopg2.connect() used to make, just further out.
+_gateway_adapter = requests.adapters.HTTPAdapter(
+    pool_connections=int(os.environ.get("GATEWAY_POOL_SIZE", "32")),
+    pool_maxsize=int(os.environ.get("GATEWAY_POOL_SIZE", "32")),
+    # Retries are handled by call_with_retry, which has a budget and jitter.
+    # urllib3 retrying underneath it would multiply the two and hide the
+    # attempts from the budget that is supposed to bound them.
+    max_retries=0,
+)
+gateway_session.mount("http://", _gateway_adapter)
+gateway_session.mount("https://", _gateway_adapter)
+
+GATEWAY_BREAKER = CircuitBreaker(
+    "payment-gateway",
+    failure_threshold=int(os.environ.get("GATEWAY_BREAKER_THRESHOLD", "10")),
+    recovery_timeout_s=float(os.environ.get("GATEWAY_BREAKER_RECOVERY_S", "15")),
+    # A decline is an answer. Counting it as a failure would open the breaker
+    # on a perfectly healthy gateway that happens to be refusing cards, and
+    # then every subsequent order would fail for a reason that never existed.
+    neutral_exceptions=(PaymentValidationError,),
+)
+
+GATEWAY_CALLS = Counter(
+    "external_api_requests_total",
+    "Calls to the payment gateway by outcome",
+    ["outcome"],
+)
+GATEWAY_LATENCY = Histogram(
+    "external_api_duration_seconds",
+    "Payment gateway call duration as the caller sees it",
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0),
+)
+
+
+class GatewayUnavailable(Exception):
+    """The gateway did not answer, or answered 5xx. A real failure."""
+
+
+def authorize_payment(trace_id_hex):
+    """One attempt against the gateway. Raises for the caller to retry."""
+    start = time.perf_counter()
+    try:
+        resp = gateway_session.post(
+            f"{GATEWAY_URL}/authorize",
+            timeout=(GATEWAY_CONNECT_TIMEOUT_S, GATEWAY_READ_TIMEOUT_S),
+            headers={"X-Trace-Id": trace_id_hex},
+        )
+    except requests.Timeout:
+        GATEWAY_CALLS.labels(outcome="timeout").inc()
+        raise GatewayUnavailable("payment gateway timed out")
+    except requests.RequestException as e:
+        GATEWAY_CALLS.labels(outcome="unreachable").inc()
+        raise GatewayUnavailable(f"payment gateway unreachable: {e}")
+    finally:
+        GATEWAY_LATENCY.observe(time.perf_counter() - start)
+
+    if resp.status_code == 402:
+        GATEWAY_CALLS.labels(outcome="declined").inc()
+        raise PaymentValidationError("payment gateway declined the transaction")
+    if resp.status_code >= 500:
+        GATEWAY_CALLS.labels(outcome="error").inc()
+        raise GatewayUnavailable(f"payment gateway returned {resp.status_code}")
+    GATEWAY_CALLS.labels(outcome="approved").inc()
+    return resp
+
 
 # Redis gets a bounded pool rather than a connection per call, for the same
 # reason Postgres does: otherwise the connection count tracks request rate.
@@ -518,8 +605,29 @@ def _checkout():
 
         order_id = None
         try:
-            if random.random() < ERROR_RATE:
-                raise PaymentValidationError("payment gateway declined the transaction")
+            with tracer.start_as_current_span("checkout.authorize_payment") as gw_span:
+                if GATEWAY_URL:
+                    # A real network call, retried under the same budget the
+                    # database uses. attempts is small on purpose: the gateway
+                    # is the slowest thing in the request, so retrying it three
+                    # times turns one slow call into a request that blows the
+                    # latency SLO on its own.
+                    call_with_retry(
+                        lambda: authorize_payment(trace_id_hex),
+                        attempts=GATEWAY_ATTEMPTS,
+                        budget=RETRY_BUDGET,
+                        breaker=GATEWAY_BREAKER,
+                        # Only the genuine failures are retried. Retrying a
+                        # decline would ask the gateway to refuse the same card
+                        # twice and bill us for both attempts.
+                        retry_on=(GatewayUnavailable,),
+                    )
+                elif random.random() < ERROR_RATE:
+                    # No gateway configured (stage, or a run with the
+                    # dependency deliberately removed): fall back to the coin
+                    # flip so the decline path still exists to be measured.
+                    gw_span.set_attribute("checkout.gateway", "simulated")
+                    raise PaymentValidationError("payment gateway declined the transaction")
             order_id = cached_order_id.decode() if cached_order_id else order_id_for(raw_key)
             if not cached_order_id:
                 persist_order(order_id, trace_id_hex)
@@ -548,6 +656,22 @@ def _checkout():
             status = 429
             span.set_attribute("checkout.shed_reason", "db_pool")
             log_json(span, level="warning", _msg=f"checkout shed at db pool: {e}", path="/checkout")
+        except GatewayUnavailable as e:
+            # The gateway failed and the retries did not save it. 503 rather
+            # than 500: the fault is a dependency being unavailable, not this
+            # service being broken, and the distinction is what tells an
+            # operator which system to go and look at.
+            status = 503
+            span.record_exception(e)
+            span.set_status(Status(StatusCode.ERROR, str(e)))
+            log_json(
+                span,
+                level="error",
+                _msg="checkout payment gateway unavailable",
+                path="/checkout",
+                error_type=type(e).__name__,
+                error=str(e),
+            )
         except CircuitOpen as e:
             # The dependency is known-bad; fail fast and say so distinctly
             # rather than waiting for a timeout we already expect.
