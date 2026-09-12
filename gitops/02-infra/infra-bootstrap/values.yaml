@@ -26,8 +26,9 @@ namespaces:
       # numbers comparable across the enrollment boundary. The mesh's cost
       # lands in istio-system instead, where ADR 0002 says platform overhead
       # belongs.
-      # Temporarily off while the no-mesh baseline is measured. Toggling this
-      # label is the whole enrolment mechanism in ambient - no pod spec
-      # changes, no sidecar to add or remove - which is exactly what makes the
-      # mesh's cost measurable as an A/B rather than argued from a datasheet.
-      # istio.io/dataplane-mode: ambient
+      # Toggling this one label is the entire enrolment mechanism in ambient -
+      # no pod spec changes, no sidecar to add or remove - which is what let
+      # the mesh's cost be measured as an A/B rather than argued from a
+      # datasheet. See experiments/results/ambient-vs-nomesh.md for what it
+      # cost: 332 -> 293 rps at a p95 of 500ms, and 0.39 cores of ztunnel.
+      istio.io/dataplane-mode: ambient
