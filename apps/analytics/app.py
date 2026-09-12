@@ -22,7 +22,7 @@ import uuid
 import redis as redis_lib
 from common import metrics as metrics_mod
 from common import workload
-from common.db import PoolBusy, PooledPostgres, connect_with_retry
+from common.db import PoolBusy, PooledPostgres, connect_with_retry, dsn_from_env
 from common.resilience import LoadShedder, Shed
 from flask import Flask, Response, request
 from opentelemetry import trace
@@ -65,7 +65,9 @@ KAFKA_TOPIC = os.environ.get("KAFKA_TOPIC", "orders")
 KAFKA_CONSUMER_GROUP = os.environ.get("KAFKA_CONSUMER_GROUP", "analytics")
 KAFKA_BATCH_SIZE = int(os.environ.get("KAFKA_CONSUME_BATCH", "100"))
 
-DATABASE_URL = os.environ.get("DATABASE_URL")
+# Assembled from parts when DB_HOST points at a pooler; falls back to the
+# cluster URI otherwise. See dsn_from_env in apps/common/db.py.
+DATABASE_URL = dsn_from_env(os.environ)
 DATABASE_NAME = os.environ.get("DATABASE_NAME", SERVICE_NAME)
 DB_POOL_MIN = int(os.environ.get("DB_POOL_MIN", "1"))
 DB_POOL_MAX = int(os.environ.get("DB_POOL_MAX", "8"))

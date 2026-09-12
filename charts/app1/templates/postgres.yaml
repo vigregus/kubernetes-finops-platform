@@ -86,3 +86,47 @@ spec:
       # depending on it (which is most of them) comes back empty.
       honorLabels: true
 {{- end }}
+{{- if and .Values.postgres .Values.postgres.pooler }}
+---
+# PgBouncer in front of the cluster.
+#
+# Without it the connection ceiling is pods x WEB_CONCURRENCY x DB_POOL_MAX,
+# which scales with the deployment rather than with the database: at eight
+# checkout pods that is 128 connections against a default max_connections of
+# 100, so scaling out would fail on connections long before CPU - and every
+# autoscaling experiment would be measuring the wrong limit.
+#
+# transaction mode, not session: a connection is returned to the pool at the
+# end of each transaction, which is what lets a small server-side pool serve
+# a much larger set of clients. It is only safe because nothing here relies on
+# session state - psycopg2 does not use server-side prepared statements by
+# default, and statement_timeout is applied with SET LOCAL inside the
+# transaction rather than as a startup parameter PgBouncer would reject
+# (see apps/common/db.py).
+apiVersion: postgresql.cnpg.io/v1
+kind: Pooler
+metadata:
+  name: {{ .Values.postgres.clusterName }}-pooler
+  namespace: {{ .Values.namespace }}
+  labels:
+{{ toYaml .Values.labels | indent 4 }}
+spec:
+  cluster:
+    name: {{ .Values.postgres.clusterName }}
+  instances: {{ .Values.postgres.pooler.instances | default 1 }}
+  type: rw
+  template:
+    metadata:
+      labels:
+{{ toYaml .Values.labels | indent 8 }}
+    spec:
+      containers:
+        - name: pgbouncer
+          resources:
+{{ toYaml .Values.postgres.pooler.resources | indent 12 }}
+  pgbouncer:
+    poolMode: transaction
+    parameters:
+      max_client_conn: {{ .Values.postgres.pooler.maxClientConn | default "500" | quote }}
+      default_pool_size: {{ .Values.postgres.pooler.defaultPoolSize | default "25" | quote }}
+{{- end }}

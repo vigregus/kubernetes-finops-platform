@@ -64,6 +64,20 @@ postgres:
   storageSize: 1Gi
   database: analytics
   owner: analytics
+  # PgBouncer in transaction mode. default_pool_size is the number of
+  # server-side connections it multiplexes every client onto, which is
+  # what decouples the connection count from the replica count.
+  pooler:
+    instances: 1
+    defaultPoolSize: \"10\"
+    maxClientConn: \"500\"
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 300m
+        memory: 128Mi
   resources:
     requests:
       cpu: 100m

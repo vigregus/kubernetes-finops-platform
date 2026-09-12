@@ -55,16 +55,19 @@ class PooledPostgres:
         # Without it the admission limit and the pool size disagree, and the
         # service cheerfully admits work that is guaranteed to fail.
         self._slots = threading.Semaphore(maxconn)
-        # statement_timeout is set as a connection option rather than per
-        # query: a hung statement should be bounded even on code paths that
-        # forget to think about it.
+        self.statement_timeout_ms = statement_timeout_ms
+        # No `options=-c statement_timeout=...` here. That is a startup
+        # parameter, and PgBouncer in transaction mode rejects startup
+        # parameters it does not know about - so a connection option that
+        # works fine against Postgres directly fails the moment a pooler is
+        # put in front of it. The timeout is applied per transaction instead
+        # (see cursor()), which is pooling-safe by construction.
         self._pool = pg_pool.ThreadedConnectionPool(
             minconn,
             maxconn,
             dsn=dsn,
             connect_timeout=connect_timeout_s,
             application_name=application_name,
-            options=f"-c statement_timeout={statement_timeout_ms}",
         )
 
     @contextmanager
@@ -87,6 +90,12 @@ class PooledPostgres:
             raise
         try:
             with conn.cursor() as cur:
+                # SET LOCAL is scoped to this transaction, so it travels with
+                # the work rather than with the connection - which is what
+                # makes it survive a pooler handing that connection to
+                # someone else immediately afterwards.
+                if self.statement_timeout_ms:
+                    cur.execute("SET LOCAL statement_timeout = %s", (self.statement_timeout_ms,))
                 yield cur
             if commit:
                 conn.commit()
@@ -133,6 +142,24 @@ class PooledPostgres:
         with self._lock:
             if self._pool is not None:
                 self._pool.closeall()
+
+
+def dsn_from_env(env) -> str | None:
+    """Build a DSN, preferring explicit parts over a ready-made URI.
+
+    CNPG publishes a `uri` in the cluster's app secret, but it points at the
+    cluster's own read-write service. Routing through PgBouncer means keeping
+    the same credentials and changing only the host, which a prebuilt URI does
+    not allow - hence assembling it from parts when DB_HOST is set.
+    """
+    host = env.get("DB_HOST")
+    if not host:
+        return env.get("DATABASE_URL")
+    user = env.get("DB_USER", "")
+    password = env.get("DB_PASSWORD", "")
+    port = env.get("DB_PORT", "5432")
+    name = env.get("DB_NAME", "")
+    return f"postgresql://{user}:{password}@{host}:{port}/{name}"
 
 
 def connect_with_retry(dsn: str, attempts: int = 30, delay_s: float = 2.0) -> None:

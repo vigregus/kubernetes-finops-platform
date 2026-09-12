@@ -12,7 +12,7 @@ from common import metrics as metrics_mod
 from common import workload
 from common.cache import CacheResult, ResponseCache
 import psycopg2
-from common.db import PoolBusy, PooledPostgres, connect_with_retry
+from common.db import PoolBusy, PooledPostgres, connect_with_retry, dsn_from_env
 from common.resilience import CircuitBreaker, CircuitOpen, LoadShedder, RetryBudget, Shed, call_with_retry
 from confluent_kafka import Producer
 from flask import Flask, Response, request
@@ -48,7 +48,9 @@ LOOKUP_PROFILE = workload.Profile.from_env(os.environ, "PROFILE_LOOKUP")
 # Concurrency cap past which requests are rejected rather than queued.
 MAX_IN_FLIGHT = int(os.environ.get("MAX_IN_FLIGHT", "64"))
 
-DATABASE_URL = os.environ.get("DATABASE_URL")
+# Assembled from parts when DB_HOST points at a pooler; falls back to the
+# cluster URI otherwise. See dsn_from_env in apps/common/db.py.
+DATABASE_URL = dsn_from_env(os.environ)
 DATABASE_NAME = os.environ.get("DATABASE_NAME", SERVICE_NAME)
 DB_POOL_MIN = int(os.environ.get("DB_POOL_MIN", "1"))
 DB_POOL_MAX = int(os.environ.get("DB_POOL_MAX", "8"))

@@ -70,11 +70,34 @@ spec:
               value: "redis://{{ .Values.name }}-redis.{{ .Values.namespace }}.svc.cluster.local:6379/0"
 {{- end }}
 {{- if .Values.postgres }}
+{{- if .Values.postgres.pooler }}
+            # Through PgBouncer, not the cluster's own rw service. The
+            # credentials still come from the cluster secret - only the host
+            # changes - which is why the DSN is assembled from parts rather
+            # than taken from the secret's prebuilt `uri`.
+            - name: DB_HOST
+              value: {{ .Values.postgres.clusterName }}-pooler.{{ .Values.namespace }}.svc.cluster.local
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.clusterName }}-app
+                  key: username
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.clusterName }}-app
+                  key: password
+            - name: DB_NAME
+              value: {{ .Values.postgres.database | quote }}
+{{- else }}
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.postgres.clusterName }}-app
                   key: uri
+{{- end }}
             - name: DATABASE_NAME
               value: {{ .Values.postgres.database | quote }}
 {{- end }}
