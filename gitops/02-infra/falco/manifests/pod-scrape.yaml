@@ -1,0 +1,31 @@
+# Falco's own metrics, served on the web port it already exposes.
+#
+# The panel that justifies this on its own is the drop rate
+# (falcosecurity_falco_outputs_queue_num_drops_total): a Falco dropping
+# syscalls is not a security control, it is a partial sample of one, and it
+# degrades silently - the pod stays Running and the rules keep evaluating on
+# whatever survived.
+#
+# A VMPodScrape rather than a VMServiceScrape because falco is a DaemonSet and
+# these counters are per-node; a Service-level scrape would collapse the node
+# identity the dashboard's per-instance panels rely on.
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMPodScrape
+metadata:
+  name: falco
+  namespace: falco
+  labels:
+    finops.internal/product: platform
+    finops.internal/team: platform-engineering
+    finops.internal/environment: prod
+    finops.internal/component: security
+    finops.internal/cost-center: platform-infra
+    finops.internal/owner: platform-team
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: falco
+  podMetricsEndpoints:
+    - port: web
+      path: /metrics
+      interval: 15s

@@ -13,6 +13,14 @@ spec:
     - repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
       targetRevision: HEAD
       ref: values
+    # The scrape lives beside the chart in the same application, the way
+    # cnpg-operator does it: it is meaningless without this release and should
+    # be pruned with it.
+    - repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
+      targetRevision: HEAD
+      path: gitops/02-infra/falco/manifests
+      directory:
+        recurse: true
     - repoURL: https://falcosecurity.github.io/charts
       chart: falco
       targetRevision: 9.1.0

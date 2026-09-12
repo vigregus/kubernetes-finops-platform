@@ -1,0 +1,22 @@
+# The upstream Falco dashboard, unmodified.
+#
+# Taken from the falcosecurity/charts repository rather than from grafana.com:
+# it is maintained alongside the chart itself, and its 31 queries use exactly
+# the falcosecurity_falco_* series Falco serves natively on its web port - no
+# falco-exporter and no falcosidekick metrics needed, both of which the
+# community dashboards tend to assume.
+#
+# Pinned to the falco-9.1.0 chart tag rather than master, so the dashboard
+# moves when the chart version does and not on someone else's commit.
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: falco
+  namespace: observability
+spec:
+  instanceSelector:
+    matchLabels:
+      dashboards: "grafana-local"
+  # No __inputs block in this dashboard, so there is no datasource mapping to
+  # declare - it resolves against the default datasource.
+  url: https://raw.githubusercontent.com/falcosecurity/charts/falco-9.1.0/charts/falco/dashboards/falco-dashboard.json
