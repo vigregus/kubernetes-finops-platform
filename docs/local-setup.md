@@ -4,8 +4,44 @@ This project assumes a local `minikube` cluster (Docker driver) for Local v1.
 
 ## Bootstrap order
 
-1. Start minikube with enough headroom for the full observability stack:
-   `minikube start --memory=16000 --cpus=6`.
+1. Start minikube with enough headroom for the full observability stack, and
+   without a CNI or kube-proxy, because Cilium replaces both:
+
+   ```
+   minikube start --cpus=14 --memory=22000 --disk-size=60g \
+     --kubernetes-version=v1.33.1 --cni=false \
+     --extra-config=kubeadm.skip-phases=addon/kube-proxy
+   ```
+
+   Then install Cilium once by hand - it cannot come from Argo CD, because
+   Argo CD's own pods need a CNI before they can start:
+
+   ```
+   helm repo add cilium https://helm.cilium.io/ && helm repo update cilium
+   helm install cilium cilium/cilium -n kube-system --version 1.20.1 \
+     -f gitops/02-infra/cilium/values.yaml --wait
+   ```
+
+   Argo CD adopts it afterwards (`gitops/02-infra/cilium/`), so this is the
+   only manual step in its lifetime rather than its permanent state.
+
+1b. **Point CoreDNS at a public resolver.** On the Docker driver, the node's
+   `/etc/resolv.conf` points at Docker Desktop's internal resolver
+   (`192.168.65.254`), which is reachable from the node's own network
+   namespace but not from inside pods. CoreDNS forwards to it by default, so
+   every external name fails with `i/o timeout` while general egress works
+   fine - pods can ping 8.8.8.8 and open TCP 443, they just cannot resolve.
+   The visible symptom is Argo CD's repo-server restarting in a loop
+   (`failed to list refs ... lookup github.com ... server misbehaving`), which
+   looks like a git or RBAC problem and is neither.
+
+   ```
+   kubectl -n kube-system get cm coredns -o jsonpath='{.data.Corefile}' \
+     | sed 's|forward . /etc/resolv.conf|forward . 8.8.8.8 1.1.1.1|' > /tmp/Corefile
+   kubectl -n kube-system create cm coredns --from-file=Corefile=/tmp/Corefile \
+     --dry-run=client -o yaml | kubectl apply -f -
+   kubectl -n kube-system rollout restart deploy/coredns
+   ```
 2. Install Argo CD into the `argocd` namespace (standard `kubectl`/`helm`
    install - not GitOps-managed itself, since it has to exist before
    anything else can be applied).
