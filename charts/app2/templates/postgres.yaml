@@ -31,11 +31,28 @@ spec:
   storage:
     size: {{ .Values.postgres.storageSize }}
   postgresql:
+    # pg_stat_statements: per-statement counts and cumulative execution time,
+    # which is what turns "slow queries" from a log line you happen to notice
+    # into an aggregate you can rank. The log already flags anything over
+    # 200ms, but a query taking 20ms ten thousand times a minute costs more
+    # than one taking 300ms twice and never appears there at all.
+    #
+    # Changing this restarts the instances - it is a preload library, so it
+    # cannot be enabled on a running postmaster.
+    shared_preload_libraries:
+      - pg_stat_statements
     parameters:
       # Unlike checkout-db this does not log every write: order_events takes
       # one INSERT per consumed order, so log_statement=mod here would turn
       # the load profile into a log-volume test.
       log_min_duration_statement: "200"
+  # Without this reference the ConfigMap above is inert - CNPG only runs
+  # custom queries a Cluster explicitly points at. The default built-in
+  # queries stay on; this adds to them rather than replacing them.
+  monitoring:
+    customQueriesConfigMap:
+      - name: {{ .Values.postgres.clusterName }}-monitoring-queries
+        key: queries
   bootstrap:
     initdb:
       database: {{ .Values.postgres.database }}
@@ -80,6 +97,92 @@ spec:
           targetLabel: cnpg_pooler
         - sourceLabels: [__meta_kubernetes_pod_label_cnpg_io_instanceRole]
           targetLabel: instance_role
+---
+# pg_stat_statements exposed as metrics.
+#
+# The name of the top-level key below becomes the metric prefix: CNPG exports
+# these as cnpg_query_stats_*, which is exactly what the CNPG / PgBouncer
+# dashboard's Query Latency and Query Throughput panels query.
+#
+# Statements are bucketed read/write/other rather than exported one series per
+# statement. pg_stat_statements tracks thousands of normalised queries, and one
+# metric series per query would be a cardinality bomb in a database meant to
+# stay cheap - three series answers "are reads or writes getting slower", which
+# is the question the panels ask.
+#
+# Mean latency is deliberately not computed here. Both columns are COUNTERs and
+# the dashboard divides rate(total_exec_time_ms) by rate(calls), so the average
+# is over the chart's window rather than over all time since the last reset -
+# an all-time average moves so slowly it hides the incident you are looking for.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.postgres.clusterName }}-monitoring-queries
+  namespace: {{ .Values.namespace }}
+  labels:
+{{ toYaml .Values.labels | indent 4 }}
+    # CNPG watches for this label and reloads the instances when the ConfigMap
+    # changes, so editing the query does not need a restart.
+    cnpg.io/reload: "true"
+data:
+  queries: |
+    query_stats:
+      query: |
+        SELECT
+          CASE
+            WHEN query ILIKE 'select%' THEN 'read'
+            WHEN query ~* '^(insert|update|delete)' THEN 'write'
+            ELSE 'other'
+          END AS op,
+          sum(calls)::bigint AS calls,
+          sum(total_exec_time) AS total_exec_time_ms,
+          sum(rows)::bigint AS rows
+        FROM pg_stat_statements
+        WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+        GROUP BY 1
+      metrics:
+        - op:
+            usage: "LABEL"
+            description: "Statement class derived from the normalised query text"
+        - calls:
+            usage: "COUNTER"
+            description: "Cumulative statement executions"
+        - total_exec_time_ms:
+            usage: "COUNTER"
+            description: "Cumulative statement execution time in milliseconds"
+        - rows:
+            usage: "COUNTER"
+            description: "Cumulative rows processed by the statements"
+      target_databases:
+        - {{ .Values.postgres.database }}
+---
+# The extension itself, declared rather than created by hand.
+#
+# pg_stat_statements collects instance-wide, but its reading view only exists
+# in databases where the extension was created - and the exporter queries it
+# from the application database (target_databases above). Without this the
+# custom query errors on every scrape and the metric is simply absent, which
+# looks identical to "no traffic".
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: {{ .Values.postgres.clusterName }}-{{ .Values.postgres.database }}
+  namespace: {{ .Values.namespace }}
+  labels:
+{{ toYaml .Values.labels | indent 4 }}
+spec:
+  cluster:
+    name: {{ .Values.postgres.clusterName }}
+  name: {{ .Values.postgres.database }}
+  owner: {{ .Values.postgres.owner }}
+  ensure: present
+  # retain, not delete: this object exists to add an extension to a database
+  # that initdb already created and the application depends on. Reclaiming it
+  # would drop the data along with the extension.
+  databaseReclaimPolicy: retain
+  extensions:
+    - name: pg_stat_statements
+      ensure: present
 {{- end }}
 {{- if and .Values.postgres .Values.postgres.pooler }}
 ---
