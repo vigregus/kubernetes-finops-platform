@@ -158,7 +158,19 @@ _LOG_LEVELS = {
 
 
 class PaymentValidationError(Exception):
-    pass
+    """The payment gateway declined the charge.
+
+    A business outcome, not a fault: the gateway was reachable, it answered,
+    and this service handled the answer correctly. It is raised at ERROR_RATE
+    to give the stand a realistic floor of declined transactions.
+
+    It used to fall through to the generic handler and return 500, which put
+    a normal commercial event into the same bucket as a crash. At the prod
+    rate of 2% that capped the availability SLI at ~98% by construction, so a
+    99.9% target could never be met by any amount of optimisation and the
+    error budget was exhausted before a single strategy was tried - on a stand
+    whose whole purpose is comparing strategies at a fixed SLO.
+    """
 
 
 def log_json(span, level="info", **fields):
@@ -514,6 +526,20 @@ def _checkout():
                 publish_order_event(order_id)
                 cache_store(idempotency_key, order_id)
             status = 200
+        except PaymentValidationError as e:
+            # 402, not 500: the charge was declined, which is an answer rather
+            # than a failure. Logged at warning and without an error span
+            # status, so a decline does not show up as a broken trace either.
+            status = 402
+            span.set_attribute("checkout.decline_reason", "payment_gateway")
+            log_json(
+                span,
+                level="warning",
+                _msg="checkout payment declined",
+                path="/checkout",
+                error_type=type(e).__name__,
+                error=str(e),
+            )
         except PoolBusy as e:
             # At capacity, not broken: the database is fine, this pod simply
             # has no free connection. Reporting it as 5xx would blame the

@@ -104,7 +104,7 @@ spec:
           },
           "options": {
             "mode": "markdown",
-            "content": "**Valid events** are the requests this service is answerable for: `200`, `429`, `5xx`. `400`/`404` are excluded - they are correct answers to malformed or absent ids, and counting them would make the SLI track how much bad input arrives rather than how well the service works.\n\n**`429` counts as a failure.** Shedding is the service behaving correctly, but the user still was not served - and that is the pressure that turns \"we are shedding\" into \"we need capacity\". It has two sources: refused at admission (`MAX_IN_FLIGHT`, never reaches the handler) and refused at the connection pool (`PoolBusy`, after the request has already spent its CPU). The second is the more expensive kind. *Broken vs overloaded* keeps causes apart.\n\n**Load-test traffic is included.** Every request here comes from a deliberate run; excluding it would leave nothing to measure.\n\n**Latency is measured over served requests only** (`status=\"200\"`). A 429 answered in 2ms is not evidence of speed. Budget window is 30d, matching metric retention."
+            "content": "**Valid events** are the requests this service is answerable for: `200`, `402`, `429`, `5xx`. `402` is a *good* event: the payment gateway declined the charge, the service handled that answer correctly, and the caller got a correct response. It used to be returned as `500`, which put a normal commercial outcome in the same bucket as a crash and - at the injected rate of 2% - capped this SLI at ~98% by construction, so a 99.9% target was unreachable by any strategy. `400`/`404` are excluded - they are correct answers to malformed or absent ids, and counting them would make the SLI track how much bad input arrives rather than how well the service works.\n\n**`429` counts as a failure.** Shedding is the service behaving correctly, but the user still was not served - and that is the pressure that turns \"we are shedding\" into \"we need capacity\". It has two sources: refused at admission (`MAX_IN_FLIGHT`, never reaches the handler) and refused at the connection pool (`PoolBusy`, after the request has already spent its CPU). The second is the more expensive kind. *Broken vs overloaded* keeps causes apart.\n\n**Load-test traffic is included.** Every request here comes from a deliberate run; excluding it would leave nothing to measure.\n\n**Latency is measured over served requests only** (`status=\"200\"`), and `402` is deliberately left out of it: a decline is raised before the order is written, so it returns fast without doing the work whose latency this measures, and counting it would flatter p95. A 429 answered in 2ms is not evidence of speed. Budget window is 30d, matching metric retention."
           },
           "id": 1
         },
@@ -162,7 +162,7 @@ spec:
           },
           "targets": [
             {
-              "expr": "(sum(rate(http_requests_total{namespace=~\"$namespace\",job=~\"$service\",status=\"200\"}[30d]))) / clamp_min(sum(rate(http_requests_total{namespace=~\"$namespace\",job=~\"$service\",status=~\"200|429|5..\"}[30d])), 0.001)",
+              "expr": "(sum(rate(http_requests_total{namespace=~\"$namespace\",job=~\"$service\",status=~\"200|402\"}[30d]))) / clamp_min(sum(rate(http_requests_total{namespace=~\"$namespace\",job=~\"$service\",status=~\"200|402|429|5..\"}[30d])), 0.001)",
               "legendFormat": "availability"
             }
           ],
@@ -270,7 +270,7 @@ spec:
           },
           "targets": [
             {
-              "expr": "clamp_min(1 - ((1 - ((sum(rate(http_requests_total{namespace=~\"$namespace\",job=~\"$service\",status=\"200\"}[30d]))) / clamp_min(sum(rate(http_requests_total{namespace=~\"$namespace\",job=~\"$service\",status=~\"200|429|5..\"}[30d])), 0.001))) / (1 - $slo_availability)), 0)",
+              "expr": "clamp_min(1 - ((1 - ((sum(rate(http_requests_total{namespace=~\"$namespace\",job=~\"$service\",status=~\"200|402\"}[30d]))) / clamp_min(sum(rate(http_requests_total{namespace=~\"$namespace\",job=~\"$service\",status=~\"200|402|429|5..\"}[30d])), 0.001))) / (1 - $slo_availability)), 0)",
               "legendFormat": "remaining"
             }
           ],
@@ -332,7 +332,7 @@ spec:
           },
           "targets": [
             {
-              "expr": "(1 - ((sum(rate(http_requests_total{namespace=~\"$namespace\",job=~\"$service\",status=\"200\"}[1h]))) / clamp_min(sum(rate(http_requests_total{namespace=~\"$namespace\",job=~\"$service\",status=~\"200|429|5..\"}[1h])), 0.001))) / (1 - $slo_availability)",
+              "expr": "(1 - ((sum(rate(http_requests_total{namespace=~\"$namespace\",job=~\"$service\",status=~\"200|402\"}[1h]))) / clamp_min(sum(rate(http_requests_total{namespace=~\"$namespace\",job=~\"$service\",status=~\"200|402|429|5..\"}[1h])), 0.001))) / (1 - $slo_availability)",
               "legendFormat": "1h"
             }
           ],
@@ -395,23 +395,23 @@ spec:
           },
           "targets": [
             {
-              "expr": "(1 - ((sum(rate(http_requests_total{namespace=~\"$namespace\",job=~\"$service\",status=\"200\"}[5m]))) / clamp_min(sum(rate(http_requests_total{namespace=~\"$namespace\",job=~\"$service\",status=~\"200|429|5..\"}[5m])), 0.001))) / (1 - $slo_availability)",
+              "expr": "(1 - ((sum(rate(http_requests_total{namespace=~\"$namespace\",job=~\"$service\",status=~\"200|402\"}[5m]))) / clamp_min(sum(rate(http_requests_total{namespace=~\"$namespace\",job=~\"$service\",status=~\"200|402|429|5..\"}[5m])), 0.001))) / (1 - $slo_availability)",
               "legendFormat": "5m"
             },
             {
-              "expr": "(1 - ((sum(rate(http_requests_total{namespace=~\"$namespace\",job=~\"$service\",status=\"200\"}[1h]))) / clamp_min(sum(rate(http_requests_total{namespace=~\"$namespace\",job=~\"$service\",status=~\"200|429|5..\"}[1h])), 0.001))) / (1 - $slo_availability)",
+              "expr": "(1 - ((sum(rate(http_requests_total{namespace=~\"$namespace\",job=~\"$service\",status=~\"200|402\"}[1h]))) / clamp_min(sum(rate(http_requests_total{namespace=~\"$namespace\",job=~\"$service\",status=~\"200|402|429|5..\"}[1h])), 0.001))) / (1 - $slo_availability)",
               "legendFormat": "1h"
             },
             {
-              "expr": "(1 - ((sum(rate(http_requests_total{namespace=~\"$namespace\",job=~\"$service\",status=\"200\"}[6h]))) / clamp_min(sum(rate(http_requests_total{namespace=~\"$namespace\",job=~\"$service\",status=~\"200|429|5..\"}[6h])), 0.001))) / (1 - $slo_availability)",
+              "expr": "(1 - ((sum(rate(http_requests_total{namespace=~\"$namespace\",job=~\"$service\",status=~\"200|402\"}[6h]))) / clamp_min(sum(rate(http_requests_total{namespace=~\"$namespace\",job=~\"$service\",status=~\"200|402|429|5..\"}[6h])), 0.001))) / (1 - $slo_availability)",
               "legendFormat": "6h"
             },
             {
-              "expr": "(1 - ((sum(rate(http_requests_total{namespace=~\"$namespace\",job=~\"$service\",status=\"200\"}[24h]))) / clamp_min(sum(rate(http_requests_total{namespace=~\"$namespace\",job=~\"$service\",status=~\"200|429|5..\"}[24h])), 0.001))) / (1 - $slo_availability)",
+              "expr": "(1 - ((sum(rate(http_requests_total{namespace=~\"$namespace\",job=~\"$service\",status=~\"200|402\"}[24h]))) / clamp_min(sum(rate(http_requests_total{namespace=~\"$namespace\",job=~\"$service\",status=~\"200|402|429|5..\"}[24h])), 0.001))) / (1 - $slo_availability)",
               "legendFormat": "24h"
             },
             {
-              "expr": "(1 - ((sum(rate(http_requests_total{namespace=~\"$namespace\",job=~\"$service\",status=\"200\"}[3d]))) / clamp_min(sum(rate(http_requests_total{namespace=~\"$namespace\",job=~\"$service\",status=~\"200|429|5..\"}[3d])), 0.001))) / (1 - $slo_availability)",
+              "expr": "(1 - ((sum(rate(http_requests_total{namespace=~\"$namespace\",job=~\"$service\",status=~\"200|402\"}[3d]))) / clamp_min(sum(rate(http_requests_total{namespace=~\"$namespace\",job=~\"$service\",status=~\"200|402|429|5..\"}[3d])), 0.001))) / (1 - $slo_availability)",
               "legendFormat": "3d"
             }
           ],
@@ -489,7 +489,7 @@ spec:
           },
           "targets": [
             {
-              "expr": "(sum(rate(http_requests_total{namespace=~\"$namespace\",job=~\"$service\",status=\"200\"}[1h]))) / clamp_min(sum(rate(http_requests_total{namespace=~\"$namespace\",job=~\"$service\",status=~\"200|429|5..\"}[1h])), 0.001)",
+              "expr": "(sum(rate(http_requests_total{namespace=~\"$namespace\",job=~\"$service\",status=~\"200|402\"}[1h]))) / clamp_min(sum(rate(http_requests_total{namespace=~\"$namespace\",job=~\"$service\",status=~\"200|402|429|5..\"}[1h])), 0.001)",
               "legendFormat": "availability (1h)"
             },
             {
@@ -531,7 +531,7 @@ spec:
           },
           "targets": [
             {
-              "expr": "(1 - ((sum(rate(http_requests_total{namespace=~\"$namespace\",job=~\"$service\",status=\"200\"}[30d]))) / clamp_min(sum(rate(http_requests_total{namespace=~\"$namespace\",job=~\"$service\",status=~\"200|429|5..\"}[30d])), 0.001))) / (1 - $slo_availability)",
+              "expr": "(1 - ((sum(rate(http_requests_total{namespace=~\"$namespace\",job=~\"$service\",status=~\"200|402\"}[30d]))) / clamp_min(sum(rate(http_requests_total{namespace=~\"$namespace\",job=~\"$service\",status=~\"200|402|429|5..\"}[30d])), 0.001))) / (1 - $slo_availability)",
               "legendFormat": "consumed"
             }
           ],
