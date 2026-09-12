@@ -1,0 +1,111 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.name }}
+  namespace: {{ .Values.namespace }}
+  labels:
+{{ toYaml .Values.labels | indent 4 }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.name }}-scripts
+  namespace: {{ .Values.namespace }}
+  labels:
+{{ toYaml .Values.labels | indent 4 }}
+data:
+  shop.js: |
+{{ .Files.Get "files/shop.js" | indent 4 }}
+---
+# A suspended CronJob, used as a template rather than a schedule.
+#
+# It never fires on its own. Each run is created from it explicitly:
+#
+#   kubectl create job -n {{ .Values.namespace }} \
+#     --from=cronjob/{{ .Values.name }} {{ .Values.name }}-$(date +%s)
+#
+# GitOps owns the definition (script, profile defaults, target, resources);
+# the individual runs are not reconciled, because a load test that Argo CD
+# re-creates on every sync is not an experiment - it is background noise that
+# would contaminate every cost measurement taken afterwards.
+#
+# The generator carries the same finops.internal/* labels as any other
+# workload on purpose: it burns real CPU, and an experiment that failed to
+# account for its generator would be attributing that cost to the system
+# under test.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ .Values.name }}
+  namespace: {{ .Values.namespace }}
+  labels:
+{{ toYaml .Values.labels | indent 4 }}
+spec:
+  # Never scheduled; runs are created from this template by hand or by the
+  # experiment runner.
+  suspend: true
+  schedule: "0 0 31 2 *"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    metadata:
+      labels:
+{{ toYaml .Values.labels | indent 8 }}
+    spec:
+      backoffLimit: 0
+      ttlSecondsAfterFinished: {{ .Values.ttlSecondsAfterFinished | default 3600 }}
+      template:
+        metadata:
+          labels:
+{{ toYaml .Values.labels | indent 12 }}
+        spec:
+          serviceAccountName: {{ .Values.name }}
+          restartPolicy: Never
+{{- if .Values.nodeSelector }}
+          # Kept off the nodes running the workload: a generator sharing
+          # cores with the system it measures inflates that system's apparent
+          # cost and depresses its apparent capacity.
+          nodeSelector:
+{{ toYaml .Values.nodeSelector | indent 12 }}
+{{- end }}
+          containers:
+            - name: k6
+              image: {{ .Values.image }}
+              args:
+                - run
+                # Explicit even though `run` defaults to true: without system
+                # env vars the script silently falls back to the baseline
+                # profile at its default rate, which looks like a successful
+                # run of the wrong experiment.
+                - --include-system-env-vars
+                # Client-side metrics go to VictoriaMetrics alongside the
+                # server's own. The gap between the two is the queueing the
+                # server never sees, and it is the honest SLO number.
+                - --out
+                - experimental-prometheus-rw
+                - /scripts/shop.js
+              env:
+                - name: PROFILE
+                  value: {{ .Values.profile | quote }}
+                - name: RPS_TARGET
+                  value: {{ .Values.rpsTarget | quote }}
+                - name: DURATION
+                  value: {{ .Values.duration | quote }}
+                - name: K6_TARGET
+                  value: {{ .Values.target | quote }}
+                - name: K6_HOST
+                  value: {{ .Values.host | quote }}
+                - name: K6_ANALYTICS_HOST
+                  value: {{ .Values.analyticsHost | quote }}
+                - name: K6_PROMETHEUS_RW_SERVER_URL
+                  value: {{ .Values.remoteWriteUrl | quote }}
+                - name: K6_PROMETHEUS_RW_TREND_STATS
+                  value: {{ .Values.trendStats | quote }}
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+              resources:
+{{ toYaml .Values.resources | indent 16 }}
+          volumes:
+            - name: scripts
+              configMap:
+                name: {{ .Values.name }}-scripts

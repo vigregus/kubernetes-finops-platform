@@ -1,0 +1,31 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: loadgen
+  namespace: argocd
+  annotations:
+    # After the business apps: there is nothing to generate load against
+    # until they exist.
+    argocd.argoproj.io/sync-wave: "5"
+spec:
+  project: finops-platform
+  sources:
+    - repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
+      targetRevision: HEAD
+      ref: values
+    - repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
+      targetRevision: HEAD
+      path: charts/loadgen
+      helm:
+        valueFiles:
+          - $values/gitops/04-business-app/loadgen/values.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: loadgen
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

@@ -1,0 +1,41 @@
+name: loadgen
+namespace: loadgen
+labels:
+  app.kubernetes.io/name: loadgen
+  app.kubernetes.io/component: loadgen
+  finops.internal/product: platform
+  finops.internal/team: platform-engineering
+  finops.internal/environment: prod
+  finops.internal/component: platform
+image: grafana/k6:0.54.0
+
+# Defaults for a run created from the CronJob template. The experiment runner
+# overrides these per variant; changing them here changes what an unqualified
+# `kubectl create job --from=cronjob/loadgen` does.
+profile: baseline
+rpsTarget: "50"
+duration: 5m
+
+# Through the ingress rather than the Service, so the load exercises the real
+# entry point and the trace origin with it.
+target: http://ingress-nginx-controller.ingress-nginx.svc.cluster.local
+host: shop.finops.local
+analyticsHost: analytics.finops.local
+
+remoteWriteUrl: http://vmsingle-vm-local-victoria-metrics-k8s-stack.observability.svc.cluster.local:8428/api/v1/write
+trendStats: "p(50),p(95),p(99),avg,max"
+
+ttlSecondsAfterFinished: 3600
+
+# Pinned to its own node once the cluster is multi-node (phase 3). Empty here
+# because the current cluster has a single node and a nodeSelector that
+# matches nothing would leave every run Pending.
+nodeSelector: {}
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 256Mi
+  limits:
+    cpu: 2000m
+    memory: 1Gi

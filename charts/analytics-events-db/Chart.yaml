@@ -1,5 +1,0 @@
-apiVersion: v2
-name: analytics-events-db
-description: High-volume order_events fact table for the OLTP-at-scale vs OLAP comparison (see tests/data-volume/)
-type: application
-version: 0.1.0
