@@ -21,6 +21,17 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: istio-system
+  # istiod's own validationController rewrites failurePolicy on this webhook
+  # once it is serving, flipping Ignore to Fail so that a broken control plane
+  # cannot let invalid config through. The chart ships the pre-flip value, so
+  # Argo would report this application OutOfSync forever and selfHeal would
+  # fight istiod over the field on every reconcile.
+  ignoreDifferences:
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+      name: istio-validator-istio-system
+      jsonPointers:
+        - /webhooks/0/failurePolicy
   syncPolicy:
     automated:
       prune: true
