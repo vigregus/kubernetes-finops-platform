@@ -27,6 +27,15 @@ spec:
     server: https://kubernetes.default.svc
     namespace: ingress-nginx
   syncPolicy:
+    # The namespace is created by this application (CreateNamespace below), so
+    # its labels belong here rather than in infra-bootstrap's namespace list -
+    # two applications owning one Namespace object would fight over it.
+    managedNamespaceMetadata:
+      labels:
+        # ingress is where external traffic enters prod, so leaving it outside
+        # the mesh would mean every request arrived in plaintext no matter how
+        # strict the policy inside.
+        istio.io/dataplane-mode: ambient
     automated:
       prune: true
       selfHeal: true

@@ -1,6 +1,11 @@
 namespaces:
   - name: argocd
   - name: observability
+    labels:
+      # In the mesh so vmagent's scrapes of prod are mTLS rather than the one
+      # plaintext hole left in an otherwise encrypted namespace. Without this,
+      # turning on STRICT below would simply sever monitoring of prod.
+      istio.io/dataplane-mode: ambient
   - name: finops-system
   - name: governance-system
   - name: dev
