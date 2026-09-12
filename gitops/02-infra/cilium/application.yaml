@@ -1,0 +1,36 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cilium
+  namespace: argocd
+  annotations:
+    # Before everything: it is the CNI. In practice it is already running by
+    # the time Argo CD starts (it has to be - see the values file), so this
+    # wave governs re-sync ordering rather than first install.
+    argocd.argoproj.io/sync-wave: "-2"
+spec:
+  project: finops-platform
+  sources:
+    - repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
+      targetRevision: HEAD
+      ref: values
+    - repoURL: https://helm.cilium.io/
+      chart: cilium
+      targetRevision: 1.20.1
+      helm:
+        releaseName: cilium
+        valueFiles:
+          - $values/gitops/02-infra/cilium/values.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+  syncPolicy:
+    automated:
+      # prune is deliberately off here, unlike every other application in this
+      # repository. Pruning the CNI on a transient diff would take cluster
+      # networking down with it, and nothing else could recover because
+      # recovery itself needs the network.
+      prune: false
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true
