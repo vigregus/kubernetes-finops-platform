@@ -53,7 +53,8 @@ Expected outcomes for AWS v2:
 
 - Multi-cluster platform management in v1.
 - Production-grade HA, disaster recovery, or enterprise access model in v1.
-- A generic service mesh, CI platform, or internal developer portal.
+- A service mesh, runtime security agent, or scanner adopted as default infrastructure. These are in scope only as measured variants that can be switched off and compared - see ADR 0002.
+- A CI platform or internal developer portal.
 - Full multi-cloud billing support in the first implementation.
 - A broad collection of tools that are not required for GitOps, observability, governance, or FinOps attribution.
 
@@ -428,7 +429,7 @@ This is still a scaffold, not a completed runtime stack, but the following are n
 - VictoriaMetrics (`victoria-metrics-k8s-stack`: VMSingle, VMAgent, kube-state-metrics, node-exporter, Alertmanager),
 - VictoriaLogs (`victoria-logs-single`),
 - Tempo (`tempo`, single-binary mode),
-- Grafana Operator plus one `Grafana` instance, `GrafanaDatasource` resources for VictoriaMetrics/VictoriaLogs/Tempo, and the three dashboards as `GrafanaDashboard` resources (see ADR 0002),
+- Grafana Operator plus one `Grafana` instance, `GrafanaDatasource` resources for VictoriaMetrics/VictoriaLogs/Tempo, and the three dashboards as `GrafanaDashboard` resources,
 - OpenCost, VPA (recommender only), and Goldilocks.
 
 Definition of Done for Local v1 (below) is met. Known, deliberate gaps that remain open:
