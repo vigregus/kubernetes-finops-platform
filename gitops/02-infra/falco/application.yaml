@@ -1,0 +1,32 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: falco
+  namespace: argocd
+  annotations:
+    # Alongside the other platform tooling. It has no bootstrap role - nothing
+    # depends on it to come up - so it does not need an early wave.
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  project: finops-platform
+  sources:
+    - repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
+      targetRevision: HEAD
+      ref: values
+    - repoURL: https://falcosecurity.github.io/charts
+      chart: falco
+      targetRevision: 9.1.0
+      helm:
+        releaseName: falco
+        valueFiles:
+          - $values/gitops/02-infra/falco/values.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: falco
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

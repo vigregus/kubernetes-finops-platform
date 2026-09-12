@@ -1,0 +1,105 @@
+# Falco: runtime threat detection from syscalls.
+#
+# It answers a question no other component here can. Kyverno decides what may
+# be admitted, Istio decides who may talk to whom - both judge intent, before
+# or around the workload. Falco watches what a container actually did once it
+# was running: a shell spawned inside a pod, a write into /etc, a read of
+# /proc/self/mem, an outbound connection from a process that has no business
+# making one.
+
+driver:
+  # modern_ebpf explicitly, not "auto". auto probes for a kernel module first
+  # and only falls back, which on a node that has no kmod available produces a
+  # slow, noisy start that reads like a broken install. This kernel is
+  # 6.10-linuxkit with /sys/kernel/btf/vmlinux present, so CO-RE eBPF is
+  # supported outright and there is nothing to fall back from.
+  #
+  # Coexisting with Cilium is fine and worth stating because it surprises
+  # people: both load eBPF programs, but into different hooks - Cilium onto
+  # tc/XDP and socket paths for the datapath, Falco onto tracepoints for
+  # syscalls. They do not contend for the same attach points.
+  kind: modern_ebpf
+
+# Falco's own metrics - event throughput, drops, rule hits, resource use. The
+# number that matters most here is the drop rate: a Falco that is dropping
+# syscalls is not a security control, it is a partial sample, and it fails
+# quietly unless someone is watching this.
+metrics:
+  enabled: true
+  interval: 15s
+  outputRule: true
+  kernelEventCounters: true
+  libbpfStatsEnabled: true
+
+falco:
+  # JSON so the events are machine-readable on the way to VictoriaLogs; plain
+  # text output would have to be re-parsed to be filterable.
+  json_output: true
+  json_include_output_property: true
+  # Kept on despite sidekick also shipping every event, because the two serve
+  # different moments: sidekick is the path to VictoriaLogs and the dashboard,
+  # stdout is what `kubectl logs` shows when sidekick itself is the thing that
+  # is broken. The duplication is a few lines per event, not a log-volume
+  # problem at this rule set.
+  stdout_output:
+    enabled: true
+  webserver:
+    enabled: true
+    listen_port: 8765
+    prometheus_metrics_enabled: true
+
+# Events leave Falco through sidekick rather than being read off stdout.
+# Reading stdout would put the events in VictoriaLogs as unstructured text,
+# losing the rule, priority and source fields that make them queryable - and
+# those fields are exactly what a dashboard counts.
+falcosidekick:
+  enabled: true
+  fullfqdn: false
+  config:
+    # notice and above. debug/informational rules fire constantly under load
+    # here - every exec probe, every package read - and would bury the events
+    # worth seeing.
+    minimumpriority: notice
+    loki:
+      # VictoriaLogs speaks the Loki push protocol, so no Loki is needed; only
+      # the path differs from Grafana's default, which is the single detail
+      # that makes this work.
+      hostport: http://vl-local-victoria-logs-single-server.observability.svc.cluster.local:9428
+      endpoint: /insert/loki/api/v1/push
+      format: json
+      minimumpriority: notice
+  # Off: this repository scrapes with VictoriaMetrics CRDs, not
+  # prometheus-operator ones (see gitops/02-infra/falco/manifests).
+  serviceMonitor:
+    enabled: false
+  webui:
+    enabled: false
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+  podLabels:
+    app.kubernetes.io/name: falcosidekick
+    finops.internal/product: platform
+    finops.internal/team: platform-engineering
+    finops.internal/environment: prod
+    finops.internal/component: security
+    finops.internal/cost-center: platform-infra
+    finops.internal/owner: platform-team
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 768Mi
+
+podLabels:
+  finops.internal/product: platform
+  finops.internal/team: platform-engineering
+  finops.internal/environment: prod
+  finops.internal/component: security
+  finops.internal/cost-center: platform-infra
+  finops.internal/owner: platform-team
