@@ -50,7 +50,12 @@ kubelet:
 vmsingle:
   enabled: true
   spec:
-    retentionPeriod: "7d"
+    # 30d so a conventional 30-day error budget window is actually
+    # computable. At the current ingest this is ~2.2GB against the 10Gi claim
+    # below, so no volume change is needed here - on a real cluster the
+    # retention window and the disk bill move together, which is the tradeoff
+    # this number represents.
+    retentionPeriod: "30d"
     replicaCount: 1
     storage:
       accessModes:

@@ -105,8 +105,16 @@ app = Flask(__name__)
 REQUEST_COUNT = Counter(
     "http_requests_total", "Total HTTP requests", ["method", "path", "status"]
 )
+# status is a label here on purpose. The latency SLI has to be computed over
+# *served* requests: a 429 answered in 2ms is not evidence that the service is
+# fast, it is evidence that it refused. Measured on this cluster, 5319 of 9553
+# 429s reached this histogram (the rest are shed before the handler runs), and
+# without the label they would drag the latency SLI upward at exactly the
+# moment the service was failing to serve.
 REQUEST_LATENCY = Histogram(
-    "http_request_duration_seconds", "HTTP request latency in seconds", ["method", "path"]
+    "http_request_duration_seconds",
+    "HTTP request latency in seconds",
+    ["method", "path", "status"],
 )
 CACHE_LATENCY = Histogram("cache_call_duration_seconds", "Redis call latency in seconds")
 DB_LATENCY = Histogram("db_query_duration_seconds", "Postgres query latency in seconds")
@@ -311,7 +319,7 @@ def _analytics():
     # p99). Attached only when the exposition format can carry it - see
     # apps/common/metrics.py.
     metrics_mod.observe(
-        REQUEST_LATENCY.labels(method="GET", path="/analytics"),
+        REQUEST_LATENCY.labels(method="GET", path="/analytics", status=str(status)),
         time.perf_counter() - start,
         trace_id_hex,
     )
