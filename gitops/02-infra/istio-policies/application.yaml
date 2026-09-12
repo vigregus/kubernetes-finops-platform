@@ -1,0 +1,27 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: istio-policies
+  namespace: argocd
+  annotations:
+    # After ztunnel (wave 1): a PeerAuthentication applied before there is a
+    # dataplane to enforce it is silently inert, which is the worst of both
+    # states - the policy reads as active and nothing checks anything.
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  project: finops-platform
+  source:
+    repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
+    targetRevision: HEAD
+    path: gitops/02-infra/istio-policies/manifests
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: prod
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true
