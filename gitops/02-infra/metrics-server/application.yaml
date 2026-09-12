@@ -1,0 +1,32 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: metrics-server
+  namespace: argocd
+  annotations:
+    # Early: HPA is unusable without it, and an autoscaler that silently fails
+    # open looks like "the strategy did not scale" rather than like a missing
+    # metrics pipeline.
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  project: finops-platform
+  sources:
+    - repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
+      targetRevision: HEAD
+      ref: values
+    - repoURL: https://kubernetes-sigs.github.io/metrics-server/
+      chart: metrics-server
+      targetRevision: 3.13.0
+      helm:
+        releaseName: metrics-server
+        valueFiles:
+          - $values/gitops/02-infra/metrics-server/values.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true

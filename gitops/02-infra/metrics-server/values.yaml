@@ -1,0 +1,38 @@
+# metrics-server: the resource metrics API behind HPA and `kubectl top`.
+#
+# It used to be a `minikube addons enable metrics-server` and nothing more,
+# which meant it existed on the old cluster and vanished the moment that
+# cluster was recreated - HPAs came back with FailedGetResourceMetric and
+# nothing in the repository explained where the dependency had gone. It is a
+# platform component like any other, so it is declared like any other.
+#
+# Not a replacement for VictoriaMetrics and not scraped into it: this serves
+# the 60-second rolling window Kubernetes itself consumes, while VM holds the
+# history the experiments are measured against. HPA reads this one, so an
+# autoscaling experiment's reaction time is bounded by its resolution below.
+
+# Only what the chart does not already set. Its defaults cover the address
+# types and --metric-resolution=15s (which happens to be the VMServiceScrape
+# interval used everywhere else, so the HPA's view and the dashboards' view of
+# a spike stay in step); repeating them here produced duplicate flags.
+args:
+  # minikube's kubelet serves its metrics endpoint with a self-signed
+  # certificate that no CA in the cluster signs. Without this metrics-server
+  # rejects every node and reports NotReady scrapes rather than a TLS error,
+  # which reads as a broken node. On EKS with managed nodes this comes off.
+  - --kubelet-insecure-tls
+
+resources:
+  requests:
+    cpu: 25m
+    memory: 64Mi
+  limits:
+    memory: 128Mi
+
+commonLabels:
+  finops.internal/product: platform
+  finops.internal/team: platform
+  finops.internal/environment: local
+  finops.internal/component: observability
+  finops.internal/cost-center: platform-infra
+  finops.internal/owner: platform-team
