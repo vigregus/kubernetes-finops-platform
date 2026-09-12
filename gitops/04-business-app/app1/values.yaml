@@ -85,8 +85,8 @@ postgres:
   # what decouples the connection count from the replica count.
   pooler:
     instances: 1
-    defaultPoolSize: \"25\"
-    maxClientConn: \"500\"
+    defaultPoolSize: "25"
+    maxClientConn: "500"
     resources:
       requests:
         cpu: 50m
