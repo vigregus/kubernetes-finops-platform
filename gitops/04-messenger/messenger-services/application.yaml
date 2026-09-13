@@ -1,0 +1,32 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: messenger-services
+  namespace: argocd
+  annotations:
+    # Волна 5: после хранилищ, вместе с Keycloak и Centrifugo. Сервисы
+    # читают их секреты, и без хранилищ они просто перезапускались бы
+    # по кругу.
+    argocd.argoproj.io/sync-wave: "5"
+spec:
+  project: finops-platform
+  sources:
+    - repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
+      targetRevision: HEAD
+      ref: values
+    - repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
+      targetRevision: HEAD
+      path: charts/messenger
+      helm:
+        releaseName: messenger
+        valueFiles:
+          - $values/gitops/04-messenger/messenger-services/values.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: messenger
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true

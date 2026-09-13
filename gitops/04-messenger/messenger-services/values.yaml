@@ -1,0 +1,125 @@
+namespace: messenger
+
+ownership:
+  team: platform-engineering
+  environment: local
+
+image:
+  registry: ghcr.io/vigregus/messenger
+  pullPolicy: IfNotPresent
+  # Выкатка по digest. Тег разрешён только здесь и только пока нет кода:
+  # заглушка нужна, чтобы каркас чарта был проверен раньше сервисов,
+  # а не вместе с ними. В stage и prod это значение остаётся false,
+  # и чарт откажется собраться без digest.
+  allowMutableTag: true
+
+telemetry:
+  otlpEndpoint: http://tempo-local.observability.svc.cluster.local:4317
+  # Обычный трафик - единицы процентов. Сплошная трассировка при целевых
+  # 2 500 отправках в секунду сама становится нагрузкой того же размера.
+  traceSampleRatio: "0.05"
+
+dependencies:
+  postgres:
+    # Через пул, а не напрямую в primary: приложение обязано работать
+    # в транзакционном режиме с первого дня.
+    host: messenger-db-pool
+    database: messenger
+    secret: messenger-db-app
+  redis:
+    # БД 1 - роль app-cache. Realtime (0) принадлежит Centrifugo,
+    # security (2) - ограничителям частоты.
+    url: redis://messenger-redis.messenger.svc.cluster.local:6379/1
+  kafka:
+    bootstrap: messenger-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092
+  keycloak:
+    issuer: http://messenger-idp-service.keycloak.svc.cluster.local:8080/realms/messenger
+  centrifugo:
+    apiUrl: http://messenger-centrifugo.messenger.svc.cluster.local:9000/api
+    secret: messenger-centrifugo
+
+priorityClasses:
+  create: true
+  classes:
+    messenger-critical:
+      value: 100000
+      description: API, outbox-relay и realtime - путь сообщения
+    messenger-standard:
+      value: 50000
+      description: уведомления, непрочитанное, веб
+    messenger-background:
+      value: 10000
+      description: фоновая обработка, уборка, аналитика
+
+services:
+  api:
+    enabled: true
+    component: api
+    replicas: 1
+    minAvailable: 1
+    priorityClass: messenger-critical
+    preStopSeconds: 5
+    terminationGracePeriodSeconds: 30
+    http:
+      port: 8080
+    image:
+      repository: registry.k8s.io/e2e-test-images/agnhost
+      tag: "2.47"
+    # Заглушка на время каркаса: отвечает на /livez и /readyz, чтобы
+    # проверить пробы, службу и маршрут до появления кода. Уходит
+    # вместе с первым настоящим образом.
+    command:
+      - /agnhost
+      - netexec
+      - --http-port=8080
+    resources:
+      requests: {cpu: 50m, memory: 128Mi}
+      limits: {cpu: "1", memory: 512Mi}
+
+  web:
+    enabled: false
+    component: web
+    replicas: 1
+    minAvailable: 1
+    priorityClass: messenger-standard
+    preStopSeconds: 5
+    terminationGracePeriodSeconds: 30
+    http:
+      port: 8080
+    image: {}
+    resources:
+      requests: {cpu: 25m, memory: 64Mi}
+      limits: {cpu: 500m, memory: 256Mi}
+
+  outbox-relay:
+    enabled: false
+    component: worker
+    # Без http: у него нет входящих запросов, поэтому нет ни службы,
+    # ни проб готовности. Живость проверяется иначе - по возрасту
+    # самой старой необработанной записи, а это метрика, не проба.
+    replicas: 1
+    minAvailable: 1
+    priorityClass: messenger-critical
+    preStopSeconds: 0
+    terminationGracePeriodSeconds: 60
+    image: {}
+    resources:
+      requests: {cpu: 50m, memory: 128Mi}
+      limits: {cpu: "1", memory: 512Mi}
+
+  consumer-realtime:
+    enabled: false
+    component: worker
+    replicas: 1
+    minAvailable: 1
+    priorityClass: messenger-critical
+    preStopSeconds: 0
+    # Дольше, чем у API: потребитель обязан успеть дообработать пачку
+    # и зафиксировать смещение, иначе после перезапуска будет повтор.
+    terminationGracePeriodSeconds: 60
+    image: {}
+    resources:
+      requests: {cpu: 50m, memory: 128Mi}
+      limits: {cpu: "1", memory: 512Mi}
+
+config: {}

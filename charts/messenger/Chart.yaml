@@ -1,0 +1,5 @@
+apiVersion: v2
+name: messenger
+description: Сервисы мессенджера — один шаблон, четыре нагрузки
+type: application
+version: 0.1.0

@@ -1,0 +1,194 @@
+{{/*
+Один шаблон на все нагрузки. API, веб и потребители отличаются значениями,
+а не кодом чарта: копия шаблона на каждый сервис расходится через полгода,
+и тогда «почему у consumer нет preStop» становится вопросом археологии.
+*/}}
+{{- range $name, $svc := .Values.services }}
+{{- if $svc.enabled }}
+{{- $ctx := dict "root" $ "svc" $svc "name" $name "component" $svc.component }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Values.namespace }}
+  labels:
+    {{- include "messenger.labels" $ctx | nindent 4 }}
+spec:
+  replicas: {{ $svc.replicas }}
+  selector:
+    matchLabels:
+      {{- include "messenger.selectorLabels" $ctx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "messenger.labels" $ctx | nindent 8 }}
+      annotations:
+        # Пересоздать поды при изменении конфигурации: ConfigMap
+        # монтируется, но процесс её не перечитывает.
+        checksum/config: {{ toYaml $.Values.config | sha256sum }}
+    spec:
+      serviceAccountName: {{ $name }}
+      priorityClassName: {{ $svc.priorityClass }}
+      # Столько же, сколько preStop плюс запас на долгие запросы.
+      terminationGracePeriodSeconds: {{ $svc.terminationGracePeriodSeconds }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: {{ $name }}
+          image: {{ include "messenger.image" $ctx }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          {{- with $svc.command }}
+          command: {{ toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          {{- if $svc.http }}
+          ports:
+            - name: http
+              containerPort: {{ $svc.http.port }}
+          {{- end }}
+          env:
+            - name: SERVICE_NAME
+              value: {{ $name }}
+            - name: ENVIRONMENT
+              value: {{ $.Values.ownership.environment }}
+            # Версия обязана быть в каждой строке журнала: без неё
+            # «когда это началось» не связать с выкаткой.
+            - name: SERVICE_VERSION
+              value: {{ $svc.image.digest | default "unversioned" | quote }}
+            - name: LOG_FORMAT
+              value: json
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ $.Values.telemetry.otlpEndpoint | quote }}
+            - name: OTEL_TRACES_SAMPLER_ARG
+              value: {{ $.Values.telemetry.traceSampleRatio | quote }}
+            # Пароль приходит из секрета, который создал оператор CNPG.
+            # В values его нет и не будет.
+            - name: DATABASE_HOST
+              value: {{ $.Values.dependencies.postgres.host | quote }}
+            - name: DATABASE_NAME
+              value: {{ $.Values.dependencies.postgres.database | quote }}
+            - name: DATABASE_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.dependencies.postgres.secret }}
+                  key: username
+            - name: DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.dependencies.postgres.secret }}
+                  key: password
+            - name: REDIS_URL
+              value: {{ $.Values.dependencies.redis.url | quote }}
+            - name: KAFKA_BOOTSTRAP
+              value: {{ $.Values.dependencies.kafka.bootstrap | quote }}
+            - name: OIDC_ISSUER
+              value: {{ $.Values.dependencies.keycloak.issuer | quote }}
+            - name: CENTRIFUGO_API_URL
+              value: {{ $.Values.dependencies.centrifugo.apiUrl | quote }}
+            - name: CENTRIFUGO_HTTP_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.dependencies.centrifugo.secret }}
+                  key: CENTRIFUGO_HTTP_API_KEY
+            {{- with $svc.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- if $svc.http }}
+          # Готовность и живость - разные вопросы. Живость: процесс не
+          # завис. Готовность: зависимости отвечают. Один и тот же
+          # обработчик на оба означает, что под с мёртвым пулом соединений
+          # продолжает принимать трафик, пока kubelet его не убьёт.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: http
+            periodSeconds: 10
+            failureThreshold: 6
+          startupProbe:
+            httpGet:
+              path: /livez
+              port: http
+            periodSeconds: 3
+            # 90 секунд на старт. Отдельная проба нужна, чтобы медленный
+            # запуск не выглядел как зависание и не перезапускался по кругу.
+            failureThreshold: 30
+          lifecycle:
+            preStop:
+              exec:
+                # Пауза, чтобы под успел исчезнуть из endpoints до того,
+                # как процесс начнёт останавливаться. Без неё каждое
+                # уменьшение числа реплик даёт всплеск ошибок, и он
+                # загрязняет измерение любого автомасштабирования.
+                command: ["sleep", "{{ $svc.preStopSeconds }}"]
+          {{- end }}
+          resources:
+            {{- toYaml $svc.resources | nindent 12 }}
+          volumeMounts:
+            # Корень только для чтения, поэтому временные файлы - явный том.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Values.namespace }}
+  labels:
+    {{- include "messenger.labels" $ctx | nindent 4 }}
+# Токен не монтируется: сервисы мессенджера не обращаются к API Kubernetes.
+# Смонтированный токен - это учётные данные в поде, которые никому не нужны.
+automountServiceAccountToken: false
+{{- if $svc.http }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Values.namespace }}
+  labels:
+    {{- include "messenger.labels" $ctx | nindent 4 }}
+spec:
+  selector:
+    {{- include "messenger.selectorLabels" $ctx | nindent 4 }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+{{- end }}
+{{- if gt (int $svc.replicas) 1 }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Values.namespace }}
+  labels:
+    {{- include "messenger.labels" $ctx | nindent 4 }}
+spec:
+  # minAvailable, а не maxUnavailable: при одной реплике maxUnavailable: 1
+  # разрешает снять единственный под, то есть бюджет ничего не защищает.
+  minAvailable: {{ $svc.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "messenger.selectorLabels" $ctx | nindent 6 }}
+{{- end }}
+{{- end }}
+{{- end }}

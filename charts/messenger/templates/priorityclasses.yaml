@@ -1,0 +1,21 @@
+{{/*
+Лестница приоритетов повторяет лестницу деградации из объёма v1: под
+нехваткой ресурсов планировщик обязан вытеснить второстепенное, а не то,
+что подвернулось. Без PriorityClass деградация существует только на бумаге.
+
+Классы кластерные, поэтому создаются один раз и не привязаны к namespace.
+*/}}
+{{- if .Values.priorityClasses.create }}
+{{- range $name, $pc := .Values.priorityClasses.classes }}
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: {{ $name }}
+  labels:
+    app.kubernetes.io/part-of: messenger
+value: {{ $pc.value }}
+globalDefault: false
+description: {{ $pc.description | quote }}
+{{- end }}
+{{- end }}
