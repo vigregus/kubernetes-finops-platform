@@ -28,7 +28,7 @@ MESSENGER_APPS  := messenger-secrets messenger-postgres messenger-redis \
                    messenger-keycloak messenger-centrifugo messenger-services \
                    messenger-routes
 
-.PHONY: help bootstrap local-up local-test local-down contracts migrate smoke status
+.PHONY: help bootstrap local-up local-test local-down contracts layers unit migrate smoke status
 
 help:
 	@grep -E '^[a-z-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -107,11 +107,19 @@ local-up: ## Поднять мессенджер (сам вызовет bootstra
 	done
 	@echo "мессенджер поднят"
 
-local-test: contracts migrate smoke ## Контракты, миграции и проверка связности
+local-test: contracts layers unit migrate smoke ## Контракты, слои, юнит, миграции, связность
 
 contracts: ## Схемы связны и обратно совместимы
 	@echo "· контракты"
 	@python3 packages/contracts/validate.py $${CONTRACT_BASE:-}
+
+layers: ## Зависимости между слоями идут только вниз
+	@echo "· слои"
+	@python3 scripts/check-layers.py
+
+unit: ## Модульные тесты, без базы и сети
+	@echo "· модульные тесты"
+	@cd apps/messenger && python3 -m pytest tests -q
 
 migrate: ## Применить миграции к локальной базе
 	@echo "· миграции"
