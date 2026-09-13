@@ -36,4 +36,13 @@ namespaces:
       # the mesh's cost be measured as an A/B rather than argued from a
       # datasheet. See experiments/results/ambient-vs-nomesh.md for what it
       # cost: 332 -> 293 rps at a p95 of 500ms, and 0.39 cores of ztunnel.
-      istio.io/dataplane-mode: ambient
+      # Temporarily out of the mesh, to read the traffic the way Cilium sees
+      # it. PERMISSIVE would not have done this: mesh-to-mesh traffic still
+      # travels as HBONE on 15008 whether or not mTLS is required, so Hubble
+      # would keep showing the tunnel rather than the real ports. Only leaving
+      # the mesh restores pod-level visibility.
+      #
+      # Note what this also switches off, since it is easy to forget: with no
+      # pod enrolled, the STRICT PeerAuthentication and all ten
+      # AuthorizationPolicies are inert. prod is open again.
+      # istio.io/dataplane-mode: ambient
