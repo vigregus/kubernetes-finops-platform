@@ -37,7 +37,10 @@ spec:
       tls:
         mode: Terminate
         certificateRefs:
-          - kind: Secret
+          # group проставлен явно - API-сервер всё равно допишет его как
+          # значение по умолчанию, и без него git расходится с кластером.
+          - group: ""
+            kind: Secret
             name: edge-tls
       allowedRoutes:
         # Routes may live in the namespaces that own the services they point
