@@ -1,5 +1,0 @@
-apiVersion: v2
-name: app1
-description: Sample business workload app1
-type: application
-version: 0.1.0

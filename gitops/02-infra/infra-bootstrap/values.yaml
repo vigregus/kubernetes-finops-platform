@@ -1,48 +1,15 @@
+# Namespaces the platform owns.
+#
+# dev, stage and prod are gone: they existed for the checkout/analytics demo,
+# which has been retired. The messenger brings its own namespaces, and putting
+# them back now would create empty shells that Kyverno still checks and
+# dashboards still query.
+#
+# observability keeps the ambient label; prod's enrolment went with prod.
 namespaces:
-  - name: argocd
-  - name: observability
-    labels:
-      # In the mesh so vmagent's scrapes of prod are mTLS rather than the one
-      # plaintext hole left in an otherwise encrypted namespace. Without this,
-      # turning on STRICT below would simply sever monitoring of prod.
-      istio.io/dataplane-mode: ambient
-  - name: finops-system
-  - name: governance-system
-  - name: dev
-    labels:
-      finops.internal/environment: dev
-      goldilocks.fairwinds.com/enabled: "true"
-  - name: stage
-    labels:
-      finops.internal/environment: stage
-      goldilocks.fairwinds.com/enabled: "true"
-  - name: prod
-    labels:
-      finops.internal/environment: prod
-      goldilocks.fairwinds.com/enabled: "true"
-      # Enrolled in the ambient mesh. prod only, deliberately: stage and dev
-      # stay outside it so the mesh's own cost and latency can be read as the
-      # difference between two otherwise identical environments rather than
-      # taken on faith from a vendor benchmark.
-      #
-      # ambient captures traffic at the node (ztunnel) rather than by injecting
-      # a sidecar, so no pod here gains a container and no workload's own
-      # resource accounting changes - which is what keeps the per-workload cost
-      # numbers comparable across the enrollment boundary. The mesh's cost
-      # lands in istio-system instead, where ADR 0002 says platform overhead
-      # belongs.
-      # Toggling this one label is the entire enrolment mechanism in ambient -
-      # no pod spec changes, no sidecar to add or remove - which is what let
-      # the mesh's cost be measured as an A/B rather than argued from a
-      # datasheet. See experiments/results/ambient-vs-nomesh.md for what it
-      # cost: 332 -> 293 rps at a p95 of 500ms, and 0.39 cores of ztunnel.
-      # Temporarily out of the mesh, to read the traffic the way Cilium sees
-      # it. PERMISSIVE would not have done this: mesh-to-mesh traffic still
-      # travels as HBONE on 15008 whether or not mTLS is required, so Hubble
-      # would keep showing the tunnel rather than the real ports. Only leaving
-      # the mesh restores pod-level visibility.
-      #
-      # Note what this also switches off, since it is easy to forget: with no
-      # pod enrolled, the STRICT PeerAuthentication and all ten
-      # AuthorizationPolicies are inert. prod is open again.
-      # istio.io/dataplane-mode: ambient
+- name: argocd
+- name: observability
+  labels:
+    istio.io/dataplane-mode: ambient
+- name: finops-system
+- name: governance-system

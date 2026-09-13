@@ -1,5 +1,0 @@
-apiVersion: v2
-name: loadgen
-description: k6 load profiles for the stand - open-model arrival-rate scenarios, run as explicit experiments
-type: application
-version: 0.1.0

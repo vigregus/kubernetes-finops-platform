@@ -1,5 +1,0 @@
-apiVersion: v2
-name: frontend
-description: Static storefront UI - a real browser-originated trace source
-type: application
-version: 0.1.0
