@@ -896,6 +896,169 @@ spec:
               "legendFormat": "{{pod}} warm complete"
             }
           ]
+        },
+        {
+          "id": 116,
+          "type": "row",
+          "title": "External API (payment gateway)",
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 59
+          },
+          "panels": []
+        },
+        {
+          "id": 17,
+          "type": "timeseries",
+          "title": "Gateway calls by outcome",
+          "description": "Outcomes of checkout's calls to the payment gateway, as the *caller* sees them. declined is a business answer and is not a failure; timeout and unreachable are. Before this dependency existed the gateway was a coin flip inside the process, so none of these outcomes could occur and the circuit breaker had nothing to break on.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 2,
+                "fillOpacity": 10
+              },
+              "unit": "reqps"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 60
+          },
+          "targets": [
+            {
+              "expr": "sum by (outcome) (rate(external_api_requests_total{namespace=~\"$namespace\"}[$__rate_interval]))",
+              "legendFormat": "{{outcome}}"
+            }
+          ]
+        },
+        {
+          "id": 18,
+          "type": "timeseries",
+          "title": "Gateway call latency (caller side)",
+          "description": "Measured by checkout around the whole call, so it includes connect, the gateway's own time and any retry. Read it against the 2s read timeout: p99 approaching that line is what turns into the timeout series on the left.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 2,
+                "fillOpacity": 10
+              },
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 60
+          },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.5, sum by (le) (rate(external_api_duration_seconds_bucket{namespace=~\"$namespace\"}[$__rate_interval])))",
+              "legendFormat": "p50"
+            },
+            {
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(external_api_duration_seconds_bucket{namespace=~\"$namespace\"}[$__rate_interval])))",
+              "legendFormat": "p95"
+            },
+            {
+              "expr": "histogram_quantile(0.99, sum by (le) (rate(external_api_duration_seconds_bucket{namespace=~\"$namespace\"}[$__rate_interval])))",
+              "legendFormat": "p99"
+            }
+          ]
+        },
+        {
+          "id": 19,
+          "type": "timeseries",
+          "title": "Caller timeouts vs gateway hangs",
+          "description": "The same event from both ends, and they do not have to agree. The gateway counts a request it deliberately never answered; the caller counts a deadline it gave up on. A remote dependency has no idea it timed out - only the client does - so a gap between these two lines is the honest picture, not a bug in either counter.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 2,
+                "fillOpacity": 10
+              },
+              "unit": "reqps"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 68
+          },
+          "targets": [
+            {
+              "expr": "sum(rate(external_api_requests_total{namespace=~\"$namespace\",outcome=~\"timeout|unreachable\"}[$__rate_interval]))",
+              "legendFormat": "caller: timeout/unreachable"
+            },
+            {
+              "expr": "sum(rate(gateway_requests_total{outcome=\"hung\"}[$__rate_interval]))",
+              "legendFormat": "gateway: hung"
+            },
+            {
+              "expr": "sum(rate(gateway_requests_total{outcome=\"error\"}[$__rate_interval]))",
+              "legendFormat": "gateway: 5xx"
+            }
+          ]
+        },
+        {
+          "id": 20,
+          "type": "timeseries",
+          "title": "Circuit breaker state",
+          "description": "0 closed, 1 half-open, 2 open. The gateway breaker opens on real failures only - a declined card is neutral to it, because tripping on declines would fail every subsequent order against a gateway that is working exactly as intended.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 2,
+                "fillOpacity": 20,
+                "lineInterpolation": "stepAfter"
+              },
+              "min": 0,
+              "max": 2
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 68
+          },
+          "targets": [
+            {
+              "expr": "dependency_circuit_state{namespace=~\"$namespace\"}",
+              "legendFormat": "{{job}} / {{dependency}}"
+            }
+          ]
         }
       ]
     }
