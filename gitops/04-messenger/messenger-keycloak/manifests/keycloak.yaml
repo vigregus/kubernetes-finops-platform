@@ -45,6 +45,13 @@ spec:
     # серверные компоненты за токенами.
     strict: false
 
+  ingress:
+    # Оператор по умолчанию заводит Ingress. В этом кластере Ingress не
+    # используется с тех пор, как ingress-nginx заменили на Gateway API
+    # поверх cilium-envoy; внешний вход в Keycloak будет описан HTTPRoute
+    # на edge-gateway, а не вторым механизмом рядом.
+    enabled: false
+
   proxy:
     # За edge-gateway. Без этого Keycloak построит ссылки редиректа
     # по внутреннему адресу пода, и вход из браузера сломается
