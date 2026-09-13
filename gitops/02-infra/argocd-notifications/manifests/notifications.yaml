@@ -8,8 +8,8 @@
 #   коммит → сборка образа → PR в gitops → слияние → синхронизация
 #          → поды готовы → СОБЫТИЕ ВЫКАТКИ
 #
-# Встроенный триггер on-deployed срабатывает ровно в последней точке:
-# синхронизация успешна И приложение Healthy.
+# Триггер срабатывает ровно в последней точке: синхронизация успешна
+# И приложение Healthy.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -30,57 +30,36 @@ data:
   # Одно эксплуатационное событие по схеме
   # packages/contracts/events/operational-event.v1.json.
   #
-  # Версия — образ, который действительно запущен, а не тот, что был
-  # в манифесте: между ними разница ровно в тех случаях, ради которых
-  # отметка и нужна.
+  # Тело — ОДНА строка. jsonline разбирает вход построчно, и
+  # отформатированный JSON он читает как первую строку «{», которая
+  # сама по себе невалидна. Первая версия этого шаблона была
+  # многострочной и давала 400 на каждом событии.
   template.operational-event: |
     webhook:
       victorialogs:
         method: POST
-        body: |
-          {
-            "timestamp": "{{ .app.status.operationState.finishedAt }}",
-            "event_type": "deployment",
-            "environment": "local",
-            "service": "{{ .app.metadata.name }}",
-            "application": "{{ .app.metadata.name }}",
-            "version": "{{ (index .app.status.summary.images 0) }}",
-            "git_sha": "{{ .app.status.sync.revision }}",
-            "actor": "argocd",
-            "source": "argocd-notifications",
-            "result": "success",
-            "_msg": "{{ .app.metadata.name }} выкачено: {{ .app.status.sync.revision }}"
-          }
+        body: '{"timestamp":"{{ .app.status.operationState.finishedAt }}","event_type":"deployment","environment":"local","service":"{{ .app.metadata.name }}","application":"{{ .app.metadata.name }}","version":"{{ if .app.status.summary.images }}{{ index .app.status.summary.images 0 }}{{ else }}none{{ end }}","git_sha":"{{ .app.status.sync.revision }}","actor":"argocd","source":"argocd-notifications","result":"success","_msg":"{{ .app.metadata.name }} выкачено"}'
 
   template.operational-event-failed: |
     webhook:
       victorialogs:
         method: POST
-        body: |
-          {
-            "timestamp": "{{ .app.status.operationState.finishedAt }}",
-            "event_type": "deployment",
-            "environment": "local",
-            "service": "{{ .app.metadata.name }}",
-            "application": "{{ .app.metadata.name }}",
-            "git_sha": "{{ .app.status.sync.revision }}",
-            "actor": "argocd",
-            "source": "argocd-notifications",
-            "result": "failed",
-            "reason": "{{ .app.status.operationState.message }}",
-            "_msg": "{{ .app.metadata.name }} выкатка не удалась"
-          }
+        body: '{"timestamp":"{{ .app.status.operationState.finishedAt }}","event_type":"deployment","environment":"local","service":"{{ .app.metadata.name }}","application":"{{ .app.metadata.name }}","git_sha":"{{ .app.status.sync.revision }}","actor":"argocd","source":"argocd-notifications","result":"failed","_msg":"{{ .app.metadata.name }} выкатка не удалась"}'
 
+  # Проверка на существование operationState обязательна: у приложения,
+  # которое ещё ни разу не синхронизировалось, его нет, и условие падает
+  # с «cannot fetch phase from <nil>» на каждом проходе контроллера.
+  #
   # oncePer по ревизии: без него каждая повторная проверка состояния
   # порождала бы новое событие, и на графике вместо одной отметки
   # появилась бы сплошная полоса.
   trigger.on-deployed: |
-    - when: app.status.operationState.phase in ['Succeeded'] and app.status.health.status == 'Healthy'
+    - when: app.status.operationState != nil and app.status.operationState.phase == 'Succeeded' and app.status.health.status == 'Healthy'
       oncePer: app.status.sync.revision
       send: [operational-event]
 
   trigger.on-sync-failed: |
-    - when: app.status.operationState.phase in ['Error', 'Failed']
+    - when: app.status.operationState != nil and app.status.operationState.phase in ['Error', 'Failed']
       oncePer: app.status.operationState.syncResult.revision
       send: [operational-event-failed]
 
