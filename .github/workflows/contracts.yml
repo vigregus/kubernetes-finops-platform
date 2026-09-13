@@ -8,6 +8,7 @@ on:
       - 'packages/contracts/**'
       - 'apps/messenger/**'
       - 'scripts/check-layers.py'
+      - 'scripts/check-migrations.py'
       - 'db/**'
       - '.github/workflows/contracts.yml'
   push:
@@ -54,6 +55,8 @@ jobs:
           python-version: '3.12'
       - name: Зависимости идут только вниз
         run: python3 scripts/check-layers.py
+      - name: Миграции без запрещённых операторов
+        run: python3 scripts/check-migrations.py
       - name: Модульные тесты
         run: |
           pip install --quiet -r apps/messenger/requirements-dev.txt
