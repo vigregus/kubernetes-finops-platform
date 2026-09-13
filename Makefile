@@ -25,7 +25,8 @@ ARGOCD_NAMESPACE ?= argocd
 # Приложения, которые обязаны стать Healthy, чтобы окружение считалось готовым.
 MESSENGER_APPS  := messenger-secrets messenger-postgres messenger-redis \
                    messenger-kafka-topics messenger-minio messenger-mailpit \
-                   messenger-keycloak messenger-centrifugo messenger-routes
+                   messenger-keycloak messenger-centrifugo messenger-services \
+                   messenger-routes
 
 .PHONY: help bootstrap local-up local-test local-down contracts migrate smoke status
 
