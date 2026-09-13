@@ -1,0 +1,32 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: keycloak-operator
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  project: finops-platform
+  source:
+    repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
+    targetRevision: HEAD
+    # Манифесты вендорены из keycloak/keycloak-k8s-resources 26.7.3 - у
+    # оператора Keycloak нет официального чарта, только этот набор.
+    # Тот же приём, что с Gateway API: версия видна в git, а не в аргументе
+    # curl из README.
+    path: gitops/02-infra/keycloak-operator/manifests
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    # Именно keycloak: в ClusterRoleBinding из поставки subject ServiceAccount
+    # жёстко указан в namespace keycloak. В другом namespace оператор
+    # развернётся, но останется без прав на кластерные ресурсы.
+    namespace: keycloak
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
