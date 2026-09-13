@@ -20,7 +20,7 @@ const RPS = Number(__ENV.RPS_TARGET || 50);
 const DURATION = __ENV.DURATION || "5m";
 
 const HOST = __ENV.K6_HOST || "shop.finops.local";
-const TARGET = __ENV.K6_TARGET || "http://ingress-nginx-controller.ingress-nginx.svc.cluster.local";
+const TARGET = __ENV.K6_TARGET || "https://shop.finops.local";
 
 // Sized from Little's law: concurrency = arrival rate x response time. The
 // ceiling is deliberately generous - hitting maxVUs would cap the offered
