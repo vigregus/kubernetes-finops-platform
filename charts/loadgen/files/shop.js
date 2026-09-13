@@ -105,8 +105,30 @@ if (!selected) {
 // refused".
 const shedRate = new Trend("shop_shed_ratio");
 
+// Name-to-address overrides, the equivalent of `curl --resolve`.
+//
+// Needed to drive the Cilium gateway at all. It terminates TLS and selects its
+// filter chain by SNI, and SNI comes from the URL's hostname - a Host header
+// does not set it. Pointing k6 at the node's address with a Host header gets a
+// connection reset, because no chain matches an empty server name. This maps
+// the real hostname onto the node so the URL stays https://shop.finops.local
+// and the SNI is right.
+//
+// Format: "shop.finops.local:192.168.49.2,analytics.finops.local:192.168.49.2"
+const RESOLVE = __ENV.K6_RESOLVE || "";
+const hostMap = {};
+RESOLVE.split(",").filter(Boolean).forEach((pair) => {
+  const idx = pair.lastIndexOf(":");
+  if (idx > 0) hostMap[pair.slice(0, idx)] = pair.slice(idx + 1);
+});
+
 export const options = {
   scenarios: { [PROFILE]: selected },
+  hosts: hostMap,
+  // The gateway's certificate is issued by the cluster's own CA, which no
+  // client here trusts. Verifying it would measure our willingness to
+  // distribute a CA bundle to the load generator, not the gateway.
+  insecureSkipTLSVerify: true,
   // `url` is a default system tag and carries the raw request URL, so tagging
   // each request with a bounded `name` is not on its own enough - the URL would
   // keep minting a series per order id regardless. This is the explicit list

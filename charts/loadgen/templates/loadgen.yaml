@@ -94,6 +94,8 @@ spec:
                   value: {{ .Values.keySpace | quote }}
                 - name: ACCESS_SKEW
                   value: {{ .Values.accessSkew | quote }}
+                - name: K6_RESOLVE
+                  value: {{ .Values.resolve | default "" | quote }}
                 - name: K6_TARGET
                   value: {{ .Values.target | quote }}
                 - name: K6_HOST
