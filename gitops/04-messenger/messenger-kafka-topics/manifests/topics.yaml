@@ -1,0 +1,74 @@
+# Три топика, а не шесть: в первой версии потребителей три - realtime,
+# уведомления и непрочитанное. Поиск, аналитика, модерация и биллинг вынесены
+# за v1 (CONS-005), и топики под них здесь не заводятся - пустой топик выглядит
+# как работающий контур и скрывает, что потребителя нет.
+#
+#   messenger.events.v1          основной поток доменных событий
+#   messenger.events.retry.v1    временные ошибки, интервал растёт
+#   messenger.events.dlq.v1      попытки исчерпаны, разбирается вручную
+#
+# Бесконечный повтор одной записи блокирует партицию целиком - вместе с
+# сообщениями всех бесед, попавших в неё. Поэтому неудача уходит в отдельный
+# топик, а основной поток продолжается.
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: messenger.events.v1
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: messenger-kafka
+    finops.internal/product: messenger
+    finops.internal/team: platform-engineering
+    finops.internal/environment: local
+    finops.internal/component: messaging
+spec:
+  # 12 партиций при одном брокере - это задел, а не нагрузка. Потребитель
+  # не масштабируется за число партиций, и менять его позже больно:
+  # смена числа партиций ломает привязку conversation_id к партиции,
+  # то есть порядок сообщений внутри беседы.
+  partitions: 12
+  replicas: 1
+  config:
+    retention.ms: 604800000
+    # Ключ - conversation_id, поэтому все события одной беседы попадают
+    # в одну партицию и сохраняют порядок. Сжатие по ключу здесь недопустимо:
+    # compact удалил бы предыдущие сообщения беседы, оставив последнее.
+    cleanup.policy: delete
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: messenger.events.retry.v1
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: messenger-kafka
+    finops.internal/product: messenger
+    finops.internal/team: platform-engineering
+    finops.internal/environment: local
+    finops.internal/component: messaging
+spec:
+  partitions: 3
+  replicas: 1
+  config:
+    retention.ms: 604800000
+    cleanup.policy: delete
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: messenger.events.dlq.v1
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: messenger-kafka
+    finops.internal/product: messenger
+    finops.internal/team: platform-engineering
+    finops.internal/environment: local
+    finops.internal/component: messaging
+spec:
+  partitions: 1
+  replicas: 1
+  config:
+    # Месяц вместо недели: DLQ разбирают руками, и запись не должна
+    # исчезнуть раньше, чем до неё дойдут.
+    retention.ms: 2592000000
+    cleanup.policy: delete

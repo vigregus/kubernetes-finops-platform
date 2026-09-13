@@ -1,0 +1,27 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: messenger-postgres
+  namespace: argocd
+  annotations:
+    # Волна 4: операторы стоят на 0, namespace создаётся на -1. Хранилища
+    # мессенджера идут после всего платформенного слоя - они его потребители,
+    # а не часть.
+    argocd.argoproj.io/sync-wave: "4"
+spec:
+  project: finops-platform
+  source:
+    repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
+    targetRevision: HEAD
+    path: gitops/04-messenger/messenger-postgres/manifests
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: messenger
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true

@@ -1,0 +1,59 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: messenger-db
+  namespace: messenger
+  labels:
+    app.kubernetes.io/name: messenger-db
+    app.kubernetes.io/component: database
+    finops.internal/product: messenger
+    finops.internal/team: platform-engineering
+    finops.internal/environment: local
+    finops.internal/component: database
+spec:
+  # Локальное окружение не пытается быть HA - у него другая задача:
+  # корректность потока сообщений. Кворумная синхронная репликация,
+  # описанная в архитектуре, относится к stage и проду.
+  instances: 1
+
+  bootstrap:
+    initdb:
+      database: messenger
+      owner: messenger
+      # Сравнение строк по байтам, а не по локали. Сортировка сообщений
+      # в беседе идёт по conversation_seq, а не по тексту, зато поведение
+      # индексов перестаёт зависеть от того, с какой локалью собран образ.
+      localeCollate: C
+      localeCType: C
+
+  postgresql:
+    parameters:
+      # Источник данных для «медленных запросов» на дашбордах: без него
+      # видно только, что база загружена, но не чем именно.
+      shared_preload_libraries: "pg_stat_statements"
+      max_connections: "200"
+
+  storage:
+    size: 2Gi
+
+  # Метки CNPG сам на поды не переносит - без этого блока и поды, и сервисы
+  # выпадут из разбивки затрат по продукту, ради которой вся платформа и есть.
+  inheritedMetadata:
+    labels:
+      finops.internal/product: messenger
+      finops.internal/team: platform-engineering
+      finops.internal/environment: local
+      finops.internal/component: database
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+  # Секрет с паролем роли messenger оператор создаёт сам:
+  # messenger-db-app (host, port, dbname, user, password, uri).
+  # Приложение читает его, а не хранит пароль в values.
+  enableSuperuserAccess: false

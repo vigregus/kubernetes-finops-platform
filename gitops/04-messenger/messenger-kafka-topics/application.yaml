@@ -1,0 +1,27 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: messenger-kafka-topics
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
+spec:
+  project: finops-platform
+  source:
+    repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
+    targetRevision: HEAD
+    path: gitops/04-messenger/messenger-kafka-topics/manifests
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    # Не messenger: оператор Strimzi смотрит только собственный namespace,
+    # поэтому KafkaTopic обязан лежать рядом с кластером. Это единственное
+    # место, где хранилище мессенджера выходит за свой namespace.
+    namespace: kafka
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true

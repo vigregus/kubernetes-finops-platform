@@ -1,0 +1,66 @@
+# Архитектура различает три роли Redis - realtime (брокер Centrifugo, history,
+# presence), app-cache (профили, метаданные бесед, членство) и security
+# (лимиты частоты, попытки входа). В проде это три ElastiCache: у них разная
+# критичность и разный радиус поражения. Локально это один экземпляр и три
+# номера БД - ровно то, что записано в таблице окружений.
+#
+#   DB 0   realtime
+#   DB 1   app-cache
+#   DB 2   security
+#
+# Разделение по номеру БД слабее, чем по экземпляру: общий процесс, общая
+# память, общий FLUSHALL. Оно держит только одну гарантию - что приложение
+# не перепутает ключи ролей, - и этого для локальной разработки достаточно.
+apiVersion: redis.redis.opstreelabs.in/v1beta2
+kind: Redis
+metadata:
+  name: messenger-redis
+  namespace: messenger
+  labels:
+    app.kubernetes.io/name: messenger-redis
+    app.kubernetes.io/component: cache
+    finops.internal/product: messenger
+    finops.internal/team: platform-engineering
+    finops.internal/environment: local
+    finops.internal/component: cache
+spec:
+  kubernetesConfig:
+    image: quay.io/opstree/redis:v7.2.3
+    imagePullPolicy: IfNotPresent
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+  redisConfig:
+    additionalRedisConfig: messenger-redis-config
+
+  storage:
+    volumeClaimTemplate:
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: messenger-redis-config
+  namespace: messenger
+data:
+  # volatile-lru, а не allkeys-lru: вытесняются только ключи с TTL, то есть
+  # ровно класс кеша. Ключи realtime без TTL - presence и history Centrifugo -
+  # при заполнении памяти остаются, и переполнение проявляется ошибкой записи,
+  # а не тихой потерей присутствия.
+  #
+  # В проде этого компромисса нет: там у каждой роли свой экземпляр и своя
+  # политика.
+  redis-additional.conf: |
+    maxmemory-policy volatile-lru
+    appendonly no
+    save ""

@@ -6,6 +6,12 @@
 # dashboards still query.
 #
 # observability keeps the ambient label; prod's enrolment went with prod.
+#
+# messenger is the first of those namespaces. It is deliberately NOT enrolled
+# in ambient yet: mesh identity belongs to the security gate, and enrolling it
+# now would put an mTLS tunnel between every operator and its own data plane
+# before a single message has been stored - a failure mode that would surface
+# as "Postgres unreachable" during the first bring-up.
 namespaces:
 - name: argocd
 - name: observability
@@ -13,3 +19,4 @@ namespaces:
     istio.io/dataplane-mode: ambient
 - name: finops-system
 - name: governance-system
+- name: messenger
