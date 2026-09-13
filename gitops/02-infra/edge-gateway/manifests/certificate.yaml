@@ -1,0 +1,36 @@
+# The gateway's TLS certificate, issued by the cluster CA rather than written
+# by hand. cert-manager renews it 30 days out, so expiry is a controller's job
+# and not a calendar reminder.
+#
+# Both names on one certificate: a Gateway listener references exactly one
+# Secret, and two listeners would otherwise be needed to serve two hostnames.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: edge-tls
+  namespace: edge
+  labels:
+    finops.internal/product: platform
+    finops.internal/team: platform-engineering
+    finops.internal/environment: prod
+    finops.internal/component: api-gateway
+    finops.internal/cost-center: platform-infra
+    finops.internal/owner: platform-team
+spec:
+  secretName: edge-tls
+  duration: 2160h     # 90 days, the Let's Encrypt convention
+  renewBefore: 720h   # 30 days
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    # Rotate the key on renewal, not just the certificate. Reusing a key
+    # across renewals means a leaked key stays valid for as long as the name
+    # exists rather than until the next renewal.
+    rotationPolicy: Always
+  dnsNames:
+    - shop.finops.local
+    - analytics.finops.local
+  issuerRef:
+    name: finops-local-ca
+    kind: ClusterIssuer
+    group: cert-manager.io

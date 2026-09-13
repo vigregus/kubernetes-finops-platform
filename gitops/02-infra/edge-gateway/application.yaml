@@ -1,0 +1,30 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: edge-gateway
+  namespace: argocd
+  annotations:
+    # After cert-manager (-2) and the CRDs (-3), before the workloads it
+    # routes to. A Gateway created before its issuer exists comes up with a
+    # listener that has no certificate and reports itself not Programmed.
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  project: finops-platform
+  source:
+    repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
+    targetRevision: HEAD
+    path: gitops/02-infra/edge-gateway/manifests
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    # The HTTPRoutes declare namespace: prod explicitly, which overrides this
+    # for those objects - the routes belong to the teams that own the services.
+    namespace: edge
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

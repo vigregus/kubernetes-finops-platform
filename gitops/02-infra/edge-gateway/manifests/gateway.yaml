@@ -1,0 +1,47 @@
+# The edge, served by the cilium-envoy DaemonSet that was already running for
+# L7 network policy. No new deployment: that is the whole point of using the
+# CNI's gateway rather than a second ingress controller.
+#
+# Runs beside ingress-nginx on purpose, not instead of it. The stand measures
+# cost, and "what does this gateway cost compared to that one" is only
+# answerable while both can serve the same profile.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: edge
+  namespace: edge
+  labels:
+    finops.internal/product: platform
+    finops.internal/team: platform-engineering
+    finops.internal/environment: prod
+    finops.internal/component: api-gateway
+    finops.internal/cost-center: platform-infra
+    finops.internal/owner: platform-team
+spec:
+  gatewayClassName: cilium
+  listeners:
+    # Plain HTTP is kept, and kept useless on purpose: every route attached to
+    # it answers a redirect. Closing port 80 outright would turn a
+    # http:// bookmark into a connection refused rather than a redirect.
+    - name: http
+      protocol: HTTP
+      port: 80
+      hostname: "*.finops.local"
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: https
+      protocol: HTTPS
+      port: 443
+      hostname: "*.finops.local"
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: edge-tls
+      allowedRoutes:
+        # Routes may live in the namespaces that own the services they point
+        # at, which is the division Gateway API exists for: the platform owns
+        # the listener and the certificate, each team owns its own routing.
+        namespaces:
+          from: All
