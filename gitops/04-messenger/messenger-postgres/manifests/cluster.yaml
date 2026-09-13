@@ -27,10 +27,13 @@ spec:
       localeCType: C
 
   postgresql:
+    # Источник данных для «медленных запросов» на дашбордах: без него видно
+    # только, что база загружена, но не чем именно. Отдельным полем, а не
+    # в parameters: shared_preload_libraries управляет сам CNPG, и попытка
+    # задать её как параметр отвергается вебхуком как fixed configuration.
+    shared_preload_libraries:
+      - pg_stat_statements
     parameters:
-      # Источник данных для «медленных запросов» на дашбордах: без него
-      # видно только, что база загружена, но не чем именно.
-      shared_preload_libraries: "pg_stat_statements"
       max_connections: "200"
 
   storage:
