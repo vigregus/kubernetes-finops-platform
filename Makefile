@@ -119,7 +119,12 @@ layers: ## Зависимости между слоями идут только 
 
 unit: ## Модульные тесты, без базы и сети
 	@echo "· модульные тесты"
-	@cd apps/messenger && python3 -m pytest tests -q
+	@# Окружение создаётся здесь, а не документируется как «сначала
+	@# установите pytest»: шаг, который надо помнить, однажды забудут,
+	@# и тесты просто не запустятся.
+	@test -d apps/messenger/.venv || python3 -m venv apps/messenger/.venv
+	@apps/messenger/.venv/bin/pip install -q -r apps/messenger/requirements-dev.txt
+	@cd apps/messenger && .venv/bin/python -m pytest tests -q
 
 migrate: ## Применить миграции к локальной базе
 	@echo "· миграции"

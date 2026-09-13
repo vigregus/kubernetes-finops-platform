@@ -6,6 +6,8 @@ on:
   pull_request:
     paths:
       - 'packages/contracts/**'
+      - 'apps/messenger/**'
+      - 'scripts/check-layers.py'
       - 'db/**'
       - '.github/workflows/contracts.yml'
   push:
@@ -41,6 +43,21 @@ jobs:
           BASE="${{ github.event.pull_request.base.sha || 'HEAD~1' }}"
           echo "база сравнения: $BASE"
           python3 packages/contracts/validate.py "$BASE"
+
+  code:
+    name: Слои и модульные тесты
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Зависимости идут только вниз
+        run: python3 scripts/check-layers.py
+      - name: Модульные тесты
+        run: |
+          pip install --quiet -r apps/messenger/requirements-dev.txt
+          cd apps/messenger && python3 -m pytest tests -q
 
   migrations:
     name: Миграции применяются с нуля
