@@ -1,0 +1,97 @@
+name: Контракты и миграции
+
+# Блокирует слияние. Смысл в одном: несовместимое изменение контракта
+# и неприменимая миграция обязаны падать здесь, а не у того, кто выкатывает.
+on:
+  pull_request:
+    paths:
+      - 'packages/contracts/**'
+      - 'db/**'
+      - '.github/workflows/contracts.yml'
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    name: CTR-001..003
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Нужна история: совместимость проверяется против базовой ветки,
+          # а на мелкой копии её просто нет.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - run: pip install --quiet pyyaml
+
+      - name: Схемы связны
+        run: python3 packages/contracts/validate.py
+
+      - name: Изменения обратно совместимы
+        # Для push в main базой служит предыдущий коммит: так изменение,
+        # попавшее в main мимо PR, тоже не проходит молча.
+        run: |
+          BASE="${{ github.event.pull_request.base.sha || 'HEAD~1' }}"
+          echo "база сравнения: $BASE"
+          python3 packages/contracts/validate.py "$BASE"
+
+  migrations:
+    name: Миграции применяются с нуля
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: messenger
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Установить psql
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+
+      - name: Применить на чистую базу
+        env:
+          DATABASE_URL: postgresql://postgres:ci@localhost:5432/messenger
+        run: ./db/migrate.sh
+
+      - name: Повторный запуск ничего не меняет
+        # Идемпотентность - не деталь удобства: джоб миграции запускается
+        # при каждой выкатке, в том числе при откате и при повторе упавшего.
+        env:
+          DATABASE_URL: postgresql://postgres:ci@localhost:5432/messenger
+        run: |
+          out=$(./db/migrate.sh)
+          echo "$out"
+          echo "$out" | grep -q "применено новых: 0" || {
+            echo "повторный запуск применил миграции заново" >&2
+            exit 1
+          }
+
+      - name: Изменение применённой миграции - ошибка
+        # Схема в базе и схема в git обязаны совпадать. Молча разошедшиеся
+        # окружения - это отладка того, чего нет в коде.
+        env:
+          DATABASE_URL: postgresql://postgres:ci@localhost:5432/messenger
+        run: |
+          echo "-- посторонняя строка" >> db/migrations/0001_init.sql
+          if ./db/migrate.sh; then
+            echo "изменённая миграция прошла незамеченной" >&2
+            exit 1
+          fi
+          git checkout -- db/migrations/0001_init.sql
+          echo "изменение обнаружено, как и требуется"
