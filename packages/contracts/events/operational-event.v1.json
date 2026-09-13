@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://finops.local/contracts/events/operational-event.v1.json",
+  "title": "operational-event.v1",
+  "description": "Эксплуатационное событие: выкатка, изменение конфигурации, флаг возможности, изменение инфраструктуры, переключение роли, инцидент. Источник истины — VictoriaLogs; Grafana только отображает эти события на временной шкале. Привязывать их только к Grafana нельзя: аннотация, живущая исключительно в её базе, исчезает вместе с ней и недоступна ничему, кроме дашборда.",
+  "type": "object",
+  "required": ["timestamp", "event_type", "environment", "result"],
+  "properties": {
+    "timestamp": { "type": "string", "format": "date-time" },
+    "event_type": {
+      "enum": ["build", "deployment", "config_change", "feature_flag", "infra_change", "failover", "incident_start", "incident_resolved"],
+      "description": "build намеренно отделён от deployment: собранный образ ещё не работающий образ, и показывать сборки на продуктовом дашборде значит завалить его шумом."
+    },
+    "environment": { "enum": ["local", "stage", "prod"] },
+    "service": {
+      "type": "string",
+      "description": "Совпадает с меткой service в метриках, иначе фильтр дашборда по $service не покажет выкатку этого же сервиса."
+    },
+    "component": { "type": "string", "description": "Для infra_change и failover: rds, redis-realtime, msk, node-group." },
+    "version": { "type": "string", "description": "Digest запущенного образа. Тег сюда не пишется." },
+    "previous_version": { "type": "string" },
+    "git_sha": { "type": "string" },
+    "actor": { "type": "string", "description": "argocd, terraform, admin-api, оператор." },
+    "source": { "type": "string" },
+    "application": { "type": "string" },
+    "changed_keys": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Только имена изменённых ключей. Значения не пишутся: пароль, токен, строка подключения и подписанная ссылка попадут в журнал вместе с ними. За подробностями — ссылка на коммит."
+    },
+    "reason": { "type": "string" },
+    "duration_seconds": { "type": "number" },
+    "result": { "enum": ["success", "failed", "degraded"] },
+    "link": {
+      "type": "string",
+      "format": "uri",
+      "description": "Коммит или запрос на слияние. Так дашборд не превращается в просмотрщик git: подробности живут там, где им место."
+    }
+  },
+  "additionalProperties": true,
+  "$comment": "Метрика и событие отвечают на разные вопросы и нужны оба. messenger_build_info{service,version}=1 говорит «что сейчас запущено»; это непрерывный ряд, и строить из него аннотации нельзя — Grafana поставит отметку на каждой точке. Событие говорит «когда произошло изменение» и существует только в момент изменения."
+}

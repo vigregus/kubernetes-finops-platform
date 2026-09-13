@@ -1,0 +1,29 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: argocd-notifications
+  namespace: argocd
+  annotations:
+    # Волна -1: события о выкатке должны писаться уже с первой волны,
+    # иначе первая же выкатка платформы пройдёт без отметки.
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  project: finops-platform
+  source:
+    repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
+    targetRevision: HEAD
+    path: gitops/02-infra/argocd-notifications/manifests
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      # Argo CD установлен вручную и собой не управляет, поэтому его
+      # ConfigMap здесь не отбирается у другого владельца - он просто
+      # заполняется. Контроллер уведомлений перечитывает её сам.
+      - ServerSideApply=true

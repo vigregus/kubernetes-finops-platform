@@ -1,0 +1,92 @@
+# Источник события о выкатке — Argo CD, а не CI.
+#
+# CI знает «образ собран». Это ещё не «образ работает»: между сборкой и
+# запуском лежат запрос на слияние, синхронизация и выкатка подов, каждый
+# из которых может не случиться. Отметка на графике, поставленная по факту
+# сборки, будет врать о времени — а именно ко времени к ней и обращаются.
+#
+#   коммит → сборка образа → PR в gitops → слияние → синхронизация
+#          → поды готовы → СОБЫТИЕ ВЫКАТКИ
+#
+# Встроенный триггер on-deployed срабатывает ровно в последней точке:
+# синхронизация успешна И приложение Healthy.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-notifications-cm
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: argocd
+data:
+  # VictoriaLogs принимает построчный JSON. Поля потока заданы явно:
+  # по ним события группируются, и они же становятся измерениями,
+  # по которым дашборд фильтрует аннотации.
+  service.webhook.victorialogs: |
+    url: http://vl-local-victoria-logs-single-server.observability.svc.cluster.local:9428/insert/jsonline?_stream_fields=event_type,service,environment&_time_field=timestamp&_msg_field=_msg
+    headers:
+      - name: Content-Type
+        value: application/json
+
+  # Одно эксплуатационное событие по схеме
+  # packages/contracts/events/operational-event.v1.json.
+  #
+  # Версия — образ, который действительно запущен, а не тот, что был
+  # в манифесте: между ними разница ровно в тех случаях, ради которых
+  # отметка и нужна.
+  template.operational-event: |
+    webhook:
+      victorialogs:
+        method: POST
+        body: |
+          {
+            "timestamp": "{{ .app.status.operationState.finishedAt }}",
+            "event_type": "deployment",
+            "environment": "local",
+            "service": "{{ .app.metadata.name }}",
+            "application": "{{ .app.metadata.name }}",
+            "version": "{{ (index .app.status.summary.images 0) }}",
+            "git_sha": "{{ .app.status.sync.revision }}",
+            "actor": "argocd",
+            "source": "argocd-notifications",
+            "result": "success",
+            "_msg": "{{ .app.metadata.name }} выкачено: {{ .app.status.sync.revision }}"
+          }
+
+  template.operational-event-failed: |
+    webhook:
+      victorialogs:
+        method: POST
+        body: |
+          {
+            "timestamp": "{{ .app.status.operationState.finishedAt }}",
+            "event_type": "deployment",
+            "environment": "local",
+            "service": "{{ .app.metadata.name }}",
+            "application": "{{ .app.metadata.name }}",
+            "git_sha": "{{ .app.status.sync.revision }}",
+            "actor": "argocd",
+            "source": "argocd-notifications",
+            "result": "failed",
+            "reason": "{{ .app.status.operationState.message }}",
+            "_msg": "{{ .app.metadata.name }} выкатка не удалась"
+          }
+
+  # oncePer по ревизии: без него каждая повторная проверка состояния
+  # порождала бы новое событие, и на графике вместо одной отметки
+  # появилась бы сплошная полоса.
+  trigger.on-deployed: |
+    - when: app.status.operationState.phase in ['Succeeded'] and app.status.health.status == 'Healthy'
+      oncePer: app.status.sync.revision
+      send: [operational-event]
+
+  trigger.on-sync-failed: |
+    - when: app.status.operationState.phase in ['Error', 'Failed']
+      oncePer: app.status.operationState.syncResult.revision
+      send: [operational-event-failed]
+
+  # Подписка на уровне контроллера: иначе аннотацию пришлось бы вешать
+  # на каждое приложение вручную, и новое приложение молча оказалось бы
+  # без отметок о выкатке.
+  subscriptions: |
+    - recipients: [victorialogs]
+      triggers: [on-deployed, on-sync-failed]
