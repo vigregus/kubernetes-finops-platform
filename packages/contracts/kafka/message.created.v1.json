@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://finops.local/contracts/kafka/message.created.v1.json",
+  "title": "message.created.v1",
+  "description": "Событие о принятом сообщении. Публикуется из outbox, ключ партиционирования — conversation_id, поэтому порядок внутри беседы сохраняется. Потребители первой версии: realtime, уведомления, непрочитанное.",
+  "type": "object",
+  "required": [
+    "event_id",
+    "event_type",
+    "event_version",
+    "occurred_at",
+    "message_id",
+    "conversation_id",
+    "conversation_seq",
+    "sender_id",
+    "payload"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Идемпотентность у потребителя. Доставка at-least-once, поэтому повтор обязан отсеиваться по этому полю, а не по содержимому."
+    },
+    "event_type": { "const": "message.created" },
+    "event_version": { "const": 1 },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Момент коммита в Postgres, а не публикации в Kafka."
+    },
+    "message_id": { "type": "string", "format": "uuid" },
+    "conversation_id": { "type": "string", "format": "uuid" },
+    "conversation_seq": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Порядок внутри беседы. Потребитель, получивший разрыв в номерах, знает, что пропустил событие."
+    },
+    "sender_id": { "type": "string", "format": "uuid" },
+    "recipient_ids": {
+      "type": "array",
+      "items": { "type": "string", "format": "uuid" },
+      "description": "Состав беседы на момент отправки. Вычислять его у потребителя нельзя: к моменту обработки участники могли смениться."
+    },
+    "type": {
+      "type": "string",
+      "enum": ["text", "image", "file", "voice", "system"]
+    },
+    "payload": {
+      "type": "object",
+      "description": "Содержимое сообщения. Потребитель уведомлений берёт отсюда текст предпросмотра.",
+      "properties": {
+        "text": { "type": "string" },
+        "attachment_count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "trace_id": {
+      "type": "string",
+      "description": "Сквозная трассировка: по нему путь сообщения виден от запроса API до доставки клиенту."
+    }
+  },
+  "additionalProperties": true
+}

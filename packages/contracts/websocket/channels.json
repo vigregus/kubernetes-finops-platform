@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://finops.local/contracts/websocket/channels.json",
+  "title": "Каналы Centrifugo",
+  "description": "Имена каналов и их правила. Клиент не выбирает канал сам: сервер выдаёт токен с явным списком, иначе подписка на чужую беседу сводится к знанию её идентификатора.",
+  "type": "object",
+  "required": ["channels"],
+  "properties": {
+    "channels": {
+      "type": "object",
+      "required": ["conversation", "typing", "user"],
+      "properties": {
+        "conversation": {
+          "type": "object",
+          "description": "Сообщения беседы. История здесь — ограниченный кеш восстановления на 5 минут, а не хранилище: при recovered=false клиент обязан догрузить историю через REST.",
+          "properties": {
+            "pattern": { "const": "conversation:{conversation_id}" },
+            "presence": { "const": true },
+            "history_size": { "const": 100 },
+            "history_ttl_seconds": { "const": 300 },
+            "payload": { "$ref": "#/$defs/conversationEvent" }
+          }
+        },
+        "typing": {
+          "type": "object",
+          "description": "Отдельный класс событий: нечего сохранять, нечего доставлять офлайн, нечего восстанавливать. При 5% печатающих даёт втрое больше публикаций, чем сами сообщения, поэтому история выключена целиком, а не уменьшена.",
+          "properties": {
+            "pattern": { "const": "typing:{conversation_id}" },
+            "presence": { "const": false },
+            "history_size": { "const": 0 },
+            "payload": { "$ref": "#/$defs/typingEvent" }
+          }
+        },
+        "user": {
+          "type": "object",
+          "description": "Личный канал: новые беседы, счётчики непрочитанного, отзыв сессии при выходе на всех устройствах.",
+          "properties": {
+            "pattern": { "const": "user:{user_id}" },
+            "presence": { "const": false },
+            "history_size": { "const": 20 },
+            "history_ttl_seconds": { "const": 60 },
+            "payload": { "$ref": "#/$defs/userEvent" }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "conversationEvent": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "enum": ["message.created", "message.read", "message.deleted"] },
+        "message_id": { "type": "string", "format": "uuid" },
+        "seq": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Разрыв в номерах — сигнал клиенту, что он пропустил события и обязан догрузить историю."
+        },
+        "sender_id": { "type": "string", "format": "uuid" },
+        "payload": { "type": "object" }
+      }
+    },
+    "typingEvent": {
+      "type": "object",
+      "required": ["user_id", "expires_in_ms"],
+      "properties": {
+        "user_id": { "type": "string", "format": "uuid" },
+        "expires_in_ms": {
+          "type": "integer",
+          "description": "Состояние держит получатель, а не сервер: каждый heartbeat продлевает срок только своего пользователя. Так «печатает» гаснет само, даже если отправитель просто закрыл вкладку."
+        }
+      }
+    },
+    "userEvent": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "enum": ["conversation.created", "unread.changed", "session.revoked"] },
+        "conversation_id": { "type": "string", "format": "uuid" },
+        "unread_count": { "type": "integer", "minimum": 0 },
+        "session_id": { "type": "string", "format": "uuid" }
+      }
+    }
+  }
+}

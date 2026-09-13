@@ -1,0 +1,431 @@
+openapi: 3.1.0
+info:
+  title: Messenger API
+  version: 1.0.0
+  description: |
+    Контракт REST первой версии. Из него генерируется клиент на TypeScript,
+    поэтому расхождение фронта и бэкенда становится ошибкой сборки,
+    а не находкой в проде.
+
+    Проверка обратной совместимости (CTR-001) блокирует слияние: удалить поле
+    или сузить тип нельзя, добавить необязательное - можно.
+
+servers:
+  - url: https://app.finops.local/api/v1
+    description: Локальное окружение
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: conversations
+  - name: messages
+  - name: attachments
+  - name: sessions
+
+paths:
+  /conversations:
+    get:
+      tags: [conversations]
+      summary: Список бесед пользователя
+      operationId: listConversations
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - name: before_activity_at
+          in: query
+          description: Пагинация по ключу, а не по смещению.
+          schema: { type: string, format: date-time }
+      responses:
+        '200':
+          description: Беседы, свежие первыми
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Conversation' }
+                  next_before_activity_at:
+                    type: [string, 'null']
+                    format: date-time
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+    post:
+      tags: [conversations]
+      summary: Создать беседу один-на-один
+      description: |
+        Операция идемпотентна по составу участников. Встречный запрос
+        от собеседника в тот же момент обязан вернуть **ту же** беседу
+        с тем же `conversation_id`, а не создать вторую (CONV-001).
+      operationId: createDirectConversation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [participant_id]
+              properties:
+                participant_id: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Беседа уже существовала
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Conversation' }
+        '201':
+          description: Беседа создана
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Conversation' }
+        '403':
+          description: Собеседник заблокировал отправителя
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /conversations/{conversation_id}/messages:
+    parameters:
+      - $ref: '#/components/parameters/ConversationId'
+
+    get:
+      tags: [messages]
+      summary: История беседы
+      description: |
+        Пагинация по `before_seq`, а не по смещению: на миллионах сообщений
+        `OFFSET` деградирует линейно, причём именно на старых беседах.
+      operationId: listMessages
+      parameters:
+        - name: before_seq
+          in: query
+          schema: { type: integer, format: int64, minimum: 1 }
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Сообщения, новые первыми
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Message' }
+                  next_before_seq:
+                    type: [integer, 'null']
+                    format: int64
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+    post:
+      tags: [messages]
+      summary: Отправить сообщение
+      description: |
+        Идемпотентно по `client_message_id`. Повтор после таймаута обязан
+        вернуть **то же** сообщение с тем же `message_id` и `seq` и кодом
+        `200`, а не создать второе.
+      operationId: sendMessage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [client_message_id, type, payload]
+              properties:
+                client_message_id:
+                  type: string
+                  format: uuid
+                  description: Генерируется клиентом и переиспользуется при повторе.
+                type:
+                  type: string
+                  enum: [text, image, file, voice]
+                payload: { $ref: '#/components/schemas/MessagePayload' }
+                attachment_ids:
+                  type: array
+                  items: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Повтор — сообщение уже было принято
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Message' }
+        '201':
+          description: Сообщение принято и зафиксировано в базе
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Message' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '413':
+          description: Содержимое превышает предел
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /conversations/{conversation_id}/read:
+    parameters:
+      - $ref: '#/components/parameters/ConversationId'
+    put:
+      tags: [messages]
+      summary: Отметить прочитанным до номера
+      description: |
+        Только вперёд. Пришедшая с опозданием отметка с меньшим номером
+        не откатывает счётчик — ответ всё равно `200` с текущим значением.
+      operationId: setReadState
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [last_read_seq]
+              properties:
+                last_read_seq: { type: integer, format: int64, minimum: 0 }
+      responses:
+        '200':
+          description: Текущее состояние прочтения
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [last_read_seq]
+                properties:
+                  last_read_seq: { type: integer, format: int64 }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /attachments:
+    post:
+      tags: [attachments]
+      summary: Запросить ссылку на загрузку
+      description: |
+        Файл загружается браузером напрямую в объектное хранилище по
+        предподписанной ссылке. Через API он не идёт: иначе весь трафик
+        вложений прошёл бы через приложение.
+      operationId: createAttachment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content_type, size_bytes]
+              properties:
+                content_type: { type: string }
+                size_bytes: { type: integer, format: int64, minimum: 1 }
+      responses:
+        '201':
+          description: Ссылка на загрузку выдана
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [attachment_id, upload_url, expires_at]
+                properties:
+                  attachment_id: { type: string, format: uuid }
+                  upload_url: { type: string, format: uri }
+                  expires_at: { type: string, format: date-time }
+        '415':
+          description: Тип содержимого не разрешён
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /realtime/token:
+    post:
+      tags: [sessions]
+      summary: Токен подключения к Centrifugo
+      description: |
+        Сервер выдаёт токен с явным списком разрешённых каналов. Клиент не
+        выбирает канал сам — иначе подписка на чужую беседу сводится
+        к знанию её идентификатора.
+      operationId: issueRealtimeToken
+      responses:
+        '200':
+          description: Токен и его срок
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token, expires_at]
+                properties:
+                  token: { type: string }
+                  expires_at: { type: string, format: date-time }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /sessions:
+    get:
+      tags: [sessions]
+      summary: Активные сессии пользователя
+      operationId: listSessions
+      responses:
+        '200':
+          description: Сессии по устройствам
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Session' }
+    delete:
+      tags: [sessions]
+      summary: Выйти на всех устройствах
+      description: |
+        Отзыв немедленный, а не по истечении токена: событие доходит
+        до Centrifugo и рвёт открытые соединения.
+      operationId: revokeAllSessions
+      responses:
+        '204': { description: Все сессии отозваны }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Токен доступа, выданный Keycloak.
+
+  parameters:
+    ConversationId:
+      name: conversation_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+
+  responses:
+    Unauthorized:
+      description: Токен отсутствует, просрочен или отозван
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Forbidden:
+      description: Пользователь не участник беседы
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    NotFound:
+      description: Беседа не найдена
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    TooManyRequests:
+      description: Превышен предел частоты
+      headers:
+        Retry-After:
+          schema: { type: integer }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+
+  schemas:
+    Problem:
+      description: RFC 9457. Один формат ошибки на весь API, а не свой на каждый метод.
+      type: object
+      required: [type, title, status]
+      properties:
+        type: { type: string, format: uri }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        trace_id:
+          type: string
+          description: Идентификатор трассировки — по нему ищут этот запрос в журналах.
+
+    Conversation:
+      type: object
+      required: [conversation_id, type, participants, created_at]
+      properties:
+        conversation_id: { type: string, format: uuid }
+        type: { type: string, enum: [direct, group] }
+        participants:
+          type: array
+          items: { $ref: '#/components/schemas/UserSummary' }
+        last_message: { $ref: '#/components/schemas/Message' }
+        unread_count: { type: integer, minimum: 0 }
+        created_at: { type: string, format: date-time }
+
+    UserSummary:
+      type: object
+      required: [user_id, display_name]
+      properties:
+        user_id: { type: string, format: uuid }
+        display_name: { type: string }
+        last_seen_at:
+          type: [string, 'null']
+          format: date-time
+          description: |
+            Отметка времени из Postgres, а не presence. «Онлайн» живёт
+            в Redis и приходит по realtime — это разные механизмы.
+
+    Message:
+      type: object
+      required: [message_id, conversation_id, seq, sender_id, type, created_at]
+      properties:
+        message_id: { type: string, format: uuid }
+        conversation_id: { type: string, format: uuid }
+        seq:
+          type: integer
+          format: int64
+          description: Порядок внутри беседы. Не время создания.
+        sender_id: { type: string, format: uuid }
+        client_message_id: { type: string, format: uuid }
+        type: { type: string, enum: [text, image, file, voice, system] }
+        payload: { $ref: '#/components/schemas/MessagePayload' }
+        attachments:
+          type: array
+          items: { $ref: '#/components/schemas/Attachment' }
+        reply_to_message_id:
+          type: [string, 'null']
+          format: uuid
+        created_at: { type: string, format: date-time }
+        edited_at: { type: [string, 'null'], format: date-time }
+        deleted_at:
+          type: [string, 'null']
+          format: date-time
+          description: |
+            Надгробие. Запись остаётся, содержимое стёрто — иначе
+            ломается нумерация и восстановление при переподключении.
+
+    MessagePayload:
+      type: object
+      properties:
+        text: { type: string, maxLength: 4096 }
+        duration_ms:
+          type: integer
+          description: Длительность голосового сообщения.
+
+    Attachment:
+      type: object
+      required: [attachment_id, content_type, size_bytes]
+      properties:
+        attachment_id: { type: string, format: uuid }
+        content_type: { type: string }
+        size_bytes: { type: integer, format: int64 }
+        download_url:
+          type: string
+          format: uri
+          description: Предподписанная ссылка с ограниченным сроком.
+
+    Session:
+      type: object
+      required: [session_id, device_id, created_at]
+      properties:
+        session_id: { type: string, format: uuid }
+        device_id: { type: string, format: uuid }
+        user_agent: { type: string }
+        created_at: { type: string, format: date-time }
+        last_seen_at: { type: string, format: date-time }
+        current:
+          type: boolean
+          description: Сессия, из которой сделан этот запрос.
