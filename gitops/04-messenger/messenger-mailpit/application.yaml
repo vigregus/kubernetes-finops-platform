@@ -1,0 +1,29 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: messenger-mailpit
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
+spec:
+  project: finops-platform
+  sources:
+    - repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
+      targetRevision: HEAD
+      ref: values
+    - repoURL: https://jouve.github.io/charts/
+      chart: mailpit
+      targetRevision: 0.36.0
+      helm:
+        releaseName: messenger-mailpit
+        valueFiles:
+          - $values/gitops/04-messenger/messenger-mailpit/values.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: messenger
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true

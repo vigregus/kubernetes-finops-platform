@@ -2,9 +2,9 @@
 # L7 network policy. No new deployment: that is the whole point of using the
 # CNI's gateway rather than a second ingress controller.
 #
-# Runs beside ingress-nginx on purpose, not instead of it. The stand measures
-# cost, and "what does this gateway cost compared to that one" is only
-# answerable while both can serve the same profile.
+# It ran beside ingress-nginx while the two were compared on the same load
+# profile; nginx lost on CPU and p95 and has since been removed, so this is
+# now the only way into the cluster.
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:

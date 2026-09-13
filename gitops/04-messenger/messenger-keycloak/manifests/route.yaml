@@ -1,0 +1,25 @@
+# Маршрут лежит рядом с сервисом, на который указывает, а не в namespace
+# шлюза. Ради этого разделения Gateway API и существует: платформа владеет
+# слушателем и сертификатом, команда - собственной маршрутизацией.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: keycloak
+  namespace: keycloak
+  labels:
+    app.kubernetes.io/name: messenger-idp
+    finops.internal/product: messenger
+    finops.internal/team: platform-engineering
+    finops.internal/environment: local
+    finops.internal/component: identity
+spec:
+  parentRefs:
+    - name: edge
+      namespace: edge
+      sectionName: https
+  hostnames:
+    - idp.finops.local
+  rules:
+    - backendRefs:
+        - name: messenger-idp-service
+          port: 8080

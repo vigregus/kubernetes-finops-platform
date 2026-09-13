@@ -1,0 +1,79 @@
+# Realtime. Сюда приходит WebSocket от браузера, и это единственный маршрут,
+# где соединение живёт часами, а не миллисекунды.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: centrifugo
+  namespace: messenger
+  labels:
+    app.kubernetes.io/name: messenger-centrifugo
+    finops.internal/product: messenger
+    finops.internal/team: platform-engineering
+    finops.internal/environment: local
+    finops.internal/component: realtime
+spec:
+  parentRefs:
+    - name: edge
+      namespace: edge
+      sectionName: https
+  hostnames:
+    - rt.finops.local
+  rules:
+    # Наружу выставлен только клиентский порт 8000. Порт 9000 - это HTTP API,
+    # админка и метрики: публикация в любой канал по ключу из секрета.
+    # Его наружу нет и быть не должно; сервер ходит туда изнутри кластера.
+    - backendRefs:
+        - name: messenger-centrifugo
+          port: 8000
+---
+# Объектное хранилище. Наружу нужно потому, что вложения и голосовые браузер
+# забирает напрямую по предподписанной ссылке, а не через API - иначе весь
+# трафик вложений пошёл бы через приложение.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: minio
+  namespace: messenger
+  labels:
+    app.kubernetes.io/name: messenger-objects
+    finops.internal/product: messenger
+    finops.internal/team: platform-engineering
+    finops.internal/environment: local
+    finops.internal/component: object-storage
+spec:
+  parentRefs:
+    - name: edge
+      namespace: edge
+      sectionName: https
+  hostnames:
+    - s3.finops.local
+  rules:
+    - backendRefs:
+        - name: minio
+          port: 80
+---
+# Почтовый сток. Наружу - чтобы письмо с подтверждением адреса можно было
+# открыть глазами; автотест читает его через тот же HTTP API изнутри.
+# В облаке этого маршрута не будет вовсе: там настоящий провайдер рассылки.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: mailpit
+  namespace: messenger
+  labels:
+    app.kubernetes.io/name: messenger-mailpit
+    finops.internal/product: messenger
+    finops.internal/team: platform-engineering
+    finops.internal/environment: local
+    finops.internal/component: mail-sink
+spec:
+  parentRefs:
+    - name: edge
+      namespace: edge
+      sectionName: https
+  hostnames:
+    - mail.finops.local
+  rules:
+    - backendRefs:
+        - name: messenger-mailpit-http
+          port: 80

@@ -1,0 +1,56 @@
+# PgBouncer в режиме транзакций. Локально одна реплика API и пул ему не нужен -
+# но пул меняет не производительность, а поведение приложения, и проверять это
+# надо там же, где пишут код.
+#
+# В транзакционном режиме соединение возвращается в пул после каждой
+# транзакции, поэтому ломается всё, что живёт между ними: сессионные
+# переменные, временные таблицы, подготовленные запросы на стороне сессии,
+# незакоммиченные advisory-блокировки. Если API написан в расчёте на прямое
+# соединение, это вскроется при первой же выкатке в stage - а с пулом
+# с самого начала вскроется на ноутбуке.
+apiVersion: postgresql.cnpg.io/v1
+kind: Pooler
+metadata:
+  name: messenger-db-pool
+  namespace: messenger
+  labels:
+    app.kubernetes.io/name: messenger-db-pool
+    app.kubernetes.io/component: connection-pool
+    finops.internal/product: messenger
+    finops.internal/team: platform-engineering
+    finops.internal/environment: local
+    finops.internal/component: database
+spec:
+  cluster:
+    name: messenger-db
+  instances: 1
+  # rw: пул ведёт к первичному экземпляру. Читающий пул появится вместе
+  # с репликами, а не раньше - сейчас он указывал бы на тот же под
+  # и создавал ложное ощущение разделения нагрузки.
+  type: rw
+  pgbouncer:
+    poolMode: transaction
+    parameters:
+      max_client_conn: "500"
+      # Ровно то, ради чего пул и нужен: 500 клиентских соединений
+      # сходятся в 20 серверных. Postgres настроен на max_connections 200,
+      # то есть даже при полном пуле остаётся запас на служебные
+      # подключения оператора и на ручной psql при разборе инцидента.
+      default_pool_size: "20"
+  template:
+    metadata:
+      labels:
+        finops.internal/product: messenger
+        finops.internal/team: platform-engineering
+        finops.internal/environment: local
+        finops.internal/component: database
+    spec:
+      containers:
+        - name: pgbouncer
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi

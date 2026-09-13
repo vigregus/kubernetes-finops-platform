@@ -1,0 +1,27 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: messenger-routes
+  namespace: argocd
+  annotations:
+    # Волна 6: маршруты появляются последними. Маршрут на несуществующий
+    # сервис - это 503 наружу, а не ошибка синхронизации, и такую поломку
+    # видно позже всего.
+    argocd.argoproj.io/sync-wave: "6"
+spec:
+  project: finops-platform
+  source:
+    repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
+    targetRevision: HEAD
+    path: gitops/04-messenger/messenger-routes/manifests
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: messenger
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true

@@ -1,0 +1,32 @@
+# Единственный маршрут на слушателе :80, и он ничего не проксирует. Порт 80
+# оставлен открытым намеренно: закрытый порт превращает закладку http://
+# в отказ соединения вместо перенаправления.
+#
+# Маршрут живёт в namespace шлюза, а не приложения: перенаправление - свойство
+# точки входа, оно одинаково для всех имён и не должно дублироваться в каждой
+# команде.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: edge-https-redirect
+  namespace: edge
+  labels:
+    finops.internal/product: platform
+    finops.internal/team: platform-engineering
+    finops.internal/environment: prod
+    finops.internal/component: api-gateway
+spec:
+  parentRefs:
+    - name: edge
+      namespace: edge
+      # Только слушатель http. Без sectionName маршрут прицепился бы
+      # и к :443, и тогда HTTPS перенаправлял бы сам на себя.
+      sectionName: http
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect:
+            scheme: https
+            # 301, а не 302: адрес не временный, и постоянный код позволяет
+            # браузеру запомнить его и больше не ходить по http.
+            statusCode: 301

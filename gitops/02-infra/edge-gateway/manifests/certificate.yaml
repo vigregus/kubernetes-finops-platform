@@ -28,8 +28,15 @@ spec:
     # exists rather than until the next renewal.
     rotationPolicy: Always
   dnsNames:
-    - shop.finops.local
-    - analytics.finops.local
+    # shop и analytics ушли вместе с демо. Имена мессенджера: точка входа
+    # приложения, вход в систему, realtime, объектное хранилище и почта.
+    # Wildcard намеренно не используется: список имён - это ещё и перечень
+    # того, что вообще выставлено наружу.
+    - app.finops.local
+    - idp.finops.local
+    - rt.finops.local
+    - s3.finops.local
+    - mail.finops.local
   issuerRef:
     name: finops-local-ca
     kind: ClusterIssuer
