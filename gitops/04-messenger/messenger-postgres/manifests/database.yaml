@@ -1,0 +1,27 @@
+# shared_preload_libraries только загружает библиотеку в процесс - представлений
+# pg_stat_statements при этом ещё нет. Расширение создаётся отдельно, и делает
+# это оператор, а не миграция приложения: миграции владеют схемой мессенджера,
+# а расширения - свойство самой базы.
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: messenger
+  namespace: messenger
+  labels:
+    app.kubernetes.io/name: messenger-db
+    app.kubernetes.io/component: database
+    finops.internal/product: messenger
+    finops.internal/team: platform-engineering
+    finops.internal/environment: local
+    finops.internal/component: database
+spec:
+  cluster:
+    name: messenger-db
+  name: messenger
+  owner: messenger
+  # База уже создана bootstrap.initdb, поэтому оператор её перенимает,
+  # а не создаёт заново.
+  ensure: present
+  extensions:
+    - name: pg_stat_statements
+      ensure: present
