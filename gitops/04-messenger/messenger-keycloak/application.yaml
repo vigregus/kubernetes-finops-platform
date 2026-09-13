@@ -1,0 +1,29 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: messenger-keycloak
+  namespace: argocd
+  annotations:
+    # Волна 5: после хранилищ. Keycloak не поднимется, пока его база
+    # не отвечает, а база - это CNPG Cluster из этого же приложения.
+    argocd.argoproj.io/sync-wave: "5"
+spec:
+  project: finops-platform
+  source:
+    repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
+    targetRevision: HEAD
+    path: gitops/04-messenger/messenger-keycloak/manifests
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    # Оператор Keycloak смотрит только собственный namespace - его Role
+    # и RoleBinding из поставки не кластерные. Поэтому Keycloak живёт
+    # в keycloak, а не в messenger; то же ограничение, что у Strimzi.
+    namespace: keycloak
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true

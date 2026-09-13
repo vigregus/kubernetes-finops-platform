@@ -1,0 +1,33 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: messenger-centrifugo
+  namespace: argocd
+  annotations:
+    # Волна 5: Redis из волны 4 должен уже отвечать, иначе под
+    # перезапускается по кругу до его появления.
+    argocd.argoproj.io/sync-wave: "5"
+spec:
+  project: finops-platform
+  sources:
+    - repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
+      targetRevision: HEAD
+      ref: values
+    # Единственный компонент этого шага без оператора - его у Centrifugo
+    # просто нет. Чарт официальный, от тех же авторов.
+    - repoURL: https://centrifugal.github.io/helm-charts
+      chart: centrifugo
+      targetRevision: 13.5.9
+      helm:
+        releaseName: messenger-centrifugo
+        valueFiles:
+          - $values/gitops/04-messenger/messenger-centrifugo/values.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: messenger
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true

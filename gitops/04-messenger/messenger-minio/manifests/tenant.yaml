@@ -1,0 +1,61 @@
+# Вложения и голосовые сообщения. Локально это MinIO, в облаке - S3; для
+# приложения разницы нет, обращение идёт по протоколу S3 в обоих случаях.
+#
+# Здесь Tenant описан руками, а не чартом tenant: то же решение, что с CNPG
+# Cluster и Redis. Чарт добавил бы третий способ описывать одно и то же.
+apiVersion: minio.min.io/v2
+kind: Tenant
+metadata:
+  name: messenger-objects
+  namespace: messenger
+  labels:
+    app.kubernetes.io/name: messenger-objects
+    app.kubernetes.io/component: object-storage
+    finops.internal/product: messenger
+    finops.internal/team: platform-engineering
+    finops.internal/environment: local
+    finops.internal/component: object-storage
+spec:
+  image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+
+  # Корневые учётные данные создаёт джоб messenger-secrets-bootstrap: в git
+  # их нет и не будет.
+  configuration:
+    name: messenger-minio-env
+
+  # Self-signed сертификаты оператора выключены. Внутри кластера соединение
+  # и так пойдёт по mTLS, когда namespace войдёт в ambient; сейчас же
+  # включённый autoCert означал бы свой удостоверяющий центр рядом с уже
+  # работающим cert-manager - вторая цепочка доверия без нужды.
+  requestAutoCert: false
+
+  pools:
+    - name: pool-0
+      # Одна нода и один том. Erasure coding при таком размере не включается -
+      # локальное окружение не изображает отказоустойчивость, оно проверяет,
+      # что загрузка и выдача вложения работают.
+      servers: 1
+      volumesPerServer: 1
+      volumeClaimTemplate:
+        metadata:
+          name: data
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 4Gi
+      resources:
+        requests:
+          cpu: 50m
+          memory: 512Mi
+        limits:
+          cpu: "1"
+          memory: 1Gi
+
+  buckets:
+    # Вложения и голосовые - разные жизненные циклы: у голосовых своя политика
+    # хранения, у вложений свои ограничения по типу и размеру. Разделение
+    # на два бакета сейчас стоит одну строку, а потом сэкономит миграцию.
+    - name: messenger-attachments
+    - name: messenger-voice

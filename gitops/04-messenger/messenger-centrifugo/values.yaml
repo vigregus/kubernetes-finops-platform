@@ -1,0 +1,69 @@
+replicaCount: 1
+
+config:
+  engine:
+    # Не memory. На memory Centrifugo работает ровно в одном экземпляре, и
+    # переход на несколько подов меняет не масштаб, а поведение: пропадают
+    # presence и history между подами. Redis здесь с первого дня именно
+    # поэтому - чтобы локальное окружение не было другой системой.
+    type: redis
+    redis:
+      # БД 0 - роль realtime из карты кешей. app-cache (1) и security (2)
+      # принадлежат приложению, Centrifugo о них не знает.
+      address: "redis://messenger-redis.messenger.svc.cluster.local:6379/0"
+
+  admin:
+    enabled: true
+
+  client:
+    # Клиент не выбирает себе канал сам: сервер выдаёт токен с явным списком.
+    # Иначе подписка на чужую беседу - это вопрос знания её идентификатора.
+    allowed_origins:
+      - "https://*.finops.local"
+
+  channel:
+    namespaces:
+      # История в Centrifugo - ограниченный эфемерный кеш, а не хранилище.
+      # Она нужна ровно для одного: догрузить пропущенное за короткий разрыв
+      # соединения. Источник истины - Postgres, и при recovered=false клиент
+      # обязан сходить в историю беседы через API.
+      - name: conversation
+        presence: true
+        join_leave: false
+        history_size: 100
+        history_ttl: 300s
+        force_recovery: true
+      # «Печатает» - отдельный класс событий: нечего сохранять, нечего
+      # доставлять офлайн, нечего восстанавливать. При 5% печатающих он даёт
+      # втрое больше публикаций, чем сами сообщения, поэтому история здесь
+      # выключена целиком, а не уменьшена.
+      - name: typing
+        presence: false
+        join_leave: false
+        history_size: 0
+        history_ttl: 0s
+      # Личный канал пользователя: уведомления о новых беседах, счётчики
+      # непрочитанного, отзыв сессии при выходе на всех устройствах.
+      - name: user
+        presence: false
+        join_leave: false
+        history_size: 20
+        history_ttl: 60s
+
+# Секрет создаёт messenger-secrets-bootstrap; чарт секретов не создаёт и
+# не умеет. Все ключи из него становятся переменными окружения.
+existingSecret: messenger-centrifugo
+
+podLabels:
+  finops.internal/product: messenger
+  finops.internal/team: platform-engineering
+  finops.internal/environment: local
+  finops.internal/component: realtime
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi

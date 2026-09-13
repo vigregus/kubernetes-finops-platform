@@ -1,0 +1,112 @@
+# Политика репозитория: настоящих учётных данных в git нет (docs/secrets-policy.md).
+# Postgres и Keycloak решают это сами - их операторы генерируют секреты. У MinIO
+# и Centrifugo такого механизма нет: оба ждут готовый Secret и не создают его.
+#
+# Поэтому значения рождаются в кластере, а не в репозитории. Джоб идемпотентен:
+# существующий секрет он не трогает, поэтому пересинк не меняет пароли под
+# работающими подами. Пересоздать - удалить секрет и синхронизировать заново.
+#
+# Это локальное окружение. В облаке этот джоб заменяется на External Secrets
+# поверх управляемого хранилища - см. docs/secrets-policy.md.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: messenger-secrets-bootstrap
+  namespace: messenger
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: messenger-secrets-bootstrap
+  namespace: messenger
+rules:
+  # get - чтобы понять, существует ли секрет; create - чтобы создать
+  # недостающий. Ни update, ни delete: джоб не может перезаписать
+  # действующий пароль даже при ошибке в скрипте.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: messenger-secrets-bootstrap
+  namespace: messenger
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: messenger-secrets-bootstrap
+subjects:
+  - kind: ServiceAccount
+    name: messenger-secrets-bootstrap
+    namespace: messenger
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: messenger-secrets-bootstrap
+  namespace: messenger
+  annotations:
+    # Хук, а не обычный ресурс: поля Job неизменяемы, и при втором синке
+    # обычный Job упал бы на попытке обновления.
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: messenger-secrets-bootstrap
+        app.kubernetes.io/component: bootstrap
+        finops.internal/product: messenger
+        finops.internal/team: platform-engineering
+        finops.internal/environment: local
+        finops.internal/component: bootstrap
+    spec:
+      restartPolicy: Never
+      serviceAccountName: messenger-secrets-bootstrap
+      containers:
+        - name: bootstrap
+          image: alpine/k8s:1.34.1
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+
+              rand() { openssl rand -hex "$1"; }
+
+              have() { kubectl -n messenger get secret "$1" >/dev/null 2>&1; }
+
+              if have messenger-minio-env; then
+                echo "messenger-minio-env: уже есть, не трогаю"
+              else
+                # Оператор MinIO ждёт один ключ config.env в формате шелла:
+                # это не переменные окружения пода, а файл конфигурации,
+                # который он монтирует в tenant.
+                printf 'export MINIO_ROOT_USER=%s\nexport MINIO_ROOT_PASSWORD=%s\n' \
+                  "messenger-$(rand 4)" "$(rand 24)" > /tmp/config.env
+                kubectl -n messenger create secret generic messenger-minio-env \
+                  --from-file=config.env=/tmp/config.env
+                echo "messenger-minio-env: создан"
+              fi
+
+              if have messenger-centrifugo; then
+                echo "messenger-centrifugo: уже есть, не трогаю"
+              else
+                # Чарт Centrifugo загружает все ключи такого секрета как
+                # переменные окружения, поэтому имена - его собственные.
+                kubectl -n messenger create secret generic messenger-centrifugo \
+                  --from-literal=CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY="$(rand 32)" \
+                  --from-literal=CENTRIFUGO_HTTP_API_KEY="$(rand 24)" \
+                  --from-literal=CENTRIFUGO_ADMIN_PASSWORD="$(rand 16)" \
+                  --from-literal=CENTRIFUGO_ADMIN_SECRET="$(rand 24)"
+                echo "messenger-centrifugo: создан"
+              fi

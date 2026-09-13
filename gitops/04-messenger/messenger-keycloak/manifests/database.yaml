@@ -1,0 +1,43 @@
+# У Keycloak своя база, а не схема в базе мессенджера. Причина не в объёме:
+# это разные владельцы и разный жизненный цикл. Миграция Keycloak приезжает
+# с обновлением образа и не спрашивает разрешения у миграций мессенджера,
+# а восстановление из копии одного не должно откатывать другое.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: keycloak-db
+  namespace: keycloak
+  labels:
+    app.kubernetes.io/name: keycloak-db
+    app.kubernetes.io/component: database
+    finops.internal/product: messenger
+    finops.internal/team: platform-engineering
+    finops.internal/environment: local
+    finops.internal/component: identity
+spec:
+  instances: 1
+
+  bootstrap:
+    initdb:
+      database: keycloak
+      owner: keycloak
+
+  storage:
+    size: 1Gi
+
+  inheritedMetadata:
+    labels:
+      finops.internal/product: messenger
+      finops.internal/team: platform-engineering
+      finops.internal/environment: local
+      finops.internal/component: identity
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 192Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  enableSuperuserAccess: false

@@ -1,0 +1,60 @@
+apiVersion: k8s.keycloak.org/v2beta1
+kind: Keycloak
+metadata:
+  name: messenger-idp
+  namespace: keycloak
+  labels:
+    app.kubernetes.io/name: messenger-idp
+    app.kubernetes.io/component: identity-provider
+    finops.internal/product: messenger
+    finops.internal/team: platform-engineering
+    finops.internal/environment: local
+    finops.internal/component: identity
+spec:
+  instances: 1
+
+  db:
+    vendor: postgres
+    host: keycloak-db-rw
+    port: 5432
+    database: keycloak
+    # Логин и пароль берутся из секрета, который сделал CNPG. В git не
+    # попадает ни то, ни другое, и при пересоздании кластера Keycloak
+    # подхватит новый пароль сам.
+    usernameSecret:
+      name: keycloak-db-app
+      key: username
+    passwordSecret:
+      name: keycloak-db-app
+      key: password
+    poolMinSize: 1
+    poolInitialSize: 1
+    poolMaxSize: 10
+
+  http:
+    # Без TLS и намеренно. Локально Keycloak слушает в кластере по HTTP,
+    # а TLS терминируется на edge-gateway, где уже есть cert-manager.
+    # Второй сертификат здесь означал бы вторую цепочку доверия.
+    httpEnabled: true
+    httpPort: 8080
+
+  hostname:
+    hostname: https://idp.finops.local
+    # Нестрогий режим: иначе Keycloak откажется отвечать на обращения
+    # по внутреннему DNS-имени сервиса, а именно так к нему ходят
+    # серверные компоненты за токенами.
+    strict: false
+
+  proxy:
+    # За edge-gateway. Без этого Keycloak построит ссылки редиректа
+    # по внутреннему адресу пода, и вход из браузера сломается
+    # на первом же перенаправлении.
+    headers: xforwarded
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
