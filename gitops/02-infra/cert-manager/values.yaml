@@ -1,0 +1,45 @@
+# cert-manager: certificates as a controller loop rather than as files.
+#
+# Needed because the Cilium Gateway terminates TLS and something has to issue
+# the certificate. The alternative was a self-signed Secret committed by hand,
+# which means a private key in git (or generated outside it and undocumented)
+# and rotation that happens when someone remembers.
+#
+# The issuer here is self-signed, so this is not a public PKI - it is the same
+# trust model as Istio's built-in CA, with the same honest limitation. What it
+# buys over a hand-made Secret is rotation, expiry tracking and a reviewable
+# declaration of which names exist.
+
+crds:
+  # Installed with the chart rather than as a separate application: they
+  # version together with the controller and cert-manager refuses to start
+  # against CRDs from a different release.
+  enabled: true
+  keep: true
+
+# One replica of each on a single node. The webhook is the one that matters
+# for availability - while it is down, no Certificate can be created - but a
+# second replica on the same node protects against nothing.
+replicaCount: 1
+webhook:
+  replicaCount: 1
+  resources:
+    requests: { cpu: 10m, memory: 48Mi }
+    limits: { memory: 128Mi }
+cainjector:
+  replicaCount: 1
+  resources:
+    requests: { cpu: 10m, memory: 64Mi }
+    limits: { memory: 192Mi }
+
+resources:
+  requests: { cpu: 20m, memory: 64Mi }
+  limits: { memory: 192Mi }
+
+podLabels:
+  finops.internal/product: platform
+  finops.internal/team: platform-engineering
+  finops.internal/environment: prod
+  finops.internal/component: security
+  finops.internal/cost-center: platform-infra
+  finops.internal/owner: platform-team

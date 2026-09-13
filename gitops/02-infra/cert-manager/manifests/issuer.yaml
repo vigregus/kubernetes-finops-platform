@@ -1,0 +1,44 @@
+# A two-step chain, not a single self-signed leaf.
+#
+# The SelfSigned issuer only signs one thing: the CA certificate below. Every
+# workload certificate is then issued by that CA, which means a client needs to
+# trust exactly one certificate to trust all of them. A self-signed leaf per
+# service would need every client to trust every leaf separately, and rotating
+# one would break trust until each client was updated - which is precisely the
+# failure a CA exists to avoid.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned-root
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: finops-local-ca
+  namespace: cert-manager
+spec:
+  isCA: true
+  commonName: finops.local root CA
+  secretName: finops-local-ca
+  duration: 8760h    # a year
+  renewBefore: 720h  # renewed a month out, so expiry is never a surprise
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: selfsigned-root
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+# The issuer everything else references. ClusterIssuer rather than Issuer so a
+# Certificate in any namespace can use it - the gateway's certificate lives
+# beside the Gateway, not here.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: finops-local-ca
+spec:
+  ca:
+    secretName: finops-local-ca

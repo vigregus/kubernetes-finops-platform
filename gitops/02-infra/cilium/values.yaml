@@ -100,3 +100,29 @@ hubble:
       - flow
       - port-distribution
       - httpV2
+
+# Gateway API, served by the cilium-envoy DaemonSet that is already running as
+# the L7 proxy for network policy. No new deployment for an ingress: the same
+# per-node Envoy terminates it, which on this node is one fewer workload than
+# ingress-nginx costs.
+#
+# Enabling this also switches on enable-envoy-config, giving the
+# CiliumEnvoyConfig CRD - the escape hatch for Envoy features Gateway API does
+# not model, which is where any attempt at response caching has to live.
+gatewayAPI:
+  enabled: true
+  # Listeners on the node's network instead of a LoadBalancer Service. This
+  # cluster has no load balancer - ingress-nginx reaches the outside through
+  # NodePort for the same reason - so a Gateway waiting for an external IP
+  # would sit Pending forever with no indication why.
+  hostNetwork:
+    enabled: true
+  gatewayClass:
+    create: "true"
+  secretsNamespace:
+    create: true
+    name: cilium-secrets
+    # Envoy reads TLS material through SDS from one namespace; this copies the
+    # referenced Secret there. Without it the Gateway reports a certificate it
+    # cannot actually read.
+    sync: true
