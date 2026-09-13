@@ -28,13 +28,19 @@ NAMESPACE="${NAMESPACE:-loadgen}"
 TRANSFORM="$(mktemp -t loadgen-render).py"
 trap 'rm -f "$TRANSFORM"' EXIT
 cat >"$TRANSFORM" <<'PY'
-import json, sys
+import json, os, sys
 
 run_name, profile, rps, duration = sys.argv[1:5]
 cron = json.load(sys.stdin)
 spec = cron["spec"]["jobTemplate"]["spec"]
 
 overrides = {"PROFILE": profile, "RPS_TARGET": rps, "DURATION": duration}
+# Optional, for pointing a run at a different entry point - the whole reason
+# two gateways can be compared on one profile. Empty means "leave the chart's
+# value alone" rather than "set it to empty".
+for extra in ("K6_TARGET", "K6_RESOLVE"):
+    if os.environ.get(extra):
+        overrides[extra] = os.environ[extra]
 for container in spec["template"]["spec"]["containers"]:
     for env in container.get("env", []):
         if env["name"] in overrides:
@@ -64,6 +70,6 @@ PY
 
 kubectl delete job "$RUN_NAME" -n "$NAMESPACE" --ignore-not-found >/dev/null
 kubectl get cronjob loadgen -n "$NAMESPACE" -o json \
-  | python3 "$TRANSFORM" "$RUN_NAME" "$PROFILE" "$RPS_TARGET" "$DURATION" \
+  | K6_TARGET="${K6_TARGET:-}" K6_RESOLVE="${K6_RESOLVE:-}" python3 "$TRANSFORM" "$RUN_NAME" "$PROFILE" "$RPS_TARGET" "$DURATION" \
   | kubectl apply -f - >/dev/null
 echo "started ${RUN_NAME}: profile=${PROFILE} rps=${RPS_TARGET} duration=${DURATION}"

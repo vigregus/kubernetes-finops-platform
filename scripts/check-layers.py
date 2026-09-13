@@ -21,8 +21,11 @@ PACKAGE = ROOT / "apps" / "messenger" / "messenger"
 # Что каждому слою разрешено импортировать из проекта.
 ALLOWED: dict[str, set[str]] = {
     "api": {"services", "domain", "telemetry"},
-    "services": {"repositories", "domain", "telemetry"},
+    "services": {"repositories", "adapters", "domain", "telemetry"},
+    # Только Postgres. Всё остальное снаружи — в adapters: репозиторий
+    # обязан уметь участвовать в транзакции вызывающего, адаптер не может.
     "repositories": {"domain", "telemetry"},
+    "adapters": {"domain", "telemetry"},
     # Ничего из проекта. Даже telemetry: доменное правило не пишет журнал -
     # оно возвращает результат, а пишет тот, кто его вызвал.
     "domain": set(),
@@ -35,7 +38,11 @@ FORBIDDEN_EXTERNAL: dict[str, set[str]] = {
     "domain": {"fastapi", "starlette", "psycopg", "asyncpg", "aiokafka",
                "redis", "httpx", "requests", "boto3"},
     "services": {"fastapi", "starlette"},
-    "repositories": {"fastapi", "starlette"},
+    "repositories": {"fastapi", "starlette",
+                     # Сетевые клиенты — признак того, что это адаптер,
+                     # а не репозиторий.
+                     "aiokafka", "redis", "boto3", "httpx", "requests"},
+    "adapters": {"fastapi", "starlette", "psycopg", "asyncpg"},
 }
 
 
