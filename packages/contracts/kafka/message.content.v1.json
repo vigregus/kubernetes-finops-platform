@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://finops.local/contracts/kafka/message.content.v1.json",
+  "title": "message.content.v1",
+  "description": "Содержимое сообщения, отдельным топиком. Читают только те, кому текст действительно нужен: realtime и уведомления. Разделение — решение модели угроз: иначе текст получают все подписчики основного топика, включая счётчик непрочитанного и аудит, которым он не требуется. Срок хранения этого топика строго меньше срока исполнения запроса на стирание.",
+  "type": "object",
+  "required": [
+    "event_id",
+    "event_type",
+    "event_version",
+    "occurred_at",
+    "message_id",
+    "conversation_id",
+    "payload"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Идемпотентность у потребителя."
+    },
+    "event_type": {
+      "const": "message.content"
+    },
+    "event_version": {
+      "const": 1
+    },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "message_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Тот же, что в message.created.v1 — связь между двумя событиями."
+    },
+    "conversation_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Ключ партиционирования: порядок содержимого совпадает с порядком фактов."
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "text",
+        "image",
+        "file",
+        "voice",
+        "system"
+      ]
+    },
+    "payload": {
+      "type": "object",
+      "description": "Текст и метаданные вложений.",
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "attachment_count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "trace_id": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "$comment": "Доступ к этому топику — привилегия. Учётная запись потребителя, которому текст не нужен, не должна иметь прав на чтение; проверяется тестом SEC-010."
+}

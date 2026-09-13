@@ -35,6 +35,33 @@ spec:
     # compact удалил бы предыдущие сообщения беседы, оставив последнее.
     cleanup.policy: delete
 ---
+# Содержимое сообщений отдельным топиком. Разделение — решение модели угроз:
+# в общем топике текст получали все подписчики, включая счётчик непрочитанного
+# и аудит, которым он не нужен. Право на содержимое выдаётся по потребности,
+# а не по факту подписки.
+#
+# Срок хранения здесь строго меньше срока исполнения запроса на стирание:
+# иначе топик становится вторым местом, где живёт стёртая переписка.
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: messenger.content.v1
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: messenger-kafka
+    finops.internal/product: messenger
+    finops.internal/team: platform-engineering
+    finops.internal/environment: local
+    finops.internal/component: messaging
+spec:
+  # Столько же партиций и тот же ключ, что у основного топика: иначе порядок
+  # содержимого разойдётся с порядком фактов.
+  partitions: 12
+  replicas: 1
+  config:
+    retention.ms: 604800000
+    cleanup.policy: delete
+---
 apiVersion: kafka.strimzi.io/v1
 kind: KafkaTopic
 metadata:

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://finops.local/contracts/kafka/message.created.v1.json",
   "title": "message.created.v1",
-  "description": "Событие о принятом сообщении. Публикуется из outbox, ключ партиционирования — conversation_id, поэтому порядок внутри беседы сохраняется. Потребители первой версии: realtime, уведомления, непрочитанное.",
+  "description": "Факт появления сообщения — БЕЗ содержимого. Публикуется из outbox, ключ партиционирования conversation_id, поэтому порядок внутри беседы сохраняется. Текст вынесен в message.content.v1 по принципу минимизации: потребителю непрочитанного, аудиту и биллингу текст не нужен, а подписка на топик выдавала им его автоматически. Право на содержимое должно выдаваться по потребности, а не по факту подписки.",
   "type": "object",
   "required": [
     "event_id",
@@ -12,8 +12,7 @@
     "message_id",
     "conversation_id",
     "conversation_seq",
-    "sender_id",
-    "payload"
+    "sender_id"
   ],
   "properties": {
     "event_id": {
@@ -21,42 +20,65 @@
       "format": "uuid",
       "description": "Идемпотентность у потребителя. Доставка at-least-once, поэтому повтор обязан отсеиваться по этому полю, а не по содержимому."
     },
-    "event_type": { "const": "message.created" },
-    "event_version": { "const": 1 },
+    "event_type": {
+      "const": "message.created"
+    },
+    "event_version": {
+      "const": 1
+    },
     "occurred_at": {
       "type": "string",
       "format": "date-time",
       "description": "Момент коммита в Postgres, а не публикации в Kafka."
     },
-    "message_id": { "type": "string", "format": "uuid" },
-    "conversation_id": { "type": "string", "format": "uuid" },
+    "message_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "conversation_id": {
+      "type": "string",
+      "format": "uuid"
+    },
     "conversation_seq": {
       "type": "integer",
       "minimum": 1,
       "description": "Порядок внутри беседы. Потребитель, получивший разрыв в номерах, знает, что пропустил событие."
     },
-    "sender_id": { "type": "string", "format": "uuid" },
+    "sender_id": {
+      "type": "string",
+      "format": "uuid"
+    },
     "recipient_ids": {
       "type": "array",
-      "items": { "type": "string", "format": "uuid" },
+      "items": {
+        "type": "string",
+        "format": "uuid"
+      },
       "description": "Состав беседы на момент отправки. Вычислять его у потребителя нельзя: к моменту обработки участники могли смениться."
     },
     "type": {
       "type": "string",
-      "enum": ["text", "image", "file", "voice", "system"]
-    },
-    "payload": {
-      "type": "object",
-      "description": "Содержимое сообщения. Потребитель уведомлений берёт отсюда текст предпросмотра.",
-      "properties": {
-        "text": { "type": "string" },
-        "attachment_count": { "type": "integer", "minimum": 0 }
-      }
+      "enum": [
+        "text",
+        "image",
+        "file",
+        "voice",
+        "system"
+      ]
     },
     "trace_id": {
       "type": "string",
       "description": "Сквозная трассировка: по нему путь сообщения виден от запроса API до доставки клиенту."
+    },
+    "has_attachments": {
+      "type": "boolean",
+      "description": "Есть ли вложения. Признак, а не метаданные: счётчику непрочитанного этого достаточно."
+    },
+    "content_ref": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Ссылка на событие message.content.v1 с тем же message_id. Потребитель, которому текст нужен, читает второй топик; остальные не могут."
     }
   },
-  "additionalProperties": true
+  "additionalProperties": false
 }
