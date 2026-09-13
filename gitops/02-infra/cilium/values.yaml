@@ -25,6 +25,17 @@ k8sServicePort: 8443
 
 operator:
   replicas: 1
+  # Merged into this block rather than declared separately. A second
+  # `operator:` key later in the file silently replaced this one - YAML keeps
+  # the last - which reset replicas to the chart default of 2. On a single
+  # node the second replica can never schedule past the anti-affinity rule, so
+  # the Deployment sat at 1/2 with a rollout that could never complete, and
+  # the running operator restarted repeatedly under the pressure.
+  prometheus:
+    enabled: true
+    port: 9963
+    serviceMonitor:
+      enabled: false
   podLabels:
     app.kubernetes.io/name: cilium-operator
     app.kubernetes.io/component: platform
@@ -57,13 +68,6 @@ prometheus:
   port: 9962
   serviceMonitor:
     enabled: false
-
-operator:
-  prometheus:
-    enabled: true
-    port: 9963
-    serviceMonitor:
-      enabled: false
 
 hubble:
   enabled: true

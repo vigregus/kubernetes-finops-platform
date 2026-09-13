@@ -428,6 +428,9 @@ def persist_order(order_id, span_ctx_for_sql):
             raise
         finally:
             BREAKER_STATE.labels(dependency="postgres").set(DB_BREAKER.state_code)
+            # The gateway breaker too, or the one dependency that can actually
+            # hang is the one whose breaker state nobody can see.
+            BREAKER_STATE.labels(dependency="payment-gateway").set(GATEWAY_BREAKER.state_code)
         log_json(span, level="debug", _msg="postgres INSERT", table="orders", order_id=order_id)
         # The row this key would have cached is now stale. Dropping it is
         # safer than writing the new value through: the write may still be
@@ -1002,6 +1005,9 @@ def _init_process():
         threading.Thread(target=_kafka_poll_loop, daemon=True).start()
 
     BREAKER_STATE.labels(dependency="postgres").set(DB_BREAKER.state_code)
+    # The gateway breaker too, or the one dependency that can actually
+    # hang is the one whose breaker state nobody can see.
+    BREAKER_STATE.labels(dependency="payment-gateway").set(GATEWAY_BREAKER.state_code)
 
     import atexit
     import signal
