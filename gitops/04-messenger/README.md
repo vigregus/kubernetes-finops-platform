@@ -5,13 +5,15 @@
 
 | Приложение | Что создаёт | Оператор |
 | --- | --- | --- |
-| `messenger-postgres` | `Cluster messenger-db`, 1 экземпляр, база `messenger` | CNPG |
+| `messenger-postgres` | `Cluster messenger-db` + `Database` + `Pooler` PgBouncer | CNPG |
 | `messenger-redis` | `Redis messenger-redis`, БД 0/1/2 под три роли | ot-container-kit |
 | `messenger-kafka-topics` | три `KafkaTopic` на `messenger-kafka` | Strimzi |
 | `messenger-secrets` | учётные данные MinIO и Centrifugo | джоб-хук |
 | `messenger-minio` | `Tenant messenger-objects`, два бакета | MinIO |
 | `messenger-keycloak` | `Cluster keycloak-db` + `Keycloak messenger-idp` | CNPG, Keycloak |
 | `messenger-centrifugo` | Centrifugo на Redis | чарт (оператора нет) |
+| `messenger-mailpit` | сток писем для подтверждения адреса | чарт |
+| `messenger-routes` | `HTTPRoute` на `rt`, `s3`, `mail` | — |
 
 Кроме Centrifugo, у которого оператора не существует, ни один `StatefulSet`
 и ни один `Deployment` не написан руками: всё поднимают операторы по CR.
@@ -31,7 +33,11 @@
 и `Cluster` мессенджера. Топики лежат в namespace `kafka`, а не `messenger`,
 потому что оператор Strimzi смотрит только собственный namespace.
 
-**Чего здесь нет.** PgBouncer, приёмник почты, сами сервисы API и веб,
-внешние маршруты `HTTPRoute` на edge-gateway. Namespace `messenger`
+**Внешние имена.** `idp` — вход в систему, `rt` — realtime, `s3` — вложения,
+`mail` — сток писем. Все на `edge-gateway`, `app` зарезервировано под само
+приложение. У Centrifugo наружу выставлен только клиентский порт 8000: на 9000
+живут HTTP API, админка и метрики.
+
+**Чего здесь нет.** Самих сервисов API и веб. Namespace `messenger`
 намеренно не включён в ambient: идентичность в mesh относится к гейту
 безопасности, а не к первому подъёму.
