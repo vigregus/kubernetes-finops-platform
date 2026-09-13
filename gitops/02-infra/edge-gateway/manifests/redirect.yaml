@@ -17,13 +17,22 @@ metadata:
     finops.internal/component: api-gateway
 spec:
   parentRefs:
-    - name: edge
+    # group, kind и matches проставлены явно: API-сервер всё равно допишет
+    # их как значения по умолчанию, и без них git расходится с кластером
+    # на пустом месте.
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: edge
       namespace: edge
       # Только слушатель http. Без sectionName маршрут прицепился бы
       # и к :443, и тогда HTTPS перенаправлял бы сам на себя.
       sectionName: http
   rules:
-    - filters:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      filters:
         - type: RequestRedirect
           requestRedirect:
             scheme: https

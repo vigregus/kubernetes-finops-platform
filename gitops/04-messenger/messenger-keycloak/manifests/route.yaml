@@ -14,12 +14,24 @@ metadata:
     finops.internal/component: identity
 spec:
   parentRefs:
-    - name: edge
+    # group, kind и matches ниже проставлены явно, хотя это значения
+    # по умолчанию: API-сервер всё равно их допишет, и без них git
+    # расходится с кластером на пустом месте.
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: edge
       namespace: edge
       sectionName: https
   hostnames:
     - idp.finops.local
   rules:
-    - backendRefs:
-        - name: messenger-idp-service
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - group: ""
+          kind: Service
+          name: messenger-idp-service
           port: 8080
+          weight: 1
