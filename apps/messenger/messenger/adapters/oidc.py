@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -30,6 +31,8 @@ from messenger.telemetry import metrics
 # Единственный допустимый алгоритм подписи. Список, а не строка: при
 # ротации на другой алгоритм здесь окажутся оба, и это будет видно.
 ALGORITHMS = ("RS256",)
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,9 +133,23 @@ class JwksCache:
                 response = await http.get(self.settings.jwks_url)
                 response.raise_for_status()
                 document = response.json()
-        except (httpx.HTTPError, ValueError):
+        except (httpx.HTTPError, ValueError) as exc:
             # Старые ключи не выбрасываются: пока Keycloak недоступен,
             # проверять уже выданные токены всё ещё можно и нужно.
+            #
+            # Но молчать об этом нельзя. Неудачный прогрев при старте
+            # никак иначе не виден: процесс поднимается, готовность
+            # зелёная, и о том, что проверять нечем, узнаёт первый
+            # вошедший. Метрика показывает состояние, журнал - причину.
+            log.warning(
+                "не удалось прочитать ключи реалма",
+                extra={
+                    "event": "oidc_keys_unavailable",
+                    "result": "failed",
+                    "error_code": type(exc).__name__,
+                    "dependency": "keycloak",
+                },
+            )
             return
 
         keys = usable_keys(document)
