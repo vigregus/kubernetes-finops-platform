@@ -33,6 +33,10 @@ class TokenRejection(str, Enum):
     WRONG_ISSUER = "wrong_issuer"
     WRONG_AUDIENCE = "wrong_audience"
     MISSING_CLAIM = "missing_claim"
+    # Токен в порядке, а вход, которым он выдан, отозван. Отдельная
+    # причина: это не поломка у клиента и не ротация ключей, а чей-то
+    # осознанный выход — свой, администратора или смены пароля.
+    SESSION_REVOKED = "session_revoked"
     # Ключи недоступны — это не «токен плохой», а «проверить нечем».
     # Отдельная причина, потому что ответ на неё другой: 503, а не 401.
     KEYS_UNAVAILABLE = "keys_unavailable"

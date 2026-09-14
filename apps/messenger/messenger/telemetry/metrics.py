@@ -89,3 +89,17 @@ OIDC_KEYS = Gauge(
 
 def oidc_keys(count: int) -> None:
     OIDC_KEYS.labels(service=SERVICE).set(count)
+
+
+# Отозванные сессии по причине. «Вышел сам» и «отключён администратором»
+# разбираются по-разному, и в одном ряду они бесполезны.
+SESSIONS_REVOKED = Counter(
+    "messenger_sessions_revoked_total",
+    "Отозванные сессии",
+    ["service", "reason"],
+)
+
+
+def sessions_revoked(reason: str, count: int = 1) -> None:
+    if count:
+        SESSIONS_REVOKED.labels(service=SERVICE, reason=reason).inc(count)
