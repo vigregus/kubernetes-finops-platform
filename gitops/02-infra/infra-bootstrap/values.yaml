@@ -5,7 +5,15 @@
 # them back now would create empty shells that Kyverno still checks and
 # dashboards still query.
 #
-# observability keeps the ambient label; prod's enrolment went with prod.
+# Mesh в окружении разработки не используется. Ambient снят с observability
+# после конкретного отказа: после перезапуска кластера поды остались
+# помеченными как включённые в mesh, но перенаправление у них не
+# восстановилось — снаружи это выглядело как «порт открыт, а байты не
+# проходят», то есть как проблема сети. На отладку телеметрии это тратит
+# больше, чем mesh здесь даёт.
+#
+# Istio остаётся установленным: он часть платформы и нужен для измерений.
+# Не используется — не то же самое, что снесён.
 #
 # messenger is the first of those namespaces. It is deliberately NOT enrolled
 # in ambient yet: mesh identity belongs to the security gate, and enrolling it
@@ -15,8 +23,6 @@
 namespaces:
 - name: argocd
 - name: observability
-  labels:
-    istio.io/dataplane-mode: ambient
 - name: finops-system
 - name: governance-system
 - name: messenger
