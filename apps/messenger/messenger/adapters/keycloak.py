@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from enum import Enum
 
@@ -159,3 +160,115 @@ async def _post(form: dict[str, str], *, settings: TokenSettings, operation: str
         },
     )
     return ExchangeResult(failure=failure)
+
+
+@dataclass(frozen=True, slots=True)
+class AdminSettings:
+    """Доступ к административному API реалма от имени служебной записи.
+
+    Секрет выдал Keycloak, сверка положила его в Secret, под читает
+    из окружения. В git его нет ни в каком виде.
+    """
+
+    # Корень Keycloak по внутреннему адресу и имя реалма отдельно: первый
+    # нужен и для токена, и для admin API, второй — только для второго.
+    base_url: str
+    realm: str
+    client_id: str
+    client_secret: str
+    request_timeout_seconds: float = 5.0
+
+
+@dataclass(slots=True)
+class AdminClient:
+    """Служебный токен с кешем и обращения, которым он нужен.
+
+    Токен кешируется до истечения: без этого каждое письмо стоило бы двух
+    обращений к Keycloak вместо одного, и половина из них — за токеном,
+    который ещё действителен.
+    """
+
+    settings: AdminSettings
+    _token: str | None = None
+    _expires_at: float = 0.0
+
+    async def _access_token(self) -> str | None:
+        now = time.monotonic()
+        # Запас в тридцать секунд: токен, годный «ещё секунду», в пути
+        # успеет истечь, и обращение вернёт 401 на ровном месте.
+        if self._token and now < self._expires_at - 30:
+            return self._token
+
+        url = (
+            f"{self.settings.base_url}/realms/{self.settings.realm}"
+            "/protocol/openid-connect/token"
+        )
+        try:
+            async with httpx.AsyncClient(
+                timeout=self.settings.request_timeout_seconds
+            ) as http:
+                response = await http.post(
+                    url,
+                    data={
+                        "grant_type": "client_credentials",
+                        "client_id": self.settings.client_id,
+                        "client_secret": self.settings.client_secret,
+                    },
+                )
+        except httpx.HTTPError as exc:
+            log.warning(
+                "служебный токен не получен",
+                extra={"event": "admin_token", "result": "failed",
+                       "error_code": type(exc).__name__, "dependency": "keycloak"},
+            )
+            return None
+
+        if response.status_code != 200:
+            log.warning(
+                "служебный токен отклонён",
+                extra={"event": "admin_token", "result": "failed",
+                       "error_code": "rejected", "status": response.status_code},
+            )
+            return None
+
+        body = response.json()
+        self._token = body["access_token"]
+        self._expires_at = now + int(body.get("expires_in", 60))
+        return self._token
+
+    async def send_verify_email(self, *, external_user_id: str) -> bool:
+        """Просит Keycloak отправить письмо о подтверждении адреса.
+
+        Письмо собирает и отправляет Keycloak: у него шаблоны, ссылка
+        с одноразовым токеном и срок её жизни. Собирать своё письмо
+        значило бы завести второй механизм подтверждения рядом с рабочим.
+        """
+        token = await self._access_token()
+        if token is None:
+            return False
+
+        url = (
+            f"{self.settings.base_url}/admin/realms/{self.settings.realm}"
+            f"/users/{external_user_id}/send-verify-email"
+        )
+        try:
+            async with httpx.AsyncClient(
+                timeout=self.settings.request_timeout_seconds
+            ) as http:
+                response = await http.put(url, headers={"Authorization": f"Bearer {token}"})
+        except httpx.HTTPError as exc:
+            log.warning(
+                "письмо не отправлено",
+                extra={"event": "verify_email", "result": "failed",
+                       "error_code": type(exc).__name__, "dependency": "keycloak"},
+            )
+            return False
+
+        if response.status_code not in (200, 204):
+            log.warning(
+                "Keycloak отказался отправлять письмо",
+                extra={"event": "verify_email", "result": "failed",
+                       "error_code": "rejected", "status": response.status_code},
+            )
+            return False
+        return True

@@ -88,3 +88,35 @@ def test_профиль_неизменяем():
     except (AttributeError, TypeError):
         return
     raise AssertionError("профиль оказался изменяемым")
+
+
+def test_до_подтверждения_адреса_нельзя_начинать_беседы():
+    """AUTH-006: до подтверждения функции ограничены.
+
+    Ограничение бьёт по рассылке незнакомым: учётная запись с выдуманным
+    адресом заводится за секунду. Чтение и ответ в уже существующей беседе
+    остаются — иначе ограничение бьёт по тому, кого позвали, а не по тому,
+    кто рассылает.
+    """
+    from messenger.domain.user import Capability, can
+
+    неподтверждённый = _user(email_verified=False)
+    assert can(неподтверждённый, Capability.READ)
+    assert can(неподтверждённый, Capability.SEND_MESSAGE)
+    assert not can(неподтверждённый, Capability.START_CONVERSATION)
+
+
+def test_после_подтверждения_доступно_всё():
+    from messenger.domain.user import Capability, can
+
+    подтверждённый = _user(email_verified=True)
+    assert all(can(подтверждённый, c) for c in Capability)
+
+
+def test_надгробие_не_может_ничего():
+    """Строка в базе есть, человека нет."""
+    from datetime import UTC, datetime
+
+    from messenger.domain.user import capabilities_of
+
+    assert capabilities_of(_user(deleted_at=datetime.now(UTC))) == frozenset()

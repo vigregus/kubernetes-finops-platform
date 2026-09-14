@@ -37,6 +37,9 @@ dependencies:
     # БД 1 - роль app-cache. Realtime (0) принадлежит Centrifugo,
     # security (2) - ограничителям частоты.
     url: redis://messenger-redis.messenger.svc.cluster.local:6379/1
+    # БД 2 - роль security: счётчики лимитов. Отдельно от кеша приложения,
+    # потому что вымывание кеша не должно обнулять лимиты.
+    securityUrl: redis://messenger-redis.messenger.svc.cluster.local:6379/2
   kafka:
     bootstrap: messenger-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092
   keycloak:
@@ -53,6 +56,12 @@ dependencies:
     # Браузерный клиент. Секрета у него нет и быть не может - он живёт
     # в странице; вместо секрета PKCE.
     clientId: messenger-web
+    # Корень Keycloak и реалм отдельно: административное API адресуется
+    # от корня, а не от реалма.
+    baseUrl: http://messenger-idp-service.keycloak.svc.cluster.local:8080
+    realm: messenger
+    # Secret, который заполняет сверка реалма. Значение выдал Keycloak.
+    clientSecret: messenger-api-client
   centrifugo:
     apiUrl: http://messenger-centrifugo.messenger.svc.cluster.local:9000/api
     secret: messenger-centrifugo

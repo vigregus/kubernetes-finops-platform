@@ -71,6 +71,44 @@ paths:
               schema: { $ref: '#/components/schemas/AccessToken' }
         '401': { $ref: '#/components/responses/Unauthorized' }
 
+  /auth/verify-email/resend:
+    post:
+      tags: [auth]
+      summary: Отправить письмо о подтверждении ещё раз
+      description: |
+        Под лимитом. Точка, рассылающая письмо по указанному адресу без
+        ограничения, — готовый инструмент травли: адрес указывает
+        регистрирующийся, а письма приходят владельцу адреса.
+      operationId: resendVerificationEmail
+      responses:
+        '202': { description: Письмо отправлено }
+        '409': { description: Адрес уже подтверждён }
+        '429':
+          description: Слишком часто
+          headers:
+            Retry-After:
+              schema: { type: integer }
+              description: Секунды до следующей попытки.
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /me:
+    get:
+      tags: [auth]
+      summary: Кто я и что мне доступно
+      description: |
+        Возможности отдаются списком, а не выводятся клиентом из
+        `email_verified`: правило живёт на сервере, и продублированное
+        в интерфейсе оно однажды разойдётся — человек увидит доступную
+        кнопку, которая отвечает отказом.
+      operationId: whoAmI
+      responses:
+        '200':
+          description: Профиль и текущие возможности
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Me' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
   /conversations:
     get:
       tags: [conversations]
@@ -397,6 +435,25 @@ components:
           schema: { $ref: '#/components/schemas/Problem' }
 
   schemas:
+    Me:
+      type: object
+      required: [user_id, display_name, email_verified, capabilities]
+      properties:
+        user_id: { type: string, format: uuid }
+        display_name: { type: string }
+        email: { type: string, format: email, nullable: true }
+        email_verified: { type: boolean }
+        capabilities:
+          type: array
+          description: |
+            Что доступно сейчас. До подтверждения адреса нельзя начинать
+            беседы: учётная запись с выдуманным адресом заводится
+            за секунду, и без ограничения она сразу пишет посторонним.
+            Чтение и ответ в существующей беседе остаются.
+          items:
+            type: string
+            enum: [read, send_message, start_conversation]
+
     AuthorizationCode:
       type: object
       required: [code, code_verifier, redirect_uri]

@@ -117,6 +117,23 @@ spec:
               value: {{ $.Values.web.origin | quote }}
             - name: AUTH_COOKIE_PATH
               value: {{ $.Values.web.authCookiePath | quote }}
+            # Административное API реалма: повторная отправка письма
+            # о подтверждении, дальше — выход везде и отключение учётной
+            # записи. Секрет выдал сам Keycloak, сверка реалма положила
+            # его в Secret; в git его нет ни в каком виде.
+            - name: KEYCLOAK_URL
+              value: {{ $.Values.dependencies.keycloak.baseUrl | quote }}
+            - name: KEYCLOAK_REALM
+              value: {{ $.Values.dependencies.keycloak.realm | quote }}
+            - name: OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.dependencies.keycloak.clientSecret }}
+                  key: client-secret
+            # БД 2 — роль security. Счётчики лимитов не должны вымываться
+            # вместе с кешем приложения, поэтому адрес отдельный.
+            - name: REDIS_SECURITY_URL
+              value: {{ $.Values.dependencies.redis.securityUrl | quote }}
             - name: CENTRIFUGO_API_URL
               value: {{ $.Values.dependencies.centrifugo.apiUrl | quote }}
             - name: CENTRIFUGO_HTTP_API_KEY

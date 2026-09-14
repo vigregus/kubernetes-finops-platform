@@ -127,3 +127,18 @@ def login_succeeded(operation: str) -> None:
 
 def login_failed(operation: str, error_class: str) -> None:
     LOGIN_FAILURES.labels(service=SERVICE, operation=operation, error_class=error_class).inc()
+
+
+# Письма о подтверждении адреса по исходу. Всплеск `limited` означает либо
+# сломанную доставку почты — люди жмут «отправить ещё раз», — либо попытку
+# рассылки по чужому адресу, и различить их можно только по тому, один это
+# профиль или многие.
+VERIFICATION_EMAIL = Counter(
+    "messenger_verification_email_total",
+    "Повторные отправки письма о подтверждении",
+    ["service", "outcome"],
+)
+
+
+def verification_email(outcome: str) -> None:
+    VERIFICATION_EMAIL.labels(service=SERVICE, outcome=outcome).inc()

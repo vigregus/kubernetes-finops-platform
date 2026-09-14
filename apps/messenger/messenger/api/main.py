@@ -21,9 +21,12 @@ from starlette.requests import Request
 
 from messenger.domain.identity import TokenRejection
 from messenger.domain.ids import DeviceId, SessionId
+from messenger.domain.user import capabilities_of
+from messenger.services import identity as identity_service
 from messenger.services import login as login_service
 from messenger.services import runtime as runtime_service
 from messenger.services import session_management as session_service
+from messenger.services import verification as verification_service
 from messenger.telemetry import metrics
 from messenger.telemetry.logging import configure
 
@@ -395,3 +398,100 @@ async def metrics() -> Response:
     его недоступность замедляла бы обработку запроса.
     """
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+# --- разбор удостоверения ----------------------------------------------------
+
+UNAUTHENTICATED = {"code": "unauthenticated", "title": "Требуется вход"}
+
+
+def _bearer(request: Request) -> str | None:
+    """Токен из заголовка. Регистр схемы не фиксирован спецификацией."""
+    header = request.headers.get("authorization", "")
+    scheme, _, value = header.partition(" ")
+    return value.strip() if scheme.lower() == "bearer" and value.strip() else None
+
+
+async def _current(request: Request, conn) -> identity_service.AuthResult:
+    """Кто обращается. Единственное место разбора удостоверения в `api`.
+
+    Полноценная точка проверки прав — `authorize()` из G1-012; здесь только
+    «кто это», без единого решения о доступе. Разница существенная:
+    решение о доступе, принятое в обработчике, однажды будет принято в нём
+    иначе, чем в соседнем.
+    """
+    token = _bearer(request)
+    if token is None:
+        return identity_service.AuthResult()
+    runtime = request.app.state.runtime
+    return await identity_service.authenticate(
+        conn,
+        token=token,
+        keys=runtime.keys,
+        settings=runtime.oidc_settings,
+        device_id=_device_from(None, request),
+        user_agent=request.headers.get("user-agent"),
+    )
+
+
+@app.get("/me")
+async def me(request: Request, response: Response) -> dict[str, object]:
+    """Кто я и что мне сейчас доступно.
+
+    Возможности отдаются списком, а не выводятся клиентом из
+    `email_verified`. Правило одно и живёт в домене; продублированное
+    в интерфейсе, оно однажды разойдётся с сервером — и человек увидит
+    доступную кнопку, которая отвечает отказом.
+    """
+    runtime = request.app.state.runtime
+    async with runtime.connection() as conn:
+        auth = await _current(request, conn)
+
+    if not auth.ok or auth.user is None:
+        response.status_code = 401
+        return dict(UNAUTHENTICATED)
+
+    user = auth.user
+    return {
+        "user_id": str(user.user_id),
+        "display_name": user.display_name,
+        "email": user.email,
+        "email_verified": user.email_verified,
+        "capabilities": sorted(c.value for c in capabilities_of(user)),
+    }
+
+
+@app.post("/auth/verify-email/resend")
+async def resend_verification(request: Request, response: Response) -> dict[str, object]:
+    """Отправить письмо о подтверждении ещё раз.
+
+    Под лимитом: точка, рассылающая письмо по указанному адресу без
+    ограничения, — готовый инструмент травли, потому что адрес указывает
+    регистрирующийся, а письма приходят владельцу адреса.
+    """
+    runtime = request.app.state.runtime
+    async with runtime.connection() as conn:
+        auth = await _current(request, conn)
+
+    if not auth.ok or auth.user is None:
+        response.status_code = 401
+        return dict(UNAUTHENTICATED)
+
+    result = await verification_service.resend_verification(
+        user=auth.user, limiter=runtime.limiter, admin=runtime.admin
+    )
+
+    if result.already_verified:
+        response.status_code = 409
+        return {"code": "already_verified", "title": "Адрес уже подтверждён"}
+    if result.limited:
+        response.status_code = 429
+        # Без Retry-After клиент повторяет вслепую и упирается снова.
+        response.headers["Retry-After"] = str(result.retry_after_seconds)
+        return {"code": "rate_limited", "title": "Слишком часто"}
+    if result.upstream_failed:
+        response.status_code = 503
+        return {"code": "upstream_unavailable", "title": "Временно недоступно"}
+
+    response.status_code = 202
+    return {"sent": True}

@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 
 import asyncpg
 
-from messenger.adapters import keycloak, oidc
+from messenger.adapters import keycloak, oidc, ratelimit
 from messenger.repositories import postgres
 from messenger.services.login import LoginSettings
 from messenger.telemetry import metrics
@@ -79,6 +79,25 @@ def login_settings_from_env(oidc_settings: oidc.OidcSettings) -> LoginSettings:
     )
 
 
+def admin_settings_from_env() -> keycloak.AdminSettings:
+    """Доступ к административному API реалма от имени служебной записи.
+
+    Секрет выдал сам Keycloak, сверка реалма положила его в Secret, под
+    читает из окружения. В git его нет ни в каком виде.
+    """
+    return keycloak.AdminSettings(
+        base_url=os.getenv("KEYCLOAK_URL", ""),
+        realm=os.getenv("KEYCLOAK_REALM", "messenger"),
+        client_id=os.getenv("OIDC_AUDIENCE", "messenger-api"),
+        client_secret=os.getenv("OIDC_CLIENT_SECRET", ""),
+    )
+
+
+def limit_settings_from_env() -> ratelimit.LimitSettings:
+    """Счётчики лимитов. БД 2 — роль security, отдельно от кеша приложения."""
+    return ratelimit.LimitSettings(url=os.getenv("REDIS_SECURITY_URL", ""))
+
+
 @dataclass(frozen=True, slots=True)
 class ReadinessReport:
     """Что ответила каждая зависимость.
@@ -106,12 +125,18 @@ class Runtime:
     pool: asyncpg.Pool | None = None
     keys: oidc.JwksCache | None = None
     login: LoginSettings | None = None
+    admin: keycloak.AdminClient | None = None
+    limiter: ratelimit.RateLimiter | None = None
 
     def __post_init__(self) -> None:
         if self.keys is None:
             self.keys = oidc.JwksCache(settings=self.oidc_settings)
         if self.login is None:
             self.login = login_settings_from_env(self.oidc_settings)
+        if self.admin is None:
+            self.admin = keycloak.AdminClient(settings=admin_settings_from_env())
+        if self.limiter is None:
+            self.limiter = ratelimit.RateLimiter(settings=limit_settings_from_env())
 
     async def start(self) -> None:
         """Пытается открыть пул и прогреть ключи. Неудача — не повод
@@ -138,6 +163,8 @@ class Runtime:
             await self.pool.close()
             self.pool = None
             metrics.dependency_up(POSTGRES, up=False)
+        if self.limiter is not None:
+            await self.limiter.close()
 
     async def ensure_pool(self) -> asyncpg.Pool | None:
         """Открывает пул, если его ещё нет. Повторная попытка — на каждой пробе.

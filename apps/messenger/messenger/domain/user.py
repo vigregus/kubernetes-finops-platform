@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 
 from messenger.domain.ids import UserId
 
@@ -98,3 +99,47 @@ class EnsureUserResult:
     created: bool
     # Профиль отличался от токена и был обновлён.
     updated: bool = False
+
+
+class Capability(str, Enum):
+    """Что человек может делать. Проверяется до действия, а не после.
+
+    Список короткий намеренно: это не система прав, а ответ на один
+    вопрос — что доступно до подтверждения адреса (`AUTH-006`).
+    """
+
+    # Читать свои беседы и сообщения. Доступно всегда: запрет на чтение
+    # своей же переписки выглядел бы как потеря данных.
+    READ = "read"
+    # Писать в существующую беседу.
+    SEND_MESSAGE = "send_message"
+    # Начинать беседу с кем-то новым.
+    START_CONVERSATION = "start_conversation"
+
+
+# Что доступно, пока адрес не подтверждён.
+#
+# Ограничение бьёт именно по рассылке незнакомым: учётная запись
+# с чужим или выдуманным адресом заводится за секунду, и без этого
+# ограничения она сразу же начинает писать посторонним. Чтение и ответ
+# в уже существующей беседе при этом остаются — иначе человек, которого
+# позвали первым, не может ответить, и ограничение бьёт по нему,
+# а не по рассылающему.
+_UNVERIFIED = frozenset({Capability.READ, Capability.SEND_MESSAGE})
+_VERIFIED = frozenset(Capability)
+
+
+def capabilities_of(user: User) -> frozenset[Capability]:
+    """Возможности профиля. Одно место, а не условие в каждом обработчике.
+
+    Разложенное по обработчикам правило однажды забудут в одном из них —
+    и это будет ровно тот, через который рассылают.
+    """
+    if user.is_deleted:
+        # Надгробие не может ничего. Строка в базе есть, человека нет.
+        return frozenset()
+    return _VERIFIED if user.email_verified else _UNVERIFIED
+
+
+def can(user: User, capability: Capability) -> bool:
+    return capability in capabilities_of(user)
