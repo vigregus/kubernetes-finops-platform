@@ -32,7 +32,7 @@ MESSENGER_APPS  := messenger-secrets messenger-postgres messenger-redis \
 PYTHON ?= python3.12
 PYTHON_VERSION = (3, 12)
 
-.PHONY: help bootstrap local-up local-test local-down contracts layers sql unit migrate smoke integration status
+.PHONY: help bootstrap local-up local-test local-down contracts layers sql venv lint unit migrate smoke integration status
 
 help:
 	@grep -E '^[a-z-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -111,7 +111,7 @@ local-up: ## Поднять мессенджер (сам вызовет bootstra
 	done
 	@echo "мессенджер поднят"
 
-local-test: contracts layers sql unit migrate smoke integration ## Контракты, слои, SQL, юнит, миграции, связность, интеграция
+local-test: contracts layers sql lint unit migrate smoke integration ## Контракты, слои, SQL, линтер, юнит, миграции, связность, интеграция
 
 contracts: ## Схемы связны и обратно совместимы
 	@echo "· контракты"
@@ -125,11 +125,16 @@ sql: ## Миграции не содержат операторов, запре�
 	@echo "· миграции"
 	@python3 scripts/check-migrations.py
 
-unit: ## Модульные тесты, без базы и сети
-	@echo "· модульные тесты"
-	@# Окружение создаётся здесь, а не документируется как «сначала
-	@# установите pytest»: шаг, который надо помнить, однажды забудут,
-	@# и тесты просто не запустятся.
+lint: venv ## Линтер — ровно та же команда, что в конвейере
+	@echo "· линтер"
+	@# Проверяются и messenger, и tests. Пока здесь стоял только пакет,
+	@# правила для тестов проверял один конвейер, и расхождение всплывало
+	@# уже после push - ровно так и случилось с S105 в проверке входа.
+	@cd apps/messenger && .venv/bin/python -m ruff check messenger tests
+
+venv: ## Окружение для проверок; создаётся само
+	@# Создаётся здесь, а не документируется как «сначала установите
+	@# pytest»: шаг, который надо помнить, однажды забудут.
 	@#
 	@# Версия интерпретатора закреплена и совпадает с образом и конвейером.
 	@# Пока здесь стоял `python3`, окружение уехало на 3.14, и установка
@@ -143,6 +148,9 @@ unit: ## Модульные тесты, без базы и сети
 	@apps/messenger/.venv/bin/pip install -q \
 		-r apps/messenger/requirements.txt \
 		-r apps/messenger/requirements-dev.txt
+
+unit: venv ## Модульные тесты, без базы и сети
+	@echo "· модульные тесты"
 	@cd apps/messenger && .venv/bin/python -m pytest tests -q
 
 migrate: ## Применить миграции к локальной базе
