@@ -57,10 +57,58 @@ jobs:
         run: python3 scripts/check-layers.py
       - name: Миграции без запрещённых операторов
         run: python3 scripts/check-migrations.py
-      - name: Модульные тесты
+      - name: Линтер
         run: |
           pip install --quiet -r apps/messenger/requirements-dev.txt
-          cd apps/messenger && python3 -m pytest tests -q
+          cd apps/messenger && python3 -m ruff check messenger tests
+      - name: Модульные тесты
+        run: cd apps/messenger && python3 -m pytest tests -q
+
+  image:
+    name: DEP-001 — образ по digest
+    needs: code
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Базовый образ закреплён
+        # Сборка от подвижного тега означает, что пересборка из того же
+        # коммита даёт другие байты — и digest перестаёт что-либо значить.
+        run: |
+          test -s apps/messenger/base-image.lock \
+            || { echo "нет apps/messenger/base-image.lock" >&2; exit 1; }
+          grep -q '^sha256:' apps/messenger/base-image.lock \
+            || { echo "в base-image.lock не digest" >&2; exit 1; }
+
+      - name: Сборка
+        run: |
+          docker build \
+            --build-arg "BASE_DIGEST=$(cat apps/messenger/base-image.lock)" \
+            -t messenger-api:ci apps/messenger
+
+      - name: Образ запускается и отвечает на пробы
+        # Собранный образ, который не стартует, — обычный способ узнать
+        # об ошибке только на выкатке.
+        run: |
+          docker run -d --name api -p 8080:8080 messenger-api:ci
+          for _ in $(seq 1 30); do
+            curl -sf http://localhost:8080/livez >/dev/null && break
+            sleep 1
+          done
+          curl -sf http://localhost:8080/livez
+          curl -sf http://localhost:8080/metrics | grep -q messenger_build_info
+          echo "образ отвечает"
+
+      - name: Тот же контейнер под непривилегированным пользователем
+        # Чарт объявляет runAsNonRoot и uid 10001. Образ, собранный под
+        # root, поднимется локально и не поднимется в кластере.
+        run: |
+          test "$(docker exec api id -u)" = "10001" \
+            || { echo "контейнер работает не под 10001" >&2; exit 1; }
+
+      - name: Digest собранного образа
+        run: |
+          docker inspect --format 'digest {{.Id}}' messenger-api:ci
 
   migrations:
     name: Миграции применяются с нуля

@@ -1,0 +1,19 @@
+[project]
+name = "messenger"
+version = "0.1.0"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Модульный уровень не ходит по сети. Если тест это нарушит, он упадёт
+# не здесь, а в конвейере — и не будет понятно почему.
+addopts = "-q -p no:warnings"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S"]
+# S101: assert в тестах — это норма, а не проблема безопасности.
+per-file-ignores = { "tests/*" = ["S101"] }

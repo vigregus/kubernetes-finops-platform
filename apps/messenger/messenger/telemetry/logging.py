@@ -62,7 +62,7 @@ def scrub(value: Any, key: str | None = None) -> Any:
         return REDACTED
     if isinstance(value, dict):
         return {k: scrub(v, k) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, list | tuple):
         return [scrub(v) for v in value]
     if isinstance(value, str):
         for pattern in _PATTERNS:

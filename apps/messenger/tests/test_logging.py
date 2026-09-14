@@ -61,7 +61,10 @@ def test_вложенный_словарь_тоже_вычищается(capture
 
 
 def test_jwt_узнаётся_по_виду_а_не_по_имени_поля():
-    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
+    jwt = (
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0"
+        ".dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
+    )
     # Ключ называется безобидно — и именно так секрет и попадает в журнал.
     assert jwt not in json.dumps(scrub({"note": f"токен {jwt}"}))
 
