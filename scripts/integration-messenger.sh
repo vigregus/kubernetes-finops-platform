@@ -24,7 +24,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-IMAGE="$(python3 - "$VALUES" <<'PY'
+DEFAULT_IMAGE="$(python3 - "$VALUES" <<'PY'
 import re, sys
 s = open(sys.argv[1], encoding="utf-8").read()
 block = re.search(r"  api:\n(?:.*\n)*?    resources:", s).group(0)
@@ -33,6 +33,7 @@ tag = re.search(r'tag:\s*"?([^"\n]+)"?', block).group(1)
 print(f"{repo}:{tag}")
 PY
 )"
+IMAGE="${INTEGRATION_IMAGE:-$DEFAULT_IMAGE}"
 echo "  образ: $IMAGE"
 
 args=(--from-file="run.sh=$ROOT/tests/integration/run.sh")
