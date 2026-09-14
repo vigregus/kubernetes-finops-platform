@@ -1,5 +1,20 @@
 tempo:
   retention: 24h
+  # Чарт по умолчанию поднимает приёмники Jaeger и Zipkin, но не OTLP:
+  # порты 4317 и 4318 объявлены в службе, а внутри пода их никто не слушает.
+  # Снаружи это выглядит как сброс соединения — «error reading server
+  # preface», — то есть как проблема сети, а не как отсутствующий приёмник.
+  #
+  # Перечисление заменяет умолчания целиком, и Jaeger с Zipkin уходят
+  # намеренно: ими никто не пользуется, а открытый порт — это поверхность,
+  # которую никто не собирался обслуживать.
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
   metricsGenerator:
     # Without this, Tempo's metrics-generator never starts - "Service Graph"
     # and TraceQL metrics queries (`{...} | rate() by (...)`) fail with
