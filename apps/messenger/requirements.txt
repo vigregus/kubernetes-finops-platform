@@ -4,3 +4,9 @@
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 prometheus-client==0.21.1
+# Драйвер Postgres. asyncpg, а не psycopg: стек асинхронный, и синхронный
+# драйвер в обработчике FastAPI блокирует цикл событий целиком.
+#
+# Пул PgBouncer работает в режиме transaction, поэтому подготовленные
+# выражения выключаются на стороне клиента — см. repositories/postgres.py.
+asyncpg==0.30.0

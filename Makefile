@@ -4,7 +4,7 @@
 #
 #   make bootstrap    кластер, Cilium, Argo CD, корневое приложение
 #   make local-up     ждёт, пока приложения мессенджера станут Healthy
-#   make local-test   контракты, миграции, проверка связности
+#   make local-test   контракты, юнит, миграции, связность, интеграция
 #   make local-down   снимает только нагрузки мессенджера
 #
 # Всё идемпотентно: повторный запуск на готовом окружении ничего не ломает
@@ -28,7 +28,7 @@ MESSENGER_APPS  := messenger-secrets messenger-postgres messenger-redis \
                    messenger-keycloak messenger-centrifugo messenger-services \
                    messenger-routes
 
-.PHONY: help bootstrap local-up local-test local-down contracts layers sql unit migrate smoke status
+.PHONY: help bootstrap local-up local-test local-down contracts layers sql unit migrate smoke integration status
 
 help:
 	@grep -E '^[a-z-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -107,7 +107,7 @@ local-up: ## Поднять мессенджер (сам вызовет bootstra
 	done
 	@echo "мессенджер поднят"
 
-local-test: contracts layers sql unit migrate smoke ## Контракты, слои, SQL, юнит, миграции, связность
+local-test: contracts layers sql unit migrate smoke integration ## Контракты, слои, SQL, юнит, миграции, связность, интеграция
 
 contracts: ## Схемы связны и обратно совместимы
 	@echo "· контракты"
@@ -139,6 +139,10 @@ migrate: ## Применить миграции к локальной базе
 smoke: ## Связность: каждое хранилище отвечает на настоящую операцию
 	@echo "· связность"
 	@scripts/smoke-messenger.sh
+
+integration: ## Код против настоящей базы, тем же образом и тем же путём
+	@echo "· интеграция"
+	@scripts/integration-messenger.sh
 
 status: ## Что сейчас в кластере
 	@kubectl get app -n $(ARGOCD_NAMESPACE) -o custom-columns=\

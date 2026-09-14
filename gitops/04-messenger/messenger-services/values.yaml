@@ -71,7 +71,7 @@ services:
       port: 8080
     image:
       repository: ghcr.io/vigregus/messenger-api
-      tag: "local-4cb6fd67d25c"
+      tag: "local-549cde57ae4b"
     resources:
       requests: {cpu: 50m, memory: 128Mi}
       limits: {cpu: "1", memory: 512Mi}
