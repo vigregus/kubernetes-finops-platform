@@ -18,8 +18,8 @@ import asyncpg
 
 from messenger.adapters import oidc
 from messenger.domain.identity import Claims, TokenRejection
-from messenger.domain.ids import DeviceId, SessionId
-from messenger.domain.session import Device, Session
+from messenger.domain.ids import DeviceId
+from messenger.domain.session import Device, Session, session_id_from_external
 from messenger.domain.user import User
 from messenger.repositories import sessions, users
 from messenger.telemetry import metrics
@@ -112,7 +112,8 @@ async def authenticate(
         # ни устройства, и заводить их нечего.
         return AuthResult(user=user, claims=claims)
 
-    session_id = SessionId(uuid.UUID(claims.session_state))
+    # `sid` — непрозрачная строка, а не UUID; отображение живёт в домене.
+    session_id = session_id_from_external(claims.session_state)
     moment = now or datetime.now(UTC)
 
     # Отозванный вход отсекается до всякой записи. Иначе «выйти везде»
@@ -139,6 +140,7 @@ async def authenticate(
         user_id=user.user_id,
         device_id=device.device_id,
         expires_at=moment + SESSION_IDLE,
+        external_session_id=claims.session_state,
     )
     return AuthResult(user=user, claims=claims, session=session, device=device)
 

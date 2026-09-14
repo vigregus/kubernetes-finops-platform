@@ -122,6 +122,13 @@ async def authorization_code(login: str, password: str, challenge: str) -> str |
         if not form:
             return None
         action = form.group(1).replace("&amp;", "&")
+        # Keycloak строит абсолютные ссылки от своего hostname, то есть
+        # форма ведёт на https://idp.finops.local — имя, которого изнутри
+        # кластера нет. Браузеру это подходит, проверке нет, поэтому
+        # источник подменяется на внутренний. Та же особенность, из-за
+        # которой издатель и адрес ключей у приложения разные.
+        parsed = urlparse(action)
+        action = f"{KEYCLOAK}{parsed.path}" + (f"?{parsed.query}" if parsed.query else "")
 
         submitted = await browser.post(
             action,

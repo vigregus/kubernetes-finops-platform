@@ -52,3 +52,34 @@ def test_причина_отзыва_сохраняется_как_строка(
     расследуются по-разному."""
     assert RevocationReason.ADMIN_DISABLE.value == "admin_disable"
     assert RevocationReason.EXPIRED.value == "expired"
+
+
+def test_идентификатор_сессии_выводится_из_непрозрачного_sid():
+    """`sid` у Keycloak 26 — не UUID.
+
+    Проверено на живом сервере: там короткая строка вроде
+    `cyt4SLGLVN3jRXGVyhAs5aAG`, и спецификация OIDC так и говорит.
+    Предположение «там UUID» держалось ровно до первого настоящего входа
+    и падало с `badly formed hexadecimal UUID string`.
+    """
+    from messenger.domain.session import session_id_from_external
+
+    внешний = "cyt4SLGLVN3jRXGVyhAs5aAG"
+    первый = session_id_from_external(внешний)
+    assert session_id_from_external(внешний) == первый, "отображение обязано быть стабильным"
+    assert session_id_from_external("другой-sid") != первый
+    assert isinstance(первый, uuid.UUID)
+
+
+def test_отображение_не_зависит_от_процесса():
+    """Значение зашито, а не берётся случайно при старте.
+
+    Другое пространство имён означало бы, что все существующие сессии
+    перестают находиться, то есть разовый выход у всех.
+    """
+    from messenger.domain.session import session_id_from_external
+
+    assert str(session_id_from_external("cyt4SLGLVN3jRXGVyhAs5aAG")) == (
+        str(uuid.uuid5(uuid.UUID("6f2b4b1e-5a0f-4c52-9b7a-0f4a1e8d3c77"),
+                       "cyt4SLGLVN3jRXGVyhAs5aAG"))
+    )

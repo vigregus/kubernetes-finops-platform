@@ -81,12 +81,14 @@ async def ensure_session(
     user_id: UserId,
     device_id: DeviceId,
     expires_at: datetime,
+    external_session_id: str | None = None,
 ) -> Session:
     """Отражает вход Keycloak в нашей таблице. Идемпотентно по `session_id`.
 
-    `session_id` — это `sid` из токена, а не собственный идентификатор.
-    Свой потребовал бы таблицы соответствия, существующей ровно для того,
-    чтобы однажды разойтись с Keycloak.
+    `session_id` выведен из `sid` токена детерминированно, поэтому таблицы
+    соответствия не нужно. Сырой `sid` кладётся рядом — не для поиска,
+    а для разбора инцидентов: без него «какая это сессия Keycloak»
+    выясняется обратным перебором, то есть никак.
 
     Срок продлевается на каждом обращении — так же, как Keycloak двигает
     свой idle-таймаут. Это приближение, и оно намеренно сдвинуто в сторону
@@ -98,11 +100,14 @@ async def ensure_session(
     """
     row = await conn.fetchrow(
         """
-        INSERT INTO sessions (session_id, user_id, device_id, expires_at)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO sessions (session_id, user_id, device_id, expires_at,
+                              external_session_id)
+        VALUES ($1, $2, $3, $4, $5)
         ON CONFLICT (session_id) DO UPDATE
            SET expires_at = EXCLUDED.expires_at,
-               device_id = EXCLUDED.device_id
+               device_id = EXCLUDED.device_id,
+               external_session_id = COALESCE(EXCLUDED.external_session_id,
+                                              sessions.external_session_id)
          WHERE sessions.revoked_at IS NULL
            AND sessions.user_id = EXCLUDED.user_id
         RETURNING session_id, user_id, device_id, created_at, expires_at,
@@ -112,6 +117,7 @@ async def ensure_session(
         user_id,
         device_id,
         expires_at,
+        external_session_id,
     )
     if row is not None:
         return _to_session(row)
