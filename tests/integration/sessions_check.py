@@ -159,14 +159,14 @@ async def run() -> None:
                 await sessions.revoke_session(
                     conn, session_id=sid, user_id=чужой.user_id,
                     reason=RevocationReason.LOGOUT_ALL,
-                ) is False,
+                ) is None,
             )
             check(
                 "своя сессия отзывается",
                 await sessions.revoke_session(
                     conn, session_id=sid, user_id=свой.user_id,
                     reason=RevocationReason.LOGOUT_DEVICE,
-                ) is True,
+                ) is not None,
             )
 
             отозванная = await sessions.fetch_session(conn, session_id=sid)
@@ -176,7 +176,7 @@ async def run() -> None:
                 await sessions.revoke_session(
                     conn, session_id=sid, user_id=свой.user_id,
                     reason=RevocationReason.ADMIN_DISABLE,
-                ) is False,
+                ) is None,
             )
             снова = await sessions.fetch_session(conn, session_id=sid)
             check(
@@ -207,8 +207,8 @@ async def run() -> None:
             )
             check(
                 "выход везде закрывает все действующие и возвращает их число",
-                закрыто == 4,
-                f"закрыто {закрыто}, ожидалось 4 (три новых и одна истёкшая)",
+                len(закрыто) == 4,
+                f"закрыто {len(закрыто)}, ожидалось 4 (три новых и одна истёкшая)",
             )
             check(
                 "после выхода везде активных не осталось",
