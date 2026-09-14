@@ -41,33 +41,6 @@ subjects:
     name: messenger-secrets-bootstrap
     namespace: messenger
 ---
-# Тот же джоб кладёт один секрет и в namespace Keycloak: импорт реалма
-# подставляет значение оттуда, а секреты через границу namespace не видны.
-# Права ровно те же - get и create, без update и delete.
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: messenger-secrets-bootstrap
-  namespace: keycloak
-rules:
-  - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["get", "create"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: messenger-secrets-bootstrap
-  namespace: keycloak
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: messenger-secrets-bootstrap
-subjects:
-  - kind: ServiceAccount
-    name: messenger-secrets-bootstrap
-    namespace: messenger
----
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -151,31 +124,3 @@ spec:
                 echo "messenger-centrifugo: создан"
               fi
 
-              # Учётные данные служебной записи API. Нужны для обращений
-              # к административному API Keycloak: повторная отправка письма
-              # о подтверждении, а дальше - выход на всех устройствах
-              # и отключение учётной записи.
-              #
-              # Секрет рождается здесь, а не в Keycloak: значение обязано
-              # быть известно обеим сторонам, и единственный способ обойтись
-              # без ручного копирования - задать его самим. Импорт реалма
-              # подставляет его через placeholders, под API читает
-              # из своего namespace.
-              if have messenger-api-client; then
-                echo "messenger-api-client: уже есть, не трогаю"
-                SECRET=$(kubectl -n messenger get secret messenger-api-client \
-                  -o jsonpath='{.data.client-secret}' | base64 -d)
-              else
-                SECRET=$(rand 32)
-                kubectl -n messenger create secret generic messenger-api-client \
-                  --from-literal=client-secret="$SECRET"
-                echo "messenger-api-client: создан"
-              fi
-
-              if kubectl -n keycloak get secret messenger-api-client >/dev/null 2>&1; then
-                echo "messenger-api-client в keycloak: уже есть, не трогаю"
-              else
-                kubectl -n keycloak create secret generic messenger-api-client \
-                  --from-literal=client-secret="$SECRET"
-                echo "messenger-api-client в keycloak: создан"
-              fi

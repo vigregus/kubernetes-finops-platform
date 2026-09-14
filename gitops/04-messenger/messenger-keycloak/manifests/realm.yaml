@@ -7,11 +7,14 @@
 # в одном пространстве имён с общими политиками паролей и общим брутфорс-
 # счётчиком.
 #
-# ВАЖНО про обновление. KeycloakRealmImport импортирует реалм; уже
-# существующий реалм он не переписывает целиком - оператор запускает Job,
-# и изменения этого файла доходят не так, как доходит Deployment. Проверено
-# в кластере, и потому написано здесь: правку реалма надо проверять
-# запросом к Keycloak, а не фактом `Synced` в Argo CD.
+# ВАЖНО про обновление. Этот файл работает ровно один раз - при создании
+# реалма. Проверено в кластере: при повторном запуске импорта Keycloak
+# пишет `Realm 'messenger' already exists. Import skipped` и не меняет
+# ничего. Ни `Synced` в Argo CD, ни успешный Job об этом не говорят.
+#
+# Поэтому всё, что обязано меняться после создания, живёт в сверке -
+# reconcile.yaml рядом. Правило простое: если настройку когда-нибудь
+# понадобится изменить, ей здесь не место.
 apiVersion: k8s.keycloak.org/v2beta1
 kind: KeycloakRealmImport
 metadata:
@@ -26,16 +29,6 @@ metadata:
     finops.internal/component: identity
 spec:
   keycloakCRName: messenger-idp
-
-  # Секрет служебной записи подставляется из секрета кластера, а не лежит
-  # в git. Значение рождается в джобе messenger-secrets и кладётся сразу
-  # в два namespace: сюда — чтобы попасть в реалм, и в messenger — чтобы
-  # его прочитал под API.
-  placeholders:
-    MESSENGER_API_CLIENT_SECRET:
-      secret:
-        name: messenger-api-client
-        key: client-secret
   realm:
     realm: messenger
     displayName: Messenger
@@ -152,7 +145,6 @@ spec:
         implicitFlowEnabled: false
         directAccessGrantsEnabled: false
         serviceAccountsEnabled: true
-        secret: ${MESSENGER_API_CLIENT_SECRET}
         attributes:
           use.refresh.tokens: "false"
         protocolMappers:

@@ -1,0 +1,172 @@
+# Сверка реалма: всё, что импорт не умеет менять.
+#
+# KeycloakRealmImport работает один раз. Проверено в кластере: при повторном
+# запуске Keycloak пишет `Realm 'messenger' already exists. Import skipped`
+# и не меняет ничего - ни ролей, ни клиентов, ни настроек. Значит, любое
+# изменение после создания реалма нужно применять иначе, и «иначе» лучше
+# иметь заранее, чем в тот вечер, когда понадобится.
+#
+# Джоб идемпотентен и делает ровно две вещи:
+#
+#   1. выдаёт служебной записи API право manage-users - оно нужно для
+#      повторной отправки письма о подтверждении, а дальше для выхода
+#      на всех устройствах и отключения учётной записи;
+#   2. переносит секрет этого клиента в Secret namespace messenger,
+#      откуда его читает под API.
+#
+# Направление переноса важно: секрет выдаёт Keycloak, мы его только
+# забираем. Обратное направление потребовало бы держать одно значение
+# в двух местах и следить, чтобы они не разошлись.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: messenger-realm-reconcile
+  namespace: keycloak
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: messenger-realm-reconcile
+  namespace: keycloak
+rules:
+  # Только чтение учётных данных администратора, которые создал оператор.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: messenger-realm-reconcile
+  namespace: keycloak
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: messenger-realm-reconcile
+subjects:
+  - kind: ServiceAccount
+    name: messenger-realm-reconcile
+    namespace: keycloak
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: messenger-realm-reconcile
+  namespace: messenger
+rules:
+  # Здесь нужен update: секрет клиента может смениться, и сверка обязана
+  # донести новое значение. Delete не нужен ни при каком исходе.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: messenger-realm-reconcile
+  namespace: messenger
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: messenger-realm-reconcile
+subjects:
+  - kind: ServiceAccount
+    name: messenger-realm-reconcile
+    namespace: keycloak
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: messenger-realm-reconcile
+  namespace: keycloak
+  annotations:
+    # Хук синхронизации: поля Job неизменяемы, обычный ресурс упал бы
+    # на втором синке. Волна после импорта реалма.
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "6"
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: messenger-realm-reconcile
+        app.kubernetes.io/component: bootstrap
+        finops.internal/product: messenger
+        finops.internal/team: platform-engineering
+        finops.internal/environment: local
+        finops.internal/component: identity
+    spec:
+      restartPolicy: Never
+      serviceAccountName: messenger-realm-reconcile
+      containers:
+        - name: reconcile
+          image: alpine/k8s:1.34.1
+          resources:
+            requests: {cpu: 10m, memory: 64Mi}
+            limits: {cpu: 200m, memory: 256Mi}
+          env:
+            - name: KEYCLOAK
+              value: http://messenger-idp-service.keycloak.svc.cluster.local:8080
+            - name: REALM
+              value: messenger
+            - name: ADMIN_USER
+              valueFrom:
+                secretKeyRef:
+                  name: messenger-idp-initial-admin
+                  key: username
+            - name: ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: messenger-idp-initial-admin
+                  key: password
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+
+              # Учётные данные уходят в тело POST через файл, а не аргументом
+              # команды: аргументы видны в списке процессов контейнера.
+              printf 'grant_type=password&client_id=admin-cli&username=%s&password=%s' \
+                "$ADMIN_USER" "$ADMIN_PASSWORD" > /tmp/login
+              TOKEN=$(curl -sf -X POST "$KEYCLOAK/realms/master/protocol/openid-connect/token" \
+                -H 'Content-Type: application/x-www-form-urlencoded' \
+                --data-binary @/tmp/login | jq -r .access_token)
+              rm -f /tmp/login
+              [ -n "$TOKEN" ] && [ "$TOKEN" != "null" ] || {
+                echo "не удалось получить токен администратора" >&2; exit 1; }
+              AUTH="Authorization: Bearer $TOKEN"
+
+              CLIENT=$(curl -sf -H "$AUTH" \
+                "$KEYCLOAK/admin/realms/$REALM/clients?clientId=messenger-api" | jq -r '.[0].id')
+              [ -n "$CLIENT" ] && [ "$CLIENT" != "null" ] || {
+                echo "клиента messenger-api нет в реалме $REALM" >&2; exit 1; }
+
+              # --- право служебной записи -----------------------------
+              SA=$(curl -sf -H "$AUTH" \
+                "$KEYCLOAK/admin/realms/$REALM/clients/$CLIENT/service-account-user" | jq -r .id)
+              RM=$(curl -sf -H "$AUTH" \
+                "$KEYCLOAK/admin/realms/$REALM/clients?clientId=realm-management" | jq -r '.[0].id')
+              ROLE=$(curl -sf -H "$AUTH" \
+                "$KEYCLOAK/admin/realms/$REALM/clients/$RM/roles/manage-users")
+
+              # Назначение повторяемо: Keycloak принимает уже выданную роль
+              # без ошибки, поэтому проверять «есть ли» не нужно.
+              echo "[$ROLE]" | curl -sf -X POST -H "$AUTH" -H 'Content-Type: application/json' \
+                --data-binary @- \
+                "$KEYCLOAK/admin/realms/$REALM/users/$SA/role-mappings/clients/$RM" \
+                && echo "manage-users: выдано"
+
+              # --- секрет клиента в namespace приложения ---------------
+              SECRET=$(curl -sf -H "$AUTH" \
+                "$KEYCLOAK/admin/realms/$REALM/clients/$CLIENT/client-secret" | jq -r .value)
+              [ -n "$SECRET" ] && [ "$SECRET" != "null" ] || {
+                echo "у клиента нет секрета" >&2; exit 1; }
+
+              # Значение уходит в kubectl через stdin: в аргументах команды
+              # оно попало бы в список процессов.
+              kubectl -n messenger create secret generic messenger-api-client \
+                --from-literal=client-secret="$SECRET" \
+                --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+              echo "messenger-api-client: перенесён в namespace messenger"
