@@ -1,0 +1,103 @@
+# Коллектор OTel: приёмник трасс от сервисов.
+#
+# Только трассы. Метрики снимаются опросом (vmagent ходит за /metrics),
+# журналы пишутся в stdout и собираются promtail — это записано в контракте
+# телеметрии как модель, а не как предпочтение: и то, и другое переживает
+# недоступность хранилища, а отправка через коллектор — нет.
+#
+# Зачем коллектор вообще, если Tempo и так принимает OTLP: пачки, выборка
+# и единственное место, где меняется получатель. Без него адрес Tempo
+# оказывается зашит в каждый сервис.
+
+mode: deployment
+replicaCount: 1
+
+image:
+  repository: otel/opentelemetry-collector-contrib
+
+# Чарт по умолчанию включает приёмники, которых здесь не будет: jaeger,
+# zipkin, prometheus. Лишний открытый порт — это поверхность, которую
+# никто не собирался обслуживать.
+presets:
+  logsCollection:
+    enabled: false
+  kubernetesAttributes:
+    enabled: true
+
+config:
+  receivers:
+    jaeger: null
+    zipkin: null
+    prometheus: null
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+  processors:
+    # Пачками, а не по одной: экспорт на каждый span сделал бы
+    # наблюдаемость заметной статьёй в задержке запроса.
+    batch:
+      timeout: 5s
+      send_batch_size: 512
+    # Предел, после которого коллектор начинает отбрасывать, а не расти.
+    # Коллектор, съевший память узла, уносит с собой не только трассы.
+    memory_limiter:
+      check_interval: 1s
+      limit_percentage: 80
+      spike_limit_percentage: 25
+
+  exporters:
+    otlp/tempo:
+      endpoint: tempo-local.observability.svc.cluster.local:4317
+      tls:
+        insecure: true
+      # Очередь ограничена и не хранится на диске: потеря телеметрии
+      # допустима, потеря сообщения из-за телеметрии — нет. Переполнение
+      # очереди обязано означать выброшенные трассы, а не задержку
+      # отправителя.
+      sending_queue:
+        enabled: true
+        queue_size: 1000
+
+  service:
+    telemetry:
+      metrics:
+        # Свои метрики коллектор отдаёт на опрос — той же моделью,
+        # что и все остальные.
+        readers:
+          - pull:
+              exporter:
+                prometheus:
+                  host: 0.0.0.0
+                  port: 8888
+    pipelines:
+      traces:
+        receivers: [otlp]
+        processors: [memory_limiter, batch]
+        exporters: [otlp/tempo]
+      # Конвейеры метрик и журналов отключены: они идут другими путями.
+      metrics: null
+      logs: null
+
+ports:
+  jaeger-compact: {enabled: false}
+  jaeger-thrift: {enabled: false}
+  jaeger-grpc: {enabled: false}
+  zipkin: {enabled: false}
+
+podLabels:
+  finops.internal/product: platform
+  finops.internal/team: platform-engineering
+  finops.internal/environment: local
+  finops.internal/component: observability
+
+resources:
+  requests:
+    cpu: 25m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi

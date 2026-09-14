@@ -1,0 +1,32 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: otel-collector
+  namespace: argocd
+  annotations:
+    # Волна 2: вместе с остальной наблюдаемостью и до сервисов, которые
+    # в него шлют. Сервис, стартовавший раньше приёмника, не падает —
+    # экспорт асинхронный, — но первые трассы теряет.
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  project: finops-platform
+  sources:
+    - repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
+      targetRevision: HEAD
+      ref: values
+    - repoURL: https://open-telemetry.github.io/opentelemetry-helm-charts
+      chart: opentelemetry-collector
+      targetRevision: 0.173.1
+      helm:
+        releaseName: otel
+        valueFiles:
+          - $values/gitops/02-infra/otel-collector/values.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: observability
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true
