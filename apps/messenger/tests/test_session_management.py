@@ -55,6 +55,28 @@ def _auth() -> identity.AuthResult:
     )
 
 
+class FakeRealtime:
+    """Записывает разрывы и публикации, отвечая успехом, как настроено."""
+
+    def __init__(self, *, ok: bool = True):
+        self.ok = ok
+        self.disconnected_users: list[str] = []
+        self.disconnected_clients: list[tuple[str, str]] = []
+        self.published: list[tuple[str, dict]] = []
+
+    async def disconnect_user(self, user_id, *, code, reason):
+        self.disconnected_users.append(user_id)
+        return self.ok
+
+    async def disconnect_client(self, user_id, client_id, *, code, reason):
+        self.disconnected_clients.append((user_id, client_id))
+        return self.ok
+
+    async def publish(self, channel, data):
+        self.published.append((channel, data))
+        return self.ok
+
+
 def test_отзыв_ограничен_пользователем_из_токена(monkeypatch):
     async def _authenticate(*args, **kwargs):
         return _auth()
@@ -115,7 +137,10 @@ def test_выход_везде_ограничен_пользователем_и�
 
     async def _revoke_all(conn, **kwargs):
         seen.update(kwargs)
-        return 2
+        return [
+            service.sessions.RevokedSession(session_id=SESSION_ID, realtime_client_id=None),
+            service.sessions.RevokedSession(session_id=OTHER_ID, realtime_client_id=None),
+        ]
 
     monkeypatch.setattr(identity, "authenticate", _authenticate)
     monkeypatch.setattr(service.sessions, "revoke_user_sessions", _revoke_all)
@@ -126,6 +151,121 @@ def test_выход_везде_ограничен_пользователем_и�
     assert result.ok and result.revoked == 2
     assert seen["user_id"] == USER_ID
     assert seen["reason"] is RevocationReason.LOGOUT_ALL
+
+
+def test_выход_на_устройстве_рвёт_только_это_соединение_и_шлёт_событие(monkeypatch):
+    async def _authenticate(*args, **kwargs):
+        return _auth()
+
+    async def _revoke(conn, **kwargs):
+        return service.sessions.RevokedSession(
+            session_id=OTHER_ID, realtime_client_id="client-other"
+        )
+
+    realtime = FakeRealtime()
+    monkeypatch.setattr(identity, "authenticate", _authenticate)
+    monkeypatch.setattr(service.sessions, "revoke_session", _revoke)
+
+    result = asyncio.run(service.revoke_for_token(
+        None, token="token", target=OTHER_ID, keys=None, settings=None,
+        realtime=realtime,
+    ))
+    assert result.ok and result.revoked
+    # Весь user рвать нельзя: только соединение отозванного session_id,
+    # адресуемое парой (user, client).
+    assert realtime.disconnected_clients == [(str(USER_ID), "client-other")]
+    assert realtime.disconnected_users == []
+    assert realtime.published == [
+        (f"user:{USER_ID}", {"type": "session.revoked", "session_id": str(OTHER_ID)})
+    ]
+
+
+def test_выход_на_устройстве_без_client_id_рвётся_только_событием(monkeypatch):
+    async def _authenticate(*args, **kwargs):
+        return _auth()
+
+    async def _revoke(conn, **kwargs):
+        return service.sessions.RevokedSession(
+            session_id=OTHER_ID, realtime_client_id=None
+        )
+
+    realtime = FakeRealtime()
+    monkeypatch.setattr(identity, "authenticate", _authenticate)
+    monkeypatch.setattr(service.sessions, "revoke_session", _revoke)
+
+    result = asyncio.run(service.revoke_for_token(
+        None, token="token", target=OTHER_ID, keys=None, settings=None,
+        realtime=realtime,
+    ))
+    assert result.ok and result.revoked
+    # Соединение не сообщало свой client — рвать нечего, но событие уходит.
+    assert realtime.disconnected_clients == []
+    assert realtime.published == [
+        (f"user:{USER_ID}", {"type": "session.revoked", "session_id": str(OTHER_ID)})
+    ]
+
+
+def test_выход_везде_рвёт_весь_user_и_шлёт_событие_на_каждую(monkeypatch):
+    async def _authenticate(*args, **kwargs):
+        return _auth()
+
+    async def _revoke_all(conn, **kwargs):
+        return [
+            service.sessions.RevokedSession(session_id=SESSION_ID, realtime_client_id="client-a"),
+            service.sessions.RevokedSession(session_id=OTHER_ID, realtime_client_id="client-b"),
+        ]
+
+    realtime = FakeRealtime()
+    monkeypatch.setattr(identity, "authenticate", _authenticate)
+    monkeypatch.setattr(service.sessions, "revoke_user_sessions", _revoke_all)
+
+    result = asyncio.run(service.revoke_all_for_token(
+        None, token="token", keys=None, settings=None, realtime=realtime,
+    ))
+    assert result.ok and result.revoked == 2
+    assert realtime.disconnected_users == [str(USER_ID)]
+    assert realtime.disconnected_clients == []
+    assert realtime.published == [
+        (f"user:{USER_ID}", {"type": "session.revoked", "session_id": str(SESSION_ID)}),
+        (f"user:{USER_ID}", {"type": "session.revoked", "session_id": str(OTHER_ID)}),
+    ]
+
+
+def test_без_realtime_отзыв_проходит_без_разрыва(monkeypatch):
+    async def _authenticate(*args, **kwargs):
+        return _auth()
+
+    async def _revoke(conn, **kwargs):
+        return True
+
+    monkeypatch.setattr(identity, "authenticate", _authenticate)
+    monkeypatch.setattr(service.sessions, "revoke_session", _revoke)
+
+    # realtime не передан вовсе — как при не настроенном Centrifugo.
+    result = asyncio.run(service.revoke_for_token(
+        None, token="token", target=OTHER_ID, keys=None, settings=None,
+    ))
+    assert result.ok and result.revoked
+
+
+def test_недоступный_realtime_не_отменяет_отзыв(monkeypatch):
+    async def _authenticate(*args, **kwargs):
+        return _auth()
+
+    async def _revoke(conn, **kwargs):
+        return service.sessions.RevokedSession(
+            session_id=OTHER_ID, realtime_client_id="client-other"
+        )
+
+    realtime = FakeRealtime(ok=False)
+    monkeypatch.setattr(identity, "authenticate", _authenticate)
+    monkeypatch.setattr(service.sessions, "revoke_session", _revoke)
+
+    result = asyncio.run(service.revoke_for_token(
+        None, token="token", target=OTHER_ID, keys=None, settings=None,
+        realtime=realtime,
+    ))
+    assert result.ok and result.revoked
 
 
 def test_отклонённый_токен_не_меняет_базу_при_выходе_везде(monkeypatch):

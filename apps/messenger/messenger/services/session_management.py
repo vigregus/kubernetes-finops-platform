@@ -13,6 +13,11 @@ from dataclasses import dataclass, field
 import asyncpg
 
 from messenger.adapters import oidc
+from messenger.adapters.centrifugo import (
+    DISCONNECT_CODE_SESSION_REVOKED,
+    REASON_SESSION_REVOKED,
+    CentrifugoClient,
+)
 from messenger.domain.identity import TokenRejection
 from messenger.domain.ids import DeviceId, SessionId
 from messenger.domain.session import RevocationReason, SessionView
@@ -98,6 +103,7 @@ async def revoke_for_token(
     settings: oidc.OidcSettings,
     device_id: DeviceId | None = None,
     user_agent: str | None = None,
+    realtime: CentrifugoClient | None = None,
 ) -> RevokeResult:
     """Отзывает одну сессию, не раскрывая существование чужой.
 
@@ -105,6 +111,11 @@ async def revoke_for_token(
     идемпотентно завершается, но ``revoked`` остаётся ложным. Наружу это
     различие не выходит, иначе UUID превращается в способ перечислять входы
     другого пользователя.
+
+    Отозванное соединение рвётся сразу: `disconnect{user, client}` по
+    `realtime_client_id`, который клиент сообщил после подключения. Весь
+    `user_id` здесь рвать нельзя — человек мог войти с нескольких устройств,
+    и выход на одном не должен закрывать остальные.
     """
     auth = await identity.authenticate(
         conn,
@@ -124,7 +135,7 @@ async def revoke_for_token(
         user_id=auth.user.user_id,
         reason=RevocationReason.LOGOUT_DEVICE,
     )
-    if revoked:
+    if revoked is not None:
         metrics.sessions_revoked(RevocationReason.LOGOUT_DEVICE.value)
         log.info(
             "сессия отозвана пользователем",
@@ -135,7 +146,13 @@ async def revoke_for_token(
                 "current": current,
             },
         )
-    return RevokeResult(revoked=revoked, current=current)
+        await _drop_connections(
+            realtime,
+            user_id=str(auth.user.user_id),
+            revoked=[revoked],
+            disconnect_by_user=False,
+        )
+    return RevokeResult(revoked=revoked is not None, current=current)
 
 
 async def revoke_all_for_token(
@@ -146,13 +163,15 @@ async def revoke_all_for_token(
     settings: oidc.OidcSettings,
     device_id: DeviceId | None = None,
     user_agent: str | None = None,
+    realtime: CentrifugoClient | None = None,
 ) -> RevokeAllResult:
     """Отзывает все действующие сессии владельца токена. Возвращает их число.
 
     Число — не украшение: «выйти везде» обязано породить событие о каждом
     закрытом входе, и сравнить число событий с числом строк — единственный
-    способ заметить, что путь доставки потерял часть. До появления G1-008
-    число фиксируется в журнале и метрике, чтобы этот счёт уже существовал.
+    способ заметить, что путь доставки потерял часть. Все соединения
+    пользователя рвутся сразу (`disconnect{user}`), и в личный канал уходит
+    событие `session.revoked` на каждую отозванную сессию.
     """
     auth = await identity.authenticate(
         conn,
@@ -170,14 +189,70 @@ async def revoke_all_for_token(
     revoked = await sessions.revoke_user_sessions(
         conn, user_id=auth.user.user_id, reason=RevocationReason.LOGOUT_ALL
     )
-    metrics.sessions_revoked(RevocationReason.LOGOUT_ALL.value, revoked)
+    count = len(revoked)
+    metrics.sessions_revoked(RevocationReason.LOGOUT_ALL.value, count)
     log.info(
         "все сессии отозваны",
         extra={
             "event": "sessions_revoked_all",
             "result": "success",
             "reason": RevocationReason.LOGOUT_ALL.value,
-            "revoked": revoked,
+            "revoked": count,
         },
     )
-    return RevokeAllResult(revoked=revoked)
+    if revoked:
+        await _drop_connections(
+            realtime,
+            user_id=str(auth.user.user_id),
+            revoked=revoked,
+            disconnect_by_user=True,
+        )
+    return RevokeAllResult(revoked=count)
+
+
+async def _drop_connections(
+    realtime: CentrifugoClient | None,
+    *,
+    user_id: str,
+    revoked: list[sessions.RevokedSession],
+    disconnect_by_user: bool,
+) -> None:
+    """Best-effort разрыв realtime-соединений и событие `session.revoked`.
+
+    Postgres — источник истины, HTTP уже отрезал отозванную сессию; недоступный
+    Centrifugo не отменяет отзыв, а лишь фиксируется в журнале и метрике.
+    Разрыв и событие считаются по отдельности, поэтому «событие не дошло»
+    видно на дашборде, а не прячется за «соединение не порвалось».
+
+    ``disconnect_by_user`` различает два пути: «выйти везде» рвёт весь
+    `user_id`, «выйти на устройстве» — ровно соединение отозванной сессии
+    по её `realtime_client_id`. Сессия, которая не сообщила идентификатор
+    соединения, рвётся только событием — рвать нечего, и это не ошибка.
+    """
+    if realtime is None:
+        return
+
+    if disconnect_by_user:
+        disconnected = await realtime.disconnect_user(
+            user_id,
+            code=DISCONNECT_CODE_SESSION_REVOKED,
+            reason=REASON_SESSION_REVOKED,
+        )
+        metrics.realtime_disconnected("ok" if disconnected else "failed")
+    else:
+        for rev in revoked:
+            if rev.realtime_client_id is None:
+                continue
+            disconnected = await realtime.disconnect_client(
+                user_id,
+                rev.realtime_client_id,
+                code=DISCONNECT_CODE_SESSION_REVOKED,
+                reason=REASON_SESSION_REVOKED,
+            )
+            metrics.realtime_disconnected("ok" if disconnected else "failed")
+
+    for rev in revoked:
+        published = await realtime.publish(
+            f"user:{user_id}", {"type": "session.revoked", "session_id": str(rev.session_id)}
+        )
+        metrics.realtime_published("ok" if published else "failed")

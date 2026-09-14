@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 
 import asyncpg
 
-from messenger.adapters import keycloak, oidc, ratelimit
+from messenger.adapters import centrifugo, keycloak, oidc, ratelimit
 from messenger.repositories import postgres
 from messenger.services.login import LoginSettings
 from messenger.telemetry import metrics
@@ -98,6 +98,36 @@ def limit_settings_from_env() -> ratelimit.LimitSettings:
     return ratelimit.LimitSettings(url=os.getenv("REDIS_SECURITY_URL", ""))
 
 
+def centrifugo_settings_from_env() -> centrifugo.CentrifugoSettings:
+    """Адрес и ключи Centrifugo. Оба ключа — из секрета, в git их нет.
+
+    Ключ подписи connect-токена и ключ серверного API держит один Secret
+    (`messenger-centrifugo`), но роли у них разные: первый подписывает
+    токен, которым клиент входит в Centrifugo, второй разрешает нашему
+    поду звать `/publish` и `/disconnect`. Перепутать их нельзя.
+    """
+    return centrifugo.CentrifugoSettings(
+        api_url=os.getenv("CENTRIFUGO_API_URL", ""),
+        api_key=os.getenv("CENTRIFUGO_HTTP_API_KEY", ""),
+        token_hmac_secret_key=os.getenv("CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY", ""),
+    )
+
+
+def centrifugo_client_from_env() -> centrifugo.CentrifugoClient | None:
+    """Клиент Centrifugo, либо `None`, если поднимать его не на что.
+
+    Centrifugo — best-effort зависимость: отзыв сессии живёт в Postgres,
+    HTTP уже отрезал отозванную, а разрыв соединений — ускорение доставки,
+    а не условие отзыва. Нет ни URL, ни ключа подписи — значит, подключить
+    и разорвать нечего, и под не должен ни падать, ни выносить это в
+    готовность. `None` просит сервисы пропустить разрыв молча.
+    """
+    settings = centrifugo_settings_from_env()
+    if not settings.api_url or not settings.api_key:
+        return None
+    return centrifugo.CentrifugoClient(settings=settings)
+
+
 @dataclass(frozen=True, slots=True)
 class ReadinessReport:
     """Что ответила каждая зависимость.
@@ -127,6 +157,7 @@ class Runtime:
     login: LoginSettings | None = None
     admin: keycloak.AdminClient | None = None
     limiter: ratelimit.RateLimiter | None = None
+    centrifugo: centrifugo.CentrifugoClient | None = None
 
     def __post_init__(self) -> None:
         if self.keys is None:
@@ -137,6 +168,8 @@ class Runtime:
             self.admin = keycloak.AdminClient(settings=admin_settings_from_env())
         if self.limiter is None:
             self.limiter = ratelimit.RateLimiter(settings=limit_settings_from_env())
+        if self.centrifugo is None:
+            self.centrifugo = centrifugo_client_from_env()
 
     async def start(self) -> None:
         """Пытается открыть пул и прогреть ключи. Неудача — не повод
