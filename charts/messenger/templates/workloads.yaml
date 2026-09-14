@@ -141,6 +141,13 @@ spec:
                 secretKeyRef:
                   name: {{ $.Values.dependencies.centrifugo.secret }}
                   key: CENTRIFUGO_HTTP_API_KEY
+            # Ключ подписи connect-токена. Тот же, что держит Centrifugo
+            # в token_hmac_secret_key, — иначе выданный токен не примется.
+            - name: CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.dependencies.centrifugo.secret }}
+                  key: CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY
             {{- with $svc.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

@@ -13,6 +13,7 @@ from messenger.api.main import app
 from messenger.domain.identity import TokenRejection
 from messenger.domain.ids import DeviceId, SessionId
 from messenger.domain.session import SessionView
+from messenger.services import realtime as realtime_service
 from messenger.services import session_management as session_service
 
 SID = uuid.UUID("71ed2ab8-5d25-493f-a83e-492079035fcc")
@@ -23,6 +24,7 @@ DEVICE = uuid.UUID("c95058ec-cf19-4c3b-813a-c8fd7c0b2679")
 class FakeRuntime:
     keys = None
     oidc_settings = None
+    centrifugo = None
 
     @asynccontextmanager
     async def connection(self):
@@ -157,4 +159,98 @@ def test_выход_везде_при_недоступных_ключах_503(cl
 
     monkeypatch.setattr(session_service, "revoke_all_for_token", _revoke_all)
     r = client.delete("/sessions", headers={"Authorization": "Bearer access-token"})
+    assert r.status_code == 503
+
+
+def test_realtime_токен_требует_bearer(client, monkeypatch):
+    async def _не_вызывать(*args, **kwargs):
+        raise AssertionError("сервис вызван без удостоверения")
+
+    monkeypatch.setattr(realtime_service, "issue_token_for_user", _не_вызывать)
+    assert client.post("/realtime/token").status_code == 401
+
+
+def test_realtime_токен_возвращает_token_и_срок(client, monkeypatch):
+    moment = datetime(2026, 9, 14, tzinfo=UTC)
+
+    async def _issue(*args, **kwargs):
+        assert kwargs["token"] == "access-token"
+        return realtime_service.RealtimeTokenResult(
+            token="connect-token",
+            expires_at=moment,
+        )
+
+    monkeypatch.setattr(realtime_service, "issue_token_for_user", _issue)
+    r = client.post(
+        "/realtime/token", headers={"Authorization": "Bearer access-token"}
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["token"] == "connect-token"
+    assert body["expires_at"] == "2026-09-14T00:00:00+00:00"
+    # Идентификатора соединения в ответе нет: Centrifugo назначает его сам.
+    assert "client_id" not in body
+
+
+def test_realtime_токен_при_недоступных_ключах_503(client, monkeypatch):
+    async def _issue(*args, **kwargs):
+        return realtime_service.RealtimeTokenResult(
+            rejection=TokenRejection.KEYS_UNAVAILABLE
+        )
+
+    monkeypatch.setattr(realtime_service, "issue_token_for_user", _issue)
+    r = client.post(
+        "/realtime/token", headers={"Authorization": "Bearer access-token"}
+    )
+    assert r.status_code == 503
+
+
+def test_привязка_соединения_требует_bearer(client, monkeypatch):
+    async def _не_вызывать(*args, **kwargs):
+        raise AssertionError("сервис вызван без удостоверения")
+
+    monkeypatch.setattr(realtime_service, "register_connection", _не_вызывать)
+    assert client.post("/realtime/connections", json={"client_id": "c1"}).status_code == 401
+
+
+def test_привязка_соединения_передаёт_client_id_и_отдаёт_204(client, monkeypatch):
+    async def _register(*args, **kwargs):
+        assert kwargs["token"] == "access-token"
+        assert kwargs["client_id"] == "c1"
+        return realtime_service.RegisterConnectionResult(registered=True)
+
+    monkeypatch.setattr(realtime_service, "register_connection", _register)
+    r = client.post(
+        "/realtime/connections",
+        json={"client_id": "c1"},
+        headers={"Authorization": "Bearer access-token"},
+    )
+    assert r.status_code == 204
+
+
+def test_привязка_соединения_с_пустым_client_id_это_422(client, monkeypatch):
+    async def _не_вызывать(*args, **kwargs):
+        raise AssertionError("сервис вызван с невалидным телом")
+
+    monkeypatch.setattr(realtime_service, "register_connection", _не_вызывать)
+    r = client.post(
+        "/realtime/connections",
+        json={"client_id": ""},
+        headers={"Authorization": "Bearer access-token"},
+    )
+    assert r.status_code == 422
+
+
+def test_привязка_соединения_при_недоступных_ключах_503(client, monkeypatch):
+    async def _register(*args, **kwargs):
+        return realtime_service.RegisterConnectionResult(
+            rejection=TokenRejection.KEYS_UNAVAILABLE
+        )
+
+    monkeypatch.setattr(realtime_service, "register_connection", _register)
+    r = client.post(
+        "/realtime/connections",
+        json={"client_id": "c1"},
+        headers={"Authorization": "Bearer access-token"},
+    )
     assert r.status_code == 503

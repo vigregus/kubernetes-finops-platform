@@ -24,6 +24,7 @@ from messenger.domain.ids import DeviceId, SessionId
 from messenger.domain.user import capabilities_of
 from messenger.services import identity as identity_service
 from messenger.services import login as login_service
+from messenger.services import realtime as realtime_service
 from messenger.services import runtime as runtime_service
 from messenger.services import session_management as session_service
 from messenger.services import verification as verification_service
@@ -285,6 +286,7 @@ async def revoke_session(
             settings=runtime.oidc_settings,
             device_id=_device_from(None, request),
             user_agent=request.headers.get("user-agent"),
+            realtime=runtime.centrifugo,
         )
     if not result.ok:
         return _auth_failure(result.rejection, response)
@@ -318,6 +320,7 @@ async def revoke_all_sessions(request: Request, response: Response) -> Response 
             settings=runtime.oidc_settings,
             device_id=_device_from(None, request),
             user_agent=request.headers.get("user-agent"),
+            realtime=runtime.centrifugo,
         )
     if not result.ok:
         return _auth_failure(result.rejection, response)
@@ -325,6 +328,82 @@ async def revoke_all_sessions(request: Request, response: Response) -> Response 
     final = Response(status_code=204)
     final.delete_cookie(REFRESH_COOKIE, path=REFRESH_COOKIE_PATH)
     return final
+
+
+# --- realtime ---------------------------------------------------------------
+
+
+class RealtimeConnection(BaseModel):
+    """Тело `POST /realtime/connections`: какой Centrifugo-идентификатор у
+    только что открытого соединения. Значение недоверенное — Centrifugo сам
+    генерирует `client` и отдаёт его клиенту, а клиент сообщает обратно."""
+
+    client_id: str = Field(min_length=1, max_length=128)
+
+
+@app.post("/realtime/token")
+async def issue_realtime_token(request: Request, response: Response) -> dict[str, object]:
+    """Connect-токен на подписку на личный канал.
+
+    Тот же путь, что у клиента: проверенный bearer обменивается на токен
+    Centrifugo с каналом `user:{user_id}`. Идентификатора соединения в ответе
+    нет — Centrifugo v6 назначает его сам и возвращает клиенту при
+    подключении, а тот сообщает его через `POST /realtime/connections`.
+    """
+    token = _bearer_token(request)
+    if token is None:
+        return _auth_failure(None, response)
+
+    runtime = request.app.state.runtime
+    async with runtime.connection() as conn:
+        result = await realtime_service.issue_token_for_user(
+            conn,
+            token=token,
+            keys=runtime.keys,
+            settings=runtime.oidc_settings,
+            realtime=runtime.centrifugo,
+            device_id=_device_from(None, request),
+            user_agent=request.headers.get("user-agent"),
+        )
+    if not result.ok:
+        return _auth_failure(result.rejection, response)
+
+    return {
+        "token": result.token,
+        "expires_at": result.expires_at.isoformat() if result.expires_at else None,
+    }
+
+
+@app.post("/realtime/connections", status_code=204, response_model=None)
+async def register_realtime_connection(
+    body: RealtimeConnection, request: Request, response: Response
+) -> Response | dict[str, str]:
+    """Привязывает открытое соединение Centrifugo к текущей сессии.
+
+    Клиент вызывает это сразу после подключения, передавая `client`, который
+    Centrifugo вернул в ответе на connect. По нему отзыв на устройстве рвёт
+    ровно это соединение. Привязка к уже отозванной сессии не отменяет отзыв
+    и не считается ошибкой — соединение просто остаётся без разрыва.
+    """
+    token = _bearer_token(request)
+    if token is None:
+        return _auth_failure(None, response)
+
+    runtime = request.app.state.runtime
+    async with runtime.connection() as conn:
+        result = await realtime_service.register_connection(
+            conn,
+            token=token,
+            client_id=body.client_id,
+            keys=runtime.keys,
+            settings=runtime.oidc_settings,
+            device_id=_device_from(None, request),
+            user_agent=request.headers.get("user-agent"),
+        )
+    if not result.ok:
+        return _auth_failure(result.rejection, response)
+
+    return Response(status_code=204)
 
 # «Что сейчас запущено» — непрерывный ряд. Из него нельзя строить отметки
 # на графиках: Grafana поставит отметку на каждой точке. Для «когда

@@ -9,12 +9,27 @@
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 
 import asyncpg
 
 from messenger.domain.ids import DeviceId, SessionId, UserId
 from messenger.domain.session import Device, RevocationReason, Session, SessionView
+
+
+@dataclass(frozen=True, slots=True)
+class RevokedSession:
+    """Отозванная сессия и её realtime-соединение, если оно было.
+
+    ``realtime_client_id`` — идентификатор, которым Centrifugo сам пометил
+    соединение. Его знает только клиент после подключения и сообщает через
+    ``POST /realtime/connections``; без него разорвать ровно это соединение
+    нельзя, поэтому ``None`` здесь — законное состояние, а не пропуск.
+    """
+
+    session_id: SessionId
+    realtime_client_id: str | None
 
 
 def _to_device(row: asyncpg.Record) -> Device:
@@ -190,8 +205,8 @@ async def revoke_session(
     session_id: SessionId,
     user_id: UserId,
     reason: RevocationReason,
-) -> bool:
-    """Отзывает одну сессию. `False` — если отзывать было нечего.
+) -> RevokedSession | None:
+    """Отзывает одну сессию. `None` — если отзывать было нечего.
 
     `user_id` стоит в условии, а не проверяется до запроса: проверка
     перед изменением — это два действия, между которыми успевает
@@ -201,6 +216,10 @@ async def revoke_session(
     Повторный отзыв ничего не меняет: `revoked_at` остаётся временем
     первого. Иначе «выйти везде», нажатое дважды, переписывало бы причину
     и время, а аудит потерял бы момент, который расследуют.
+
+    Возвращает и `realtime_client_id`: отозванное соединение обязано
+    рваться немедленно, а идентификатор читается тем же `RETURNING`,
+    которым сессия отзывается, — отдельный запрос дал бы гонку.
     """
     row = await conn.fetchrow(
         """
@@ -209,23 +228,61 @@ async def revoke_session(
          WHERE session_id = $1
            AND user_id = $2
            AND revoked_at IS NULL
-        RETURNING session_id
+        RETURNING session_id, realtime_client_id
         """,
         session_id,
         user_id,
         reason.value,
+    )
+    if row is None:
+        return None
+    return RevokedSession(
+        session_id=SessionId(row["session_id"]),
+        realtime_client_id=row["realtime_client_id"],
+    )
+
+
+async def set_realtime_client_id(
+    conn: asyncpg.Connection,
+    *,
+    session_id: SessionId,
+    user_id: UserId,
+    client_id: str,
+) -> bool:
+    """Привязывает realtime-соединение к действующей и своей сессии.
+
+    `client_id` — значение, которое Centrifugo вернул клиенту в ответе на
+    подключение. Оно недоверенное: привязать его можно только к собственной
+    действующей сессии, иначе подобранным идентификатором соединения
+    оказалось бы то, что чужое. `False` — если сессия уже отозвана или
+    чужая; отзыва это не отменяет, а просто оставляет соединение без
+    возможности принудительного разрыва.
+    """
+    row = await conn.fetchrow(
+        """
+        UPDATE sessions
+           SET realtime_client_id = $3
+         WHERE session_id = $1
+           AND user_id = $2
+           AND revoked_at IS NULL
+        RETURNING session_id
+        """,
+        session_id,
+        user_id,
+        client_id,
     )
     return row is not None
 
 
 async def revoke_user_sessions(
     conn: asyncpg.Connection, *, user_id: UserId, reason: RevocationReason
-) -> int:
-    """Отзывает все действующие сессии пользователя. Возвращает их число.
+) -> list[RevokedSession]:
+    """Отзывает все действующие сессии пользователя и возвращает их список.
 
-    Число — не украшение: «выйти везде» обязано породить событие на каждую
-    закрытую сессию, и сравнить количество событий с количеством строк —
-    единственный способ заметить, что путь доставки потерял часть.
+    Список, а не число: «выйти везде» обязано породить событие и разрыв на
+    каждую закрытую сессию, и сравнить доставленное с тем, что реально было
+    отозвано, можно только зная сами идентификаторы. Число — `len(списка)` —
+    берёт вызывающий.
     """
     rows = await conn.fetch(
         """
@@ -233,9 +290,15 @@ async def revoke_user_sessions(
            SET revoked_at = now(), revoked_reason = $2
          WHERE user_id = $1
            AND revoked_at IS NULL
-        RETURNING session_id
+        RETURNING session_id, realtime_client_id
         """,
         user_id,
         reason.value,
     )
-    return len(rows)
+    return [
+        RevokedSession(
+            session_id=SessionId(row["session_id"]),
+            realtime_client_id=row["realtime_client_id"],
+        )
+        for row in rows
+    ]

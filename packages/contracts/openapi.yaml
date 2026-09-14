@@ -327,7 +327,8 @@ paths:
       description: |
         Сервер выдаёт токен с явным списком разрешённых каналов. Клиент не
         выбирает канал сам — иначе подписка на чужую беседу сводится
-        к знанию её идентификатора.
+        к знанию её идентификатора. Идентификатора соединения в ответе нет:
+        Centrifugo v6 назначает его сам и возвращает клиенту при подключении.
       operationId: issueRealtimeToken
       responses:
         '200':
@@ -341,6 +342,31 @@ paths:
                   token: { type: string }
                   expires_at: { type: string, format: date-time }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/UpstreamUnavailable' }
+
+  /realtime/connections:
+    post:
+      tags: [sessions]
+      summary: Привязать открытое соединение Centrifugo к сессии
+      description: |
+        Клиент сообщает `client`, который Centrifugo вернул в ответе на
+        подключение. По нему отзыв на устройстве рвёт ровно это соединение.
+        Значение недоверенное: привязать его можно только к собственной
+        действующей сессии.
+      operationId: registerRealtimeConnection
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [client_id]
+              properties:
+                client_id: { type: string, minLength: 1, maxLength: 128 }
+      responses:
+        '204': { description: Соединение привязано к сессии }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/UpstreamUnavailable' }
 
   /sessions:
     get:
@@ -412,6 +438,11 @@ components:
   responses:
     Unauthorized:
       description: Токен отсутствует, просрочен или отозван
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    UpstreamUnavailable:
+      description: Зависимость недоступна — повторить позже
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }

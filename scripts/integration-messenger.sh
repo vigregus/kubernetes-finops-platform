@@ -92,6 +92,7 @@ kubectl -n "$NS" run "$POD" --restart=Never \
         {"name":"OIDC_AUDIENCE","value":"messenger-api"},
         {"name":"API_URL","value":"http://api.messenger.svc.cluster.local"},
         {"name":"WEB_ORIGIN","value":"https://app.finops.local"},
+        {"name":"CENTRIFUGO_CLIENT_URL","value":"ws://messenger-centrifugo.messenger.svc.cluster.local:8000/connection/websocket"},
         {"name":"KEYCLOAK_ADMIN","valueFrom":{"secretKeyRef":{"name":"keycloak-admin","key":"username"}}},
         {"name":"KEYCLOAK_ADMIN_PASSWORD","valueFrom":{"secretKeyRef":{"name":"keycloak-admin","key":"password"}}},
         {"name":"DATABASE_USER","valueFrom":{"secretKeyRef":{"name":"messenger-db-app","key":"username"}}},

@@ -142,3 +142,30 @@ VERIFICATION_EMAIL = Counter(
 
 def verification_email(outcome: str) -> None:
     VERIFICATION_EMAIL.labels(service=SERVICE, outcome=outcome).inc()
+
+
+# Разрыв realtime-соединений при отзыве. Считается отдельно от событий:
+# «соединение не порвалось» и «сигнал не дошёл» — разные неисправности,
+# и прятать одну за другой значит ловить отказ Centrifugo по одной метрике,
+# которой всё равно, что именно сломалось.
+REALTIME_DISCONNECTS = Counter(
+    "messenger_realtime_disconnects_total",
+    "Разорванные realtime-соединения по исходу",
+    ["service", "outcome"],
+)
+
+REALTIME_EVENTS = Counter(
+    "messenger_realtime_events_total",
+    "Опубликованные realtime-события по исходу",
+    ["service", "outcome"],
+)
+
+
+def realtime_disconnected(outcome: str, count: int = 1) -> None:
+    if count:
+        REALTIME_DISCONNECTS.labels(service=SERVICE, outcome=outcome).inc(count)
+
+
+def realtime_published(outcome: str, count: int = 1) -> None:
+    if count:
+        REALTIME_EVENTS.labels(service=SERVICE, outcome=outcome).inc(count)
