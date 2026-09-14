@@ -54,11 +54,12 @@ metadata:
   name: messenger-realm-reconcile
   namespace: messenger
 rules:
-  # Здесь нужен update: секрет клиента может смениться, и сверка обязана
-  # донести новое значение. Delete не нужен ни при каком исходе.
+  # patch нужен потому, что `kubectl apply` обновляет именно патчем,
+  # а не update - без него сверка создаёт секрет в первый раз и падает
+  # во второй. Delete не нужен ни при каком исходе.
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get", "create", "update"]
+    verbs: ["get", "create", "update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

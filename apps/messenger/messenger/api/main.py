@@ -19,9 +19,11 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, ge
 from pydantic import BaseModel, Field
 from starlette.requests import Request
 
-from messenger.domain.ids import DeviceId
+from messenger.domain.identity import TokenRejection
+from messenger.domain.ids import DeviceId, SessionId
 from messenger.services import login as login_service
 from messenger.services import runtime as runtime_service
+from messenger.services import session_management as session_service
 from messenger.telemetry import metrics
 from messenger.telemetry.logging import configure
 
@@ -196,6 +198,90 @@ async def auth_refresh(request: Request, response: Response) -> dict[str, object
         response.status_code = 503 if result.upstream_failed else 401
         return {"code": "unauthenticated", "title": "Требуется вход"}
     return _respond(result, response)
+
+
+# --- сессии ----------------------------------------------------------------
+
+
+def _bearer_token(request: Request) -> str | None:
+    scheme, _, token = request.headers.get("authorization", "").partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        return None
+    return token
+
+
+def _auth_failure(rejection: TokenRejection | None, response: Response) -> dict[str, str]:
+    """Одинаковый ответ для всех отказов токена; недоступные ключи — 503."""
+    if rejection is TokenRejection.KEYS_UNAVAILABLE:
+        response.status_code = 503
+        return {"code": "upstream_unavailable", "title": "Временно недоступно"}
+    response.status_code = 401
+    return {"code": "unauthenticated", "title": "Требуется вход"}
+
+
+@app.get("/sessions")
+async def list_sessions(request: Request, response: Response) -> dict[str, object]:
+    """Активные входы пользователя; текущий помечен явно."""
+    token = _bearer_token(request)
+    if token is None:
+        return _auth_failure(None, response)
+
+    runtime = request.app.state.runtime
+    async with runtime.connection() as conn:
+        result = await session_service.list_for_token(
+            conn,
+            token=token,
+            keys=runtime.keys,
+            settings=runtime.oidc_settings,
+            device_id=_device_from(None, request),
+            user_agent=request.headers.get("user-agent"),
+        )
+    if not result.ok:
+        return _auth_failure(result.rejection, response)
+    return {
+        "items": [
+            {
+                "session_id": str(item.session_id),
+                "device_id": str(item.device_id),
+                "user_agent": item.user_agent,
+                "created_at": item.created_at,
+                "last_seen_at": item.last_seen_at,
+                "current": item.current,
+            }
+            for item in result.items
+        ]
+    }
+
+
+@app.delete("/sessions/{session_id}", status_code=204)
+async def revoke_session(
+    session_id: uuid.UUID, request: Request, response: Response
+) -> Response | dict[str, str]:
+    """Закрывает один вход; чужой или уже закрытый не раскрывается."""
+    token = _bearer_token(request)
+    if token is None:
+        return _auth_failure(None, response)
+
+    runtime = request.app.state.runtime
+    async with runtime.connection() as conn:
+        result = await session_service.revoke_for_token(
+            conn,
+            token=token,
+            target=SessionId(session_id),
+            keys=runtime.keys,
+            settings=runtime.oidc_settings,
+            device_id=_device_from(None, request),
+            user_agent=request.headers.get("user-agent"),
+        )
+    if not result.ok:
+        return _auth_failure(result.rejection, response)
+
+    final = Response(status_code=204)
+    if result.current:
+        # Cookie очищается даже при повторном запросе: локальный выход не
+        # должен зависеть от того, успела ли строка уже стать отозванной.
+        final.delete_cookie(REFRESH_COOKIE, path=REFRESH_COOKIE_PATH)
+    return final
 
 # «Что сейчас запущено» — непрерывный ряд. Из него нельзя строить отметки
 # на графиках: Grafana поставит отметку на каждой точке. Для «когда

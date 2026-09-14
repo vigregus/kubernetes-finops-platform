@@ -321,6 +321,7 @@ paths:
                   items:
                     type: array
                     items: { $ref: '#/components/schemas/Session' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
     delete:
       tags: [sessions]
       summary: Выйти на всех устройствах
@@ -330,6 +331,26 @@ paths:
       operationId: revokeAllSessions
       responses:
         '204': { description: Все сессии отозваны }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /sessions/{session_id}:
+    parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    delete:
+      tags: [sessions]
+      summary: Выйти на выбранном устройстве
+      description: |
+        Отзывает ровно одну принадлежащую пользователю сессию. Чужая,
+        отсутствующая и уже отозванная сессии неразличимы и дают `204`:
+        UUID не должен позволять перечислять чужие входы. Если закрывается
+        текущая сессия, сервер также удаляет refresh-cookie.
+      operationId: revokeSession
+      responses:
+        '204': { description: Сессия отозвана или уже не была активной }
+        '401': { $ref: '#/components/responses/Unauthorized' }
 
 components:
   securitySchemes:
