@@ -7,7 +7,11 @@ from datetime import UTC, datetime
 
 import pytest
 
-from messenger.domain.conversation import Conversation, ConversationType
+from messenger.domain.conversation import (
+    Conversation,
+    ConversationType,
+    EnsureConversationResult,
+)
 from messenger.domain.errors import Reason
 from messenger.domain.ids import ConversationId, ConversationSeq, UserId, direct_key
 from messenger.domain.user import User
@@ -126,20 +130,16 @@ def test_первый_запрос_атомарно_создаёт_беседу_
     async def _not_blocked(*args, **kwargs):
         return False
 
-    async def _no_existing(*args, **kwargs):
-        return None
-
-    async def _insert(*args, **kwargs):
+    async def _ensure(*args, **kwargs):
         assert kwargs["direct_key"] == direct_key(ACTOR_ID, OTHER_ID)
-        return expected
+        return EnsureConversationResult(conversation=expected, created=True)
 
     async def _add(*args, **kwargs):
         members.append(kwargs["user_id"])
 
     monkeypatch.setattr(service.users, "fetch_user", _fetch)
     monkeypatch.setattr(service.conversations, "creation_blocked_between", _not_blocked)
-    monkeypatch.setattr(service.conversations, "fetch_direct_conversation", _no_existing)
-    monkeypatch.setattr(service.conversations, "insert_conversation", _insert)
+    monkeypatch.setattr(service.conversations, "ensure_direct_conversation", _ensure)
     monkeypatch.setattr(service.conversations, "add_member", _add)
 
     result = asyncio.run(
@@ -159,16 +159,16 @@ def test_последовательный_повтор_возвращает_су
     async def _not_blocked(*args, **kwargs):
         return False
 
-    async def _existing(*args, **kwargs):
-        return expected
+    async def _ensure(*args, **kwargs):
+        return EnsureConversationResult(conversation=expected, created=False)
 
-    async def _не_вставлять(*args, **kwargs):
-        raise AssertionError("повтор попытался создать дубль")
+    async def _не_добавлять(*args, **kwargs):
+        raise AssertionError("повтор попытался создать членство заново")
 
     monkeypatch.setattr(service.users, "fetch_user", _fetch)
     monkeypatch.setattr(service.conversations, "creation_blocked_between", _not_blocked)
-    monkeypatch.setattr(service.conversations, "fetch_direct_conversation", _existing)
-    monkeypatch.setattr(service.conversations, "insert_conversation", _не_вставлять)
+    monkeypatch.setattr(service.conversations, "ensure_direct_conversation", _ensure)
+    monkeypatch.setattr(service.conversations, "add_member", _не_добавлять)
 
     result = asyncio.run(
         service.create_direct(Connection(), actor=_user(ACTOR_ID), participant_id=OTHER_ID)

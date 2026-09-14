@@ -1,8 +1,7 @@
 """Пользовательские сценарии бесед.
 
-G1-010 закрывает обычное и последовательное повторное создание. Два
-одновременных встречных запроса всё ещё могут столкнуться на уникальном
-индексе — обработка именно этой гонки остаётся изолированной в G1-011.
+G1-011 превращает конфликт двух встречных запросов в один общий результат:
+уникальный индекс выбирает победителя, а проигравший читает его строку.
 """
 from __future__ import annotations
 
@@ -11,7 +10,7 @@ from dataclasses import dataclass, field
 
 import asyncpg
 
-from messenger.domain.conversation import Conversation, ConversationType
+from messenger.domain.conversation import Conversation
 from messenger.domain.errors import Reason
 from messenger.domain.ids import ConversationId, UserId, direct_key
 from messenger.domain.user import Capability, User, can
@@ -55,22 +54,19 @@ async def create_direct(
             return CreateDirectResult(rejection=Reason.BLOCKED)
 
         key = direct_key(actor.user_id, participant.user_id)
-        existing = await conversations.fetch_direct_conversation(
-            conn, direct_key=key
+        ensured = await conversations.ensure_direct_conversation(
+            conn,
+            conversation_id=ConversationId(uuid.uuid4()),
+            direct_key=key,
         )
-        if existing is not None:
+        conversation = ensured.conversation
+        if not ensured.created:
             return CreateDirectResult(
-                conversation=existing,
+                conversation=conversation,
                 participants=(actor, participant),
                 created=False,
             )
 
-        conversation = await conversations.insert_conversation(
-            conn,
-            conversation_id=ConversationId(uuid.uuid4()),
-            type=ConversationType.DIRECT,
-            direct_key=key,
-        )
         await conversations.add_member(
             conn,
             conversation_id=conversation.conversation_id,
