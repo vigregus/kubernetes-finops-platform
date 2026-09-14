@@ -7,6 +7,7 @@ from messenger.domain.conversation import (
     Conversation,
     ConversationMember,
     ConversationType,
+    EnsureConversationResult,
     MemberRole,
 )
 from messenger.domain.ids import ConversationId, ConversationSeq, UserId
@@ -91,6 +92,40 @@ async def fetch_direct_conversation(
         direct_key,
     )
     return _to_conversation(row) if row else None
+
+
+async def ensure_direct_conversation(
+    conn: asyncpg.Connection,
+    *,
+    conversation_id: ConversationId,
+    direct_key: str,
+) -> EnsureConversationResult:
+    """Вставляет беседу пары или возвращает победителя встречной гонки.
+
+    `ON CONFLICT`, а не предварительный SELECT: два процесса могут прочитать
+    отсутствие одновременно. Проигравшая вставка ждёт коммита победителя,
+    затем следующий запрос в READ COMMITTED видит уже готовую строку.
+    """
+    row = await conn.fetchrow(
+        """
+        INSERT INTO conversations (conversation_id, type, direct_key)
+        VALUES ($1, 'direct', $2)
+        ON CONFLICT (direct_key) WHERE direct_key IS NOT NULL DO NOTHING
+        RETURNING conversation_id, type, direct_key, last_seq,
+                  created_at, updated_at
+        """,
+        conversation_id,
+        direct_key,
+    )
+    if row is not None:
+        return EnsureConversationResult(
+            conversation=_to_conversation(row), created=True
+        )
+
+    existing = await fetch_direct_conversation(conn, direct_key=direct_key)
+    if existing is None:
+        raise RuntimeError("беседа исчезла после конфликта уникальности")
+    return EnsureConversationResult(conversation=existing, created=False)
 
 
 async def creation_blocked_between(

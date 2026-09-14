@@ -60,3 +60,11 @@ class ConversationMember:
     @property
     def is_active(self) -> bool:
         return self.left_at is None
+
+
+@dataclass(frozen=True, slots=True)
+class EnsureConversationResult:
+    """Результат конкурентно-безопасного создания direct-беседы."""
+
+    conversation: Conversation
+    created: bool
