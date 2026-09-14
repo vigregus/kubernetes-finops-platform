@@ -39,3 +39,22 @@ app.kubernetes.io/part-of: messenger
 {{ fail (printf "сервис %s: не задан image.digest. Тег подвижен и не годится для выкатки; для временной заглушки задайте image.allowMutableTag=true" .name) }}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Версия сервиса: digest, если он есть, иначе тег.
+
+Раньше здесь был только digest, и при выкатке по тегу версия во всех
+журналах и в метрике становилась "unversioned" — то есть «когда это
+началось» переставало связываться с выкаткой ровно в том окружении,
+где отлаживают. Вскрылось при первом подъёме настоящего образа.
+*/}}
+{{- define "messenger.version" -}}
+{{- $svc := .svc -}}
+{{- if $svc.image.digest -}}
+{{ $svc.image.digest }}
+{{- else if $svc.image.tag -}}
+{{ $svc.image.tag }}
+{{- else -}}
+unversioned
+{{- end -}}
+{{- end -}}

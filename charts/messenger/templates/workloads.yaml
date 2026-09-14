@@ -63,7 +63,7 @@ spec:
             # Версия обязана быть в каждой строке журнала: без неё
             # «когда это началось» не связать с выкаткой.
             - name: SERVICE_VERSION
-              value: {{ $svc.image.digest | default "unversioned" | quote }}
+              value: {{ include "messenger.version" $ctx | quote }}
             - name: LOG_FORMAT
               value: json
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
