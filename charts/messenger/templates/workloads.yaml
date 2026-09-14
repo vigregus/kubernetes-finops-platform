@@ -172,6 +172,33 @@ spec:
     - name: http
       port: 80
       targetPort: http
+---
+# Метрика, которую никто не снимает, не метрика. Первая редакция оставила
+# /metrics на поде и посчитала возможность наблюдаемой - в VictoriaMetrics
+# при этом не было ни одного ряда, и это выяснилось только запросом
+# к хранилищу, а не чтением YAML.
+#
+# Отдельного порта метрик нет намеренно: он потребовал бы второго слушателя
+# и своей политики доступа, а /metrics и так закрыт снаружи - наружу ходит
+# только маршрут шлюза.
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMServiceScrape
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Values.namespace }}
+  labels:
+    {{- include "messenger.labels" $ctx | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "messenger.selectorLabels" $ctx | nindent 6 }}
+  endpoints:
+    - port: http
+      path: /metrics
+      # Реже, чем проба готовности: снимок состояния, а не событие.
+      # Отказ виден по dependency_up на следующем снятии, а мгновенную
+      # реакцию даёт проба, а не метрика.
+      interval: 30s
 {{- end }}
 {{- if gt (int $svc.replicas) 1 }}
 ---

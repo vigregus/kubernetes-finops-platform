@@ -79,9 +79,12 @@ async def create_pool(settings: PoolSettings, *, application_name: str) -> async
         command_timeout=settings.acquire_timeout_seconds,
         # Ноль — обязательное значение при PgBouncer в режиме transaction.
         statement_cache_size=0,
-        # `application_name` виден в pg_stat_activity и в журнале медленных
-        # запросов. Без него все соединения от всех сервисов выглядят
-        # одинаково, и «кто держит блокировку» становится гаданием.
+        # `application_name` помогает ответить на вопрос «кто держит
+        # блокировку». Через PgBouncer в режиме transaction до сервера он
+        # не доходит - проверено запросом к pg_stat_activity, там у этих
+        # соединений имя пустое. Значение остаётся: оно видно в списке
+        # клиентов самого PgBouncer и на прямых соединениях, которыми
+        # ходят миграции и обслуживание.
         server_settings={"application_name": application_name},
     )
 
