@@ -7,10 +7,17 @@ ownership:
 image:
   registry: ghcr.io/vigregus/messenger
   pullPolicy: IfNotPresent
-  # Выкатка по digest. Тег разрешён только здесь и только пока нет кода:
-  # заглушка нужна, чтобы каркас чарта был проверен раньше сервисов,
-  # а не вместе с ними. В stage и prod это значение остаётся false,
-  # и чарт откажется собраться без digest.
+  # Локально образ адресуется тегом, и это не послабление, а следствие.
+  # `repo@sha256:…` — ссылка на манифест в реестре; у образа, собранного
+  # локально и загруженного в minikube, RepoDigests пуст, и kubelet
+  # попытается его скачать. Без своего реестра digest здесь недостижим.
+  #
+  # Взамен тег выведен из содержимого образа (local-<первые 12 знаков Id>):
+  # формально тег, по сути неподвижный — другое содержимое даёт другой тег,
+  # и ссылка снова означает конкретные байты.
+  #
+  # В stage и проде образ проходит через реестр, digest настоящий,
+  # и это значение остаётся false — чарт откажется собраться без digest.
   allowMutableTag: true
 
 telemetry:
@@ -63,15 +70,8 @@ services:
     http:
       port: 8080
     image:
-      repository: registry.k8s.io/e2e-test-images/agnhost
-      tag: "2.47"
-    # Заглушка на время каркаса: отвечает на /livez и /readyz, чтобы
-    # проверить пробы, службу и маршрут до появления кода. Уходит
-    # вместе с первым настоящим образом.
-    command:
-      - /agnhost
-      - netexec
-      - --http-port=8080
+      repository: ghcr.io/vigregus/messenger/api
+      tag: "local-2056d37b9391"
     resources:
       requests: {cpu: 50m, memory: 128Mi}
       limits: {cpu: "1", memory: 512Mi}
