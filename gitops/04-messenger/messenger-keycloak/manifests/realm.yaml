@@ -26,6 +26,16 @@ metadata:
     finops.internal/component: identity
 spec:
   keycloakCRName: messenger-idp
+
+  # Секрет служебной записи подставляется из секрета кластера, а не лежит
+  # в git. Значение рождается в джобе messenger-secrets и кладётся сразу
+  # в два namespace: сюда — чтобы попасть в реалм, и в messenger — чтобы
+  # его прочитал под API.
+  placeholders:
+    MESSENGER_API_CLIENT_SECRET:
+      secret:
+        name: messenger-api-client
+        key: client-secret
   realm:
     realm: messenger
     displayName: Messenger
@@ -142,8 +152,8 @@ spec:
         implicitFlowEnabled: false
         directAccessGrantsEnabled: false
         serviceAccountsEnabled: true
+        secret: ${MESSENGER_API_CLIENT_SECRET}
         attributes:
-          # Секрет клиента выдаёт Keycloak, и в git он не попадает.
           use.refresh.tokens: "false"
         protocolMappers:
           - name: messenger-api-audience
@@ -153,3 +163,17 @@ spec:
               included.client.audience: messenger-api
               access.token.claim: "true"
               id.token.claim: "false"
+
+    users:
+      # Служебная запись ресурсного сервера. Право одно и названо явно:
+      # manage-users нужен для повторной отправки письма о подтверждении,
+      # а дальше — для выхода на всех устройствах и отключения учётной
+      # записи. Шире не берём: служебная запись, умеющая всё, однажды
+      # утечёт вместе со своим секретом, и разница будет ровно в том,
+      # что она умела.
+      - username: service-account-messenger-api
+        enabled: true
+        serviceAccountClientId: messenger-api
+        clientRoles:
+          realm-management:
+            - manage-users
