@@ -15,10 +15,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VALUES="$ROOT/gitops/04-messenger/messenger-services/values.yaml"
 POD="integration-$(date +%s)"
 CM="integration-run"
+ADMIN_SECRET="keycloak-admin"
 
 cleanup() {
     kubectl -n "$NS" delete pod "$POD" --ignore-not-found >/dev/null 2>&1 || true
     kubectl -n "$NS" delete configmap "$CM" --ignore-not-found >/dev/null 2>&1 || true
+    kubectl -n "$NS" delete secret "$ADMIN_SECRET" --ignore-not-found >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -33,13 +35,37 @@ PY
 )"
 echo "  образ: $IMAGE"
 
-args=()
+args=(--from-file="run.sh=$ROOT/tests/integration/run.sh")
 for f in "$ROOT"/tests/integration/*.py; do
     args+=(--from-file="$f")
 done
 
 kubectl -n "$NS" create configmap "$CM" "${args[@]}" \
     --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+
+# Учётные данные администратора Keycloak живут в своём namespace, а секреты
+# через границу namespace не видны. Поэтому на время проверки заводится
+# временная копия, которую снимает тот же trap, что и под.
+#
+# Значения переносятся как есть, в base64, и уходят через stdin: в аргументах
+# команды они были бы видны в списке процессов, а расшифрованные - ещё и
+# в журнале оболочки.
+admin_user="$(kubectl -n keycloak get secret messenger-idp-initial-admin \
+    -o jsonpath='{.data.username}')"
+admin_pass="$(kubectl -n keycloak get secret messenger-idp-initial-admin \
+    -o jsonpath='{.data.password}')"
+
+kubectl apply -f - >/dev/null <<SECRET
+apiVersion: v1
+kind: Secret
+metadata:
+  name: $ADMIN_SECRET
+  namespace: $NS
+type: Opaque
+data:
+  username: $admin_user
+  password: $admin_pass
+SECRET
 
 # Переменные те же, что у сервиса: проверка обязана ходить от роли
 # приложения, а не от суперпользователя. Права у них разные, и отказ
@@ -53,11 +79,18 @@ kubectl -n "$NS" run "$POD" --restart=Never \
       "name": "integration",
       "image": "$IMAGE",
       "imagePullPolicy": "IfNotPresent",
-      "command": ["python", "/checks/users_check.py"],
+      "command": ["sh","/checks/run.sh"],
       "env": [
         {"name":"DATABASE_HOST","value":"messenger-db-pool"},
         {"name":"DATABASE_NAME","value":"messenger"},
         {"name":"SERVICE_NAME","value":"integration"},
+        {"name":"KEYCLOAK_URL","value":"http://messenger-idp-service.keycloak.svc.cluster.local:8080"},
+        {"name":"KEYCLOAK_REALM","value":"messenger"},
+        {"name":"OIDC_ISSUER","value":"https://idp.finops.local/realms/messenger"},
+        {"name":"OIDC_JWKS_URL","value":"http://messenger-idp-service.keycloak.svc.cluster.local:8080/realms/messenger/protocol/openid-connect/certs"},
+        {"name":"OIDC_AUDIENCE","value":"messenger-api"},
+        {"name":"KEYCLOAK_ADMIN","valueFrom":{"secretKeyRef":{"name":"keycloak-admin","key":"username"}}},
+        {"name":"KEYCLOAK_ADMIN_PASSWORD","valueFrom":{"secretKeyRef":{"name":"keycloak-admin","key":"password"}}},
         {"name":"DATABASE_USER","valueFrom":{"secretKeyRef":{"name":"messenger-db-app","key":"username"}}},
         {"name":"DATABASE_PASSWORD","valueFrom":{"secretKeyRef":{"name":"messenger-db-app","key":"password"}}}
       ],

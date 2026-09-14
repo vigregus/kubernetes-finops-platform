@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 
 import asyncpg
 
+from messenger.adapters import oidc
 from messenger.repositories import postgres
 from messenger.telemetry import metrics
 
@@ -47,6 +48,20 @@ def pool_settings_from_env() -> postgres.PoolSettings:
     )
 
 
+def oidc_settings_from_env() -> oidc.OidcSettings:
+    """Издатель, ключи и аудитория из окружения.
+
+    Три значения, а не одно: издатель внешний, ключи внутренние,
+    аудитория — имя ресурсного сервера. Подробности, почему адреса
+    расходятся, — в `adapters/oidc.py`.
+    """
+    return oidc.OidcSettings(
+        issuer=os.getenv("OIDC_ISSUER", ""),
+        jwks_url=os.getenv("OIDC_JWKS_URL", ""),
+        audience=os.getenv("OIDC_AUDIENCE", "messenger-api"),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ReadinessReport:
     """Что ответила каждая зависимость.
@@ -69,12 +84,28 @@ class Runtime:
     """Владелец соединений процесса. Один экземпляр на приложение."""
 
     settings: postgres.PoolSettings
+    oidc_settings: oidc.OidcSettings = field(default_factory=oidc_settings_from_env)
     application_name: str = "messenger-api"
     pool: asyncpg.Pool | None = None
+    keys: oidc.JwksCache | None = None
+
+    def __post_init__(self) -> None:
+        if self.keys is None:
+            self.keys = oidc.JwksCache(settings=self.oidc_settings)
 
     async def start(self) -> None:
-        """Пытается открыть пул. Неудача — не повод не подниматься."""
+        """Пытается открыть пул и прогреть ключи. Неудача — не повод
+        не подниматься.
+
+        Ключи читаются заранее, чтобы первый вошедший не ждал обращения
+        к Keycloak. Но в готовность это не входит: выданные токены
+        проверяются по уже прочитанным ключам, и снимать под с трафика
+        из-за недоступного Keycloak значит устроить отказ там, где его
+        ещё нет.
+        """
         await self.ensure_pool()
+        if self.keys is not None and self.oidc_settings.jwks_url:
+            await self.keys.key_for("прогрев")
 
     async def stop(self) -> None:
         """Закрывает пул, дожидаясь возврата занятых соединений.

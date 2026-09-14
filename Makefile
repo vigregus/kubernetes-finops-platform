@@ -28,6 +28,10 @@ MESSENGER_APPS  := messenger-secrets messenger-postgres messenger-redis \
                    messenger-keycloak messenger-centrifugo messenger-services \
                    messenger-routes
 
+# Та же версия, что в образе (apps/messenger/Dockerfile) и в конвейере.
+PYTHON ?= python3.12
+PYTHON_VERSION = (3, 12)
+
 .PHONY: help bootstrap local-up local-test local-down contracts layers sql unit migrate smoke integration status
 
 help:
@@ -126,7 +130,16 @@ unit: ## Модульные тесты, без базы и сети
 	@# Окружение создаётся здесь, а не документируется как «сначала
 	@# установите pytest»: шаг, который надо помнить, однажды забудут,
 	@# и тесты просто не запустятся.
-	@test -d apps/messenger/.venv || python3 -m venv apps/messenger/.venv
+	@#
+	@# Версия интерпретатора закреплена и совпадает с образом и конвейером.
+	@# Пока здесь стоял `python3`, окружение уехало на 3.14, и установка
+	@# cryptography пошла собираться из исходников: колеса для этой версии
+	@# ещё нет. Локально это выглядело как сломанный Xcode, а на деле было
+	@# расхождение с тем, что поедет в кластер.
+	@command -v $(PYTHON) >/dev/null || { 		echo "нет $(PYTHON) — поставьте его или задайте PYTHON=" >&2; exit 1; }
+	@test -d apps/messenger/.venv || $(PYTHON) -m venv apps/messenger/.venv
+	@# Окружение, созданное другой версией, молча остаётся прежним.
+	@apps/messenger/.venv/bin/python -c 'import sys; sys.exit(0 if sys.version_info[:2] == $(PYTHON_VERSION) else 1)' 2>/dev/null 		|| { echo "  пересоздаю окружение под $(PYTHON)"; rm -rf apps/messenger/.venv; $(PYTHON) -m venv apps/messenger/.venv; }
 	@apps/messenger/.venv/bin/pip install -q \
 		-r apps/messenger/requirements.txt \
 		-r apps/messenger/requirements-dev.txt

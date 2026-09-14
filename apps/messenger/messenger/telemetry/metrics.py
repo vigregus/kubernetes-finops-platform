@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 
-from prometheus_client import Gauge
+from prometheus_client import Counter, Gauge
 
 # Имя берётся из окружения один раз. Передавать его аргументом в каждый вызов
 # значит однажды передать не то — и ряд разъедется с остальными.
@@ -47,3 +47,30 @@ def db_pool(*, in_use: int, idle: int, max_size: int) -> None:
     DB_POOL_CONNECTIONS.labels(service=SERVICE, state="in_use").set(in_use)
     DB_POOL_CONNECTIONS.labels(service=SERVICE, state="idle").set(idle)
     DB_POOL_MAX.labels(service=SERVICE).set(max_size)
+
+
+# Отказы входа. Метка — внутренняя причина, а не код ответа: наружу уходит
+# один и тот же 401, и по нему не отличить ротацию ключей от сломанного
+# обновления токена у клиентов.
+TOKEN_REJECTED = Counter(
+    "messenger_token_rejected_total",
+    "Токены, не прошедшие проверку",
+    ["service", "error_class"],
+)
+
+# Регистрации. Считаются там же, где заводится запись, а не в обработчике
+# входа: профиль заводится и при первом обращении потребителя, и из
+# административной команды.
+USERS_CREATED = Counter(
+    "messenger_users_created_total",
+    "Заведённые учётные записи",
+    ["service"],
+)
+
+
+def token_rejected(error_class: str) -> None:
+    TOKEN_REJECTED.labels(service=SERVICE, error_class=error_class).inc()
+
+
+def user_created() -> None:
+    USERS_CREATED.labels(service=SERVICE).inc()

@@ -40,7 +40,14 @@ dependencies:
   kafka:
     bootstrap: messenger-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092
   keycloak:
-    issuer: http://messenger-idp-service.keycloak.svc.cluster.local:8080/realms/messenger
+    # Внешний адрес: ровно то, что стоит в `iss` выданного токена.
+    # Проверено запросом к discovery - Keycloak отдаёт свой hostname
+    # независимо от того, каким путём пришёл запрос. Внутренний адрес
+    # здесь означал бы, что ни один браузерный токен не проходит проверку.
+    issuer: https://idp.finops.local/realms/messenger
+    # Внутренний адрес: ровно то, что достижимо из пода.
+    jwksUrl: http://messenger-idp-service.keycloak.svc.cluster.local:8080/realms/messenger/protocol/openid-connect/certs
+    audience: messenger-api
   centrifugo:
     apiUrl: http://messenger-centrifugo.messenger.svc.cluster.local:9000/api
     secret: messenger-centrifugo
@@ -71,7 +78,7 @@ services:
       port: 8080
     image:
       repository: ghcr.io/vigregus/messenger-api
-      tag: "local-549cde57ae4b"
+      tag: "local-e1fe484b171c"
     resources:
       requests: {cpu: 50m, memory: 128Mi}
       limits: {cpu: "1", memory: 512Mi}

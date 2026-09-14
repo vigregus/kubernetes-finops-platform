@@ -90,8 +90,19 @@ spec:
               value: {{ $.Values.dependencies.redis.url | quote }}
             - name: KAFKA_BOOTSTRAP
               value: {{ $.Values.dependencies.kafka.bootstrap | quote }}
+            # Издатель и адрес ключей — разные адреса, и это не небрежность.
+            # В токене стоит внешний издатель: Keycloak строит метаданные
+            # от своего hostname, каким бы путём ни пришёл запрос. Ходить
+            # за ключами по этому же адресу изнутри нечем — имя не
+            # резолвится, а сертификат от локального центра.
             - name: OIDC_ISSUER
               value: {{ $.Values.dependencies.keycloak.issuer | quote }}
+            - name: OIDC_JWKS_URL
+              value: {{ $.Values.dependencies.keycloak.jwksUrl | quote }}
+            # Кто здесь ресурсный сервер. Без сверки с `aud` токен любого
+            # другого клиента того же реалма открывает наше API.
+            - name: OIDC_AUDIENCE
+              value: {{ $.Values.dependencies.keycloak.audience | quote }}
             - name: CENTRIFUGO_API_URL
               value: {{ $.Values.dependencies.centrifugo.apiUrl | quote }}
             - name: CENTRIFUGO_HTTP_API_KEY
