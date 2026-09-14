@@ -1,0 +1,155 @@
+# Реалм мессенджера. Пароли, вход, подтверждение адреса и вторая ступень
+# живут здесь; приложение хранит только профиль и связи.
+#
+# Почему отдельный реалм, а не master: в master лежит администрирование
+# самого Keycloak, и общий реалм означал бы, что учётная запись
+# пользователя мессенджера и учётная запись администратора IdP - соседи
+# в одном пространстве имён с общими политиками паролей и общим брутфорс-
+# счётчиком.
+#
+# ВАЖНО про обновление. KeycloakRealmImport импортирует реалм; уже
+# существующий реалм он не переписывает целиком - оператор запускает Job,
+# и изменения этого файла доходят не так, как доходит Deployment. Проверено
+# в кластере, и потому написано здесь: правку реалма надо проверять
+# запросом к Keycloak, а не фактом `Synced` в Argo CD.
+apiVersion: k8s.keycloak.org/v2beta1
+kind: KeycloakRealmImport
+metadata:
+  name: messenger-realm
+  namespace: keycloak
+  labels:
+    app.kubernetes.io/name: messenger-idp
+    app.kubernetes.io/component: identity-provider
+    finops.internal/product: messenger
+    finops.internal/team: platform-engineering
+    finops.internal/environment: local
+    finops.internal/component: identity
+spec:
+  keycloakCRName: messenger-idp
+  realm:
+    realm: messenger
+    displayName: Messenger
+    enabled: true
+
+    # --- вход и регистрация -------------------------------------------
+    # AUTH-001: регистрация и первый вход. AUTH-006: до подтверждения
+    # адреса функции ограничены - за это отвечает verifyEmail.
+    registrationAllowed: true
+    registrationEmailAsUsername: true
+    loginWithEmailAllowed: true
+    # Один живой адрес - одна учётная запись. То же правило, что
+    # у частичного уникального индекса в базе приложения; разойдись
+    # они, и человек заведёт вторую учётную запись на тот же адрес.
+    duplicateEmailsAllowed: false
+    verifyEmail: true
+    resetPasswordAllowed: true
+    editUsernameAllowed: false
+    # «Запомнить меня» продлевает сессию сверх её обычного срока. Для
+    # мессенджера, где сессию можно отозвать везде, это лишняя дверь.
+    rememberMe: false
+    # external: HTTPS обязателен для обращений снаружи частных сетей.
+    # Внутрикластерные обращения идут с адресов подов и остаются
+    # по HTTP - именно так за токенами ходят серверные компоненты.
+    sslRequired: external
+
+    # --- сроки жизни удостоверений ------------------------------------
+    # Токен доступа - минуты (ADR 0005). Этот же срок задаёт окно
+    # отложенного отзыва: доступ пропадает не в момент выхода, а при
+    # следующем обновлении, и вот столько оно длится.
+    accessTokenLifespan: 300
+    # Токен обновления - дни (ADR 0005). Простой дольше семи дней
+    # означает новый вход.
+    ssoSessionIdleTimeout: 604800
+    ssoSessionMaxLifespan: 2592000
+    # Код авторизации живёт до обмена, а не до истечения сессии.
+    accessCodeLifespan: 60
+    # Ссылка подтверждения адреса и сброса пароля. Сутки - это сутки,
+    # в течение которых письмо из чужого почтового ящика ещё работает.
+    actionTokenGeneratedByUserLifespan: 1800
+    # Одноразовый токен обновления: перехваченный старый токен
+    # перестаёт работать после первого же обмена.
+    revokeRefreshToken: true
+    refreshTokenMaxReuse: 0
+
+    # --- защита от перебора -------------------------------------------
+    # ABUSE: перебор пароля - это не «много запросов», а много неудачных
+    # входов в одну учётную запись, и считается он отдельно от лимитов
+    # на запросы.
+    bruteForceProtected: true
+    # Не постоянная блокировка: иначе перебор чужого адреса превращается
+    # в способ заблокировать чужую учётную запись навсегда.
+    permanentLockout: false
+    failureFactor: 10
+    waitIncrementSeconds: 60
+    maxFailureWaitSeconds: 900
+
+    # --- почта ---------------------------------------------------------
+    # Локальный сток, а не провайдер рассылки. Без него подтверждение
+    # адреса упирается во внешнюю почту, и AUTH-006 проверить нечем.
+    smtpServer:
+      host: messenger-mailpit-smtp.messenger.svc.cluster.local
+      port: "1025"
+      from: no-reply@messenger.local
+      fromDisplayName: Messenger
+      ssl: "false"
+      starttls: "false"
+      auth: "false"
+
+    clients:
+      # Браузерный клиент. Публичный и с PKCE: секрет, положенный
+      # в страницу, секретом быть перестаёт, а без PKCE перехваченный
+      # код авторизации обменивается на токен кем угодно.
+      - clientId: messenger-web
+        name: Messenger Web
+        enabled: true
+        publicClient: true
+        protocol: openid-connect
+        standardFlowEnabled: true
+        # Выключено намеренно: обмен логина и пароля на токен в обход
+        # страницы входа обходит и вторую ступень, и защиту от перебора.
+        directAccessGrantsEnabled: false
+        implicitFlowEnabled: false
+        serviceAccountsEnabled: false
+        redirectUris:
+          - https://app.finops.local/*
+        webOrigins:
+          - https://app.finops.local
+        attributes:
+          pkce.code.challenge.method: S256
+          post.logout.redirect.uris: https://app.finops.local/*
+        protocolMappers:
+          # Без этого в токене нет `aud` ресурсного сервера, и API
+          # не может отличить токен, выданный для него, от токена,
+          # выданного любому другому клиенту того же реалма.
+          - name: messenger-api-audience
+            protocol: openid-connect
+            protocolMapper: oidc-audience-mapper
+            config:
+              included.client.audience: messenger-api
+              access.token.claim: "true"
+              id.token.claim: "false"
+
+      # Ресурсный сервер. Токены он проверяет по открытым ключам реалма,
+      # и для этого учётных данных не нужно. Служебная учётная запись
+      # нужна для другого: «выйти везде» и блокировка требуют вызова
+      # административного API Keycloak, а не записи в своей базе.
+      - clientId: messenger-api
+        name: Messenger API
+        enabled: true
+        publicClient: false
+        protocol: openid-connect
+        standardFlowEnabled: false
+        implicitFlowEnabled: false
+        directAccessGrantsEnabled: false
+        serviceAccountsEnabled: true
+        attributes:
+          # Секрет клиента выдаёт Keycloak, и в git он не попадает.
+          use.refresh.tokens: "false"
+        protocolMappers:
+          - name: messenger-api-audience
+            protocol: openid-connect
+            protocolMapper: oidc-audience-mapper
+            config:
+              included.client.audience: messenger-api
+              access.token.claim: "true"
+              id.token.claim: "false"

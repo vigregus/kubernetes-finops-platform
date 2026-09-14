@@ -72,10 +72,20 @@ check "Centrifugo отвечает на /health" \
     kubectl exec -n "$NS" deploy/messenger-centrifugo -- \
     wget -qO- http://localhost:9000/health
 
-# --- Keycloak: OIDC discovery ----------------------------------------------
-check "Keycloak отдаёт OIDC discovery" \
+# --- Keycloak: OIDC discovery реалма мессенджера ---------------------------
+# Реалм messenger, а не master. Проверка master доказывала бы, что Keycloak
+# жив, - и молчала бы о том, что реалма, на которую указывает OIDC_ISSUER
+# приложения, не существует. Ровно так это и было: discovery отдавал 404,
+# а smoke был зелёный.
+check "Keycloak отдаёт OIDC discovery реалма messenger" \
     kubectl exec -n "$NS" deploy/messenger-centrifugo -- \
-    wget -qO- http://messenger-idp-service.keycloak.svc.cluster.local:8080/realms/master/.well-known/openid-configuration
+    wget -qO- http://messenger-idp-service.keycloak.svc.cluster.local:8080/realms/messenger/.well-known/openid-configuration
+
+# Ключи подписи. Discovery отвечает и у реалма без единого активного ключа,
+# а токен в таком реалме проверить нечем.
+check "У реалма есть открытые ключи подписи" \
+    kubectl exec -n "$NS" deploy/messenger-centrifugo -- \
+    sh -c 'wget -qO- http://messenger-idp-service.keycloak.svc.cluster.local:8080/realms/messenger/protocol/openid-connect/certs | grep -q "\"kid\""' 
 
 # --- Почта: SMTP принимает и API отдаёт ------------------------------------
 check "Mailpit принимает письмо по SMTP" \
