@@ -77,6 +77,46 @@ async def fetch_conversation(
     return _to_conversation(row) if row else None
 
 
+async def fetch_direct_conversation(
+    conn: asyncpg.Connection, *, direct_key: str
+) -> Conversation | None:
+    """Беседа по канонической паре участников."""
+    row = await conn.fetchrow(
+        """
+        SELECT conversation_id, type, direct_key, last_seq,
+               created_at, updated_at
+          FROM conversations
+         WHERE direct_key = $1
+        """,
+        direct_key,
+    )
+    return _to_conversation(row) if row else None
+
+
+async def creation_blocked_between(
+    conn: asyncpg.Connection, *, first: UserId, second: UserId
+) -> bool:
+    """Есть ли блокировка в любую сторону.
+
+    Запрет записи симметричен: заблокированный не пишет заблокировавшему,
+    но и заблокировавший не получает односторонний канал преследования.
+    """
+    return bool(
+        await conn.fetchval(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                  FROM blocks
+                 WHERE (blocker_id = $1 AND blocked_id = $2)
+                    OR (blocker_id = $2 AND blocked_id = $1)
+            )
+            """,
+            first,
+            second,
+        )
+    )
+
+
 async def add_member(
     conn: asyncpg.Connection,
     *,
