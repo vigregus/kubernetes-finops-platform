@@ -149,145 +149,171 @@ async def run() -> None:
         token = await admin_token(http)
         user_id = await create_user(http, token, login=login, password=password)
         try:
-            code = await authorization_code(login, password, challenge)
-            check("страница входа выдала код авторизации", code is not None)
-            if code is None:
-                return
+            await _run_checks(http, user_id, login, password, verifier, challenge)
+        finally:
+            await _cleanup(http, token, user_id)
 
-            # --- обмен на нашей стороне ---------------------------------
-            exchanged = await http.post(
-                f"{API}/auth/callback",
-                json={"code": code, "code_verifier": verifier, "redirect_uri": REDIRECT},
+
+async def _pool():
+    return await create_pool(
+        PoolSettings(
+            host=os.getenv("DATABASE_HOST", "messenger-db-pool"),
+            port=int(os.getenv("DATABASE_PORT", "5432")),
+            database=os.getenv("DATABASE_NAME", "messenger"),
+            user=os.getenv("DATABASE_USER", "messenger"),
+            password=os.getenv("DATABASE_PASSWORD", ""),
+            min_size=1,
+            max_size=2,
+        ),
+        application_name="messenger-integration",
+    )
+
+
+async def _cleanup(http: httpx.AsyncClient, token: str, user_id: str) -> None:
+    """Убирает за собой при любом исходе.
+
+    Уборка внутри успешной ветки — это уборка, которой не будет ровно
+    тогда, когда она нужна: первый же отказ оставил профиль в настоящей
+    базе, и нашёлся он не проверкой, а взглядом в таблицу.
+    """
+    pool = await _pool()
+    try:
+        await pool.execute(
+            "DELETE FROM sessions WHERE user_id IN "
+            "(SELECT user_id FROM users WHERE external_id = $1)", user_id
+        )
+        await pool.execute(
+            "DELETE FROM devices WHERE user_id IN "
+            "(SELECT user_id FROM users WHERE external_id = $1)", user_id
+        )
+        await pool.execute("DELETE FROM users WHERE external_id = $1", user_id)
+    finally:
+        await pool.close()
+    await http.delete(
+        f"{KEYCLOAK}/admin/realms/{REALM}/users/{user_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+
+async def _run_checks(http, user_id, login, password, verifier, challenge) -> None:
+        code = await authorization_code(login, password, challenge)
+        check("страница входа выдала код авторизации", code is not None)
+        if code is None:
+            return
+
+        # --- обмен на нашей стороне ---------------------------------
+        exchanged = await http.post(
+            f"{API}/auth/callback",
+            json={"code": code, "code_verifier": verifier, "redirect_uri": REDIRECT},
+            headers={"Origin": ORIGIN, "User-Agent": "checks/1.0"},
+        )
+        check(
+            "код обменян на токены",
+            exchanged.status_code == 200,
+            f"{exchanged.status_code}: {exchanged.text[:200]}",
+        )
+        if exchanged.status_code != 200:
+            return
+
+        body = exchanged.json()
+        check("токен доступа вернулся в теле", bool(body.get("access_token")))
+        refresh = exchanged.cookies.get(COOKIE)
+        check("токен обновления пришёл только в cookie", bool(refresh))
+        установка = exchanged.headers.get("set-cookie", "")
+        check("cookie недоступна скрипту", "HttpOnly" in установка, установка[:120])
+        check(
+            "cookie не уходит на посторонние сайты",
+            "strict" in установка.lower(),
+            установка[:120],
+        )
+        check(
+            "токена обновления нет в теле ответа",
+            refresh is not None and refresh not in exchanged.text,
+        )
+
+        # --- что появилось в нашей базе -----------------------------
+        pool = await _pool()
+        try:
+            профиль = await pool.fetchrow(
+                "SELECT user_id, email, email_verified FROM users WHERE external_id = $1",
+                user_id,
+            )
+            check(
+                "первый вход завёл профиль",
+                профиль is not None and профиль["email"] == login,
+                f"в базе {профиль['email'] if профиль else None!r}",
+            )
+            check(
+                "признак подтверждённого адреса перенесён из токена",
+                профиль is not None and профиль["email_verified"] is True,
+            )
+            сессий = await pool.fetchval(
+                "SELECT count(*) FROM sessions WHERE user_id = $1 AND revoked_at IS NULL",
+                профиль["user_id"],
+            )
+            check("вход отражён сессией", сессий == 1, f"сессий {сессий}")
+            устройств = await pool.fetchval(
+                "SELECT count(*) FROM devices WHERE user_id = $1", профиль["user_id"]
+            )
+            check("устройство заведено", устройств == 1, f"устройств {устройств}")
+
+            # --- перезагрузка вкладки ------------------------------
+            # cookie передаётся явно: путь у неё `/api/v1/auth`, а перед
+            # проверкой нет шлюза, снимающего префикс, — клиент по пути
+            # её просто не приложил бы.
+            обновление = await http.post(
+                f"{API}/auth/refresh",
+                cookies={COOKIE: refresh},
                 headers={"Origin": ORIGIN, "User-Agent": "checks/1.0"},
             )
             check(
-                "код обменян на токены",
-                exchanged.status_code == 200,
-                f"{exchanged.status_code}: {exchanged.text[:200]}",
-            )
-            if exchanged.status_code != 200:
-                return
-
-            body = exchanged.json()
-            check("токен доступа вернулся в теле", bool(body.get("access_token")))
-            refresh = exchanged.cookies.get(COOKIE)
-            check("токен обновления пришёл только в cookie", bool(refresh))
-            установка = exchanged.headers.get("set-cookie", "")
-            check("cookie недоступна скрипту", "HttpOnly" in установка, установка[:120])
-            check(
-                "cookie не уходит на посторонние сайты",
-                "strict" in установка.lower(),
-                установка[:120],
+                "cookie меняется на новый токен доступа",
+                обновление.status_code == 200,
+                f"{обновление.status_code}: {обновление.text[:200]}",
             )
             check(
-                "токена обновления нет в теле ответа",
-                refresh is not None and refresh not in exchanged.text,
-            )
-
-            # --- что появилось в нашей базе -----------------------------
-            pool = await create_pool(
-                PoolSettings(
-                    host=os.getenv("DATABASE_HOST", "messenger-db-pool"),
-                    port=int(os.getenv("DATABASE_PORT", "5432")),
-                    database=os.getenv("DATABASE_NAME", "messenger"),
-                    user=os.getenv("DATABASE_USER", "messenger"),
-                    password=os.getenv("DATABASE_PASSWORD", ""),
-                    min_size=1,
-                    max_size=2,
-                ),
-                application_name="messenger-integration",
-            )
-            try:
-                профиль = await pool.fetchrow(
-                    "SELECT user_id, email, email_verified FROM users WHERE external_id = $1",
-                    user_id,
-                )
-                check(
-                    "первый вход завёл профиль",
-                    профиль is not None and профиль["email"] == login,
-                    f"в базе {профиль['email'] if профиль else None!r}",
-                )
-                check(
-                    "признак подтверждённого адреса перенесён из токена",
-                    профиль is not None and профиль["email_verified"] is True,
-                )
-                сессий = await pool.fetchval(
+                "вторая вкладка не завела вторую сессию",
+                await pool.fetchval(
                     "SELECT count(*) FROM sessions WHERE user_id = $1 AND revoked_at IS NULL",
                     профиль["user_id"],
-                )
-                check("вход отражён сессией", сессий == 1, f"сессий {сессий}")
-                устройств = await pool.fetchval(
-                    "SELECT count(*) FROM devices WHERE user_id = $1", профиль["user_id"]
-                )
-                check("устройство заведено", устройств == 1, f"устройств {устройств}")
-
-                # --- перезагрузка вкладки ------------------------------
-                # cookie передаётся явно: путь у неё `/api/v1/auth`, а перед
-                # проверкой нет шлюза, снимающего префикс, — клиент по пути
-                # её просто не приложил бы.
-                обновление = await http.post(
-                    f"{API}/auth/refresh",
-                    cookies={COOKIE: refresh},
-                    headers={"Origin": ORIGIN, "User-Agent": "checks/1.0"},
-                )
-                check(
-                    "cookie меняется на новый токен доступа",
-                    обновление.status_code == 200,
-                    f"{обновление.status_code}: {обновление.text[:200]}",
-                )
-                check(
-                    "вторая вкладка не завела вторую сессию",
-                    await pool.fetchval(
-                        "SELECT count(*) FROM sessions WHERE user_id = $1 AND revoked_at IS NULL",
-                        профиль["user_id"],
-                    ) == 1,
-                )
-
-                # --- отказы --------------------------------------------
-                повтор = await http.post(
-                    f"{API}/auth/callback",
-                    json={"code": code, "code_verifier": verifier, "redirect_uri": REDIRECT},
-                    headers={"Origin": ORIGIN},
-                )
-                check(
-                    "повторно предъявленный код не работает",
-                    повтор.status_code == 401,
-                    str(повтор.status_code),
-                )
-                чужой = await http.post(
-                    f"{API}/auth/refresh",
-                    cookies={COOKIE: refresh},
-                    headers={"Origin": "https://evil.example"},
-                )
-                check(
-                    "запрос с чужой страницы отклонён",
-                    чужой.status_code == 403,
-                    str(чужой.status_code),
-                )
-                # Значение латиницей: заголовки кодируются в latin-1,
-                # и кириллица в cookie роняет сам запрос, не дойдя до API.
-                мусор = await http.post(
-                    f"{API}/auth/refresh",
-                    cookies={COOKIE: "not-a-token"},
-                    headers={"Origin": ORIGIN},
-                )
-                check(
-                    "негодная cookie не пускает и снимается",
-                    мусор.status_code == 401 and "Max-Age=0" in мусор.headers.get("set-cookie", ""),
-                    f"{мусор.status_code}: {мусор.headers.get('set-cookie', '')[:80]}",
-                )
-            finally:
-                await pool.execute("DELETE FROM sessions WHERE user_id IN "
-                                   "(SELECT user_id FROM users WHERE external_id = $1)", user_id)
-                await pool.execute("DELETE FROM devices WHERE user_id IN "
-                                   "(SELECT user_id FROM users WHERE external_id = $1)", user_id)
-                await pool.execute("DELETE FROM users WHERE external_id = $1", user_id)
-                await pool.close()
-        finally:
-            await http.delete(
-                f"{KEYCLOAK}/admin/realms/{REALM}/users/{user_id}",
-                headers={"Authorization": f"Bearer {token}"},
+                ) == 1,
             )
+
+            # --- отказы --------------------------------------------
+            повтор = await http.post(
+                f"{API}/auth/callback",
+                json={"code": code, "code_verifier": verifier, "redirect_uri": REDIRECT},
+                headers={"Origin": ORIGIN},
+            )
+            check(
+                "повторно предъявленный код не работает",
+                повтор.status_code == 401,
+                str(повтор.status_code),
+            )
+            чужой = await http.post(
+                f"{API}/auth/refresh",
+                cookies={COOKIE: refresh},
+                headers={"Origin": "https://evil.example"},
+            )
+            check(
+                "запрос с чужой страницы отклонён",
+                чужой.status_code == 403,
+                str(чужой.status_code),
+            )
+            # Значение латиницей: заголовки кодируются в latin-1,
+            # и кириллица в cookie роняет сам запрос, не дойдя до API.
+            мусор = await http.post(
+                f"{API}/auth/refresh",
+                cookies={COOKIE: "not-a-token"},
+                headers={"Origin": ORIGIN},
+            )
+            check(
+                "негодная cookie не пускает и снимается",
+                мусор.status_code == 401 and "Max-Age=0" in мусор.headers.get("set-cookie", ""),
+                f"{мусор.status_code}: {мусор.headers.get('set-cookie', '')[:80]}",
+            )
+        finally:
+            await pool.close()
 
 
 def main() -> int:
