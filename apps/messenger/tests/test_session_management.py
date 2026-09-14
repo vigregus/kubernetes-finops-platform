@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 from messenger.domain.identity import Claims, TokenRejection
 from messenger.domain.ids import DeviceId, SessionId, UserId
-from messenger.domain.session import Device, Session
+from messenger.domain.session import Device, RevocationReason, Session
 from messenger.domain.user import User
 from messenger.services import identity
 from messenger.services import session_management as service
@@ -102,6 +102,43 @@ def test_отклонённый_токен_не_меняет_базу(monkeypatc
     monkeypatch.setattr(service.sessions, "revoke_session", _не_вызывать)
     result = asyncio.run(service.revoke_for_token(
         None, token="bad", target=SESSION_ID, keys=None, settings=None
+    ))
+    assert not result.ok
+    assert result.rejection is TokenRejection.BAD_SIGNATURE
+
+
+def test_выход_везде_ограничен_пользователем_из_токена(monkeypatch):
+    async def _authenticate(*args, **kwargs):
+        return _auth()
+
+    seen = {}
+
+    async def _revoke_all(conn, **kwargs):
+        seen.update(kwargs)
+        return 2
+
+    monkeypatch.setattr(identity, "authenticate", _authenticate)
+    monkeypatch.setattr(service.sessions, "revoke_user_sessions", _revoke_all)
+
+    result = asyncio.run(service.revoke_all_for_token(
+        None, token="token", keys=None, settings=None
+    ))
+    assert result.ok and result.revoked == 2
+    assert seen["user_id"] == USER_ID
+    assert seen["reason"] is RevocationReason.LOGOUT_ALL
+
+
+def test_отклонённый_токен_не_меняет_базу_при_выходе_везде(monkeypatch):
+    async def _authenticate(*args, **kwargs):
+        return identity.AuthResult(rejection=TokenRejection.BAD_SIGNATURE)
+
+    async def _не_вызывать(*args, **kwargs):
+        raise AssertionError("репозиторий вызван после отказа токена")
+
+    monkeypatch.setattr(identity, "authenticate", _authenticate)
+    monkeypatch.setattr(service.sessions, "revoke_user_sessions", _не_вызывать)
+    result = asyncio.run(service.revoke_all_for_token(
+        None, token="bad", keys=None, settings=None
     ))
     assert not result.ok
     assert result.rejection is TokenRejection.BAD_SIGNATURE

@@ -265,7 +265,7 @@ async def list_sessions(request: Request, response: Response) -> dict[str, objec
 
 
 @app.delete(
-    "/sessions/{session_id}", status_code=204, response_class=Response, response_model=None
+    "/sessions/{session_id}", status_code=204, response_model=None
 )
 async def revoke_session(
     session_id: uuid.UUID, request: Request, response: Response
@@ -294,6 +294,36 @@ async def revoke_session(
         # Cookie очищается даже при повторном запросе: локальный выход не
         # должен зависеть от того, успела ли строка уже стать отозванной.
         final.delete_cookie(REFRESH_COOKIE, path=REFRESH_COOKIE_PATH)
+    return final
+
+
+@app.delete("/sessions", status_code=204, response_model=None)
+async def revoke_all_sessions(request: Request, response: Response) -> Response | dict[str, str]:
+    """Выход на всех устройствах: отзывает каждый действующий вход.
+
+    Текущая сессия тоже отзывается, поэтому cookie снимается всегда, а не
+    только когда счётчик непуст. Разрыв уже открытых WebSocket — отдельный
+    путь доставки события, G1-008.
+    """
+    token = _bearer_token(request)
+    if token is None:
+        return _auth_failure(None, response)
+
+    runtime = request.app.state.runtime
+    async with runtime.connection() as conn:
+        result = await session_service.revoke_all_for_token(
+            conn,
+            token=token,
+            keys=runtime.keys,
+            settings=runtime.oidc_settings,
+            device_id=_device_from(None, request),
+            user_agent=request.headers.get("user-agent"),
+        )
+    if not result.ok:
+        return _auth_failure(result.rejection, response)
+
+    final = Response(status_code=204)
+    final.delete_cookie(REFRESH_COOKIE, path=REFRESH_COOKIE_PATH)
     return final
 
 # «Что сейчас запущено» — непрерывный ряд. Из него нельзя строить отметки
