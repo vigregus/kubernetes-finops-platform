@@ -127,7 +127,9 @@ unit: ## Модульные тесты, без базы и сети
 	@# установите pytest»: шаг, который надо помнить, однажды забудут,
 	@# и тесты просто не запустятся.
 	@test -d apps/messenger/.venv || python3 -m venv apps/messenger/.venv
-	@apps/messenger/.venv/bin/pip install -q -r apps/messenger/requirements-dev.txt
+	@apps/messenger/.venv/bin/pip install -q \
+		-r apps/messenger/requirements.txt \
+		-r apps/messenger/requirements-dev.txt
 	@cd apps/messenger && .venv/bin/python -m pytest tests -q
 
 migrate: ## Применить миграции к локальной базе

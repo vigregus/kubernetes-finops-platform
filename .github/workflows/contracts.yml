@@ -57,10 +57,13 @@ jobs:
         run: python3 scripts/check-layers.py
       - name: Миграции без запрещённых операторов
         run: python3 scripts/check-migrations.py
-      - name: Линтер
+      - name: Зависимости
         run: |
-          pip install --quiet -r apps/messenger/requirements-dev.txt
-          cd apps/messenger && python3 -m ruff check messenger tests
+          pip install --quiet \
+            -r apps/messenger/requirements.txt \
+            -r apps/messenger/requirements-dev.txt
+      - name: Линтер
+        run: cd apps/messenger && python3 -m ruff check messenger tests
       - name: Модульные тесты
         run: cd apps/messenger && python3 -m pytest tests -q
 
