@@ -264,9 +264,11 @@ async def run() -> None:
                     чужой.status_code == 403,
                     str(чужой.status_code),
                 )
+                # Значение латиницей: заголовки кодируются в latin-1,
+                # и кириллица в cookie роняет сам запрос, не дойдя до API.
                 мусор = await http.post(
                     f"{API}/auth/refresh",
-                    cookies={COOKIE: "не-токен"},
+                    cookies={COOKIE: "not-a-token"},
                     headers={"Origin": ORIGIN},
                 )
                 check(
