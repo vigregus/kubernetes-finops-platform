@@ -26,7 +26,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP="$ROOT/apps/messenger"
 LOCK="$APP/base-image.lock"
 BASE_IMAGE="${BASE_IMAGE:-python:3.12-slim}"
-IMAGE="${IMAGE:-ghcr.io/vigregus/messenger/api}"
+IMAGE="${IMAGE:-ghcr.io/vigregus/messenger-api}"
 
 # --- закрепление базового образа ------------------------------------------
 

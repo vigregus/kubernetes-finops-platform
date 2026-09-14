@@ -1,0 +1,94 @@
+name: Образ мессенджера
+
+# Сборка и публикация в GitHub Container Registry.
+#
+# Отсюда digest становится настоящим: у образа в реестре есть манифест,
+# поэтому `repo@sha256:…` — работающая ссылка, а не суррогат. Локально этого
+# нет и быть не может (см. scripts/build-messenger.sh), поэтому именно здесь
+# DEP-001 выполняется полностью.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/messenger/**'
+      - '.github/workflows/image.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # Право на публикацию пакета. Отдельного секрета не нужно: GITHUB_TOKEN
+  # выдаётся заданию и живёт только пока оно идёт.
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/messenger-api
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Базовый образ закреплён
+        # Сборка от подвижного тега означает, что пересборка из того же
+        # коммита даёт другие байты — и digest перестаёт что-либо значить.
+        id: base
+        run: |
+          LOCK=apps/messenger/base-image.lock
+          test -s "$LOCK" || { echo "нет $LOCK" >&2; exit 1; }
+          DIGEST="$(cat "$LOCK")"
+          case "$DIGEST" in
+            sha256:*) ;;
+            *) echo "в $LOCK не digest: $DIGEST" >&2; exit 1 ;;
+          esac
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+
+      # Две архитектуры. amd64 — то, на чём собирают; arm64 — то, на чём
+      # считается модель затрат: в ней узлы Graviton, и образ под них нужен
+      # раньше, чем узлы. Собрать позже значит один раз обнаружить
+      # «exec format error» на выкатке.
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Сборка и публикация
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: apps/messenger
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            BASE_DIGEST=${{ steps.base.outputs.digest }}
+          # Тег — только идентификатор коммита. `latest` намеренно
+          # отсутствует: подвижный тег в реестре возвращает ровно ту
+          # проблему, ради которой всё это и делается.
+          tags: ${{ env.IMAGE }}:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Digest для выкатки
+        # Это и есть артефакт конвейера: всё дальнейшее ссылается на него,
+        # а не на коммит и не на тег.
+        run: |
+          {
+            echo "### Образ опубликован"
+            echo
+            echo '```'
+            echo "образ:  ${{ env.IMAGE }}"
+            echo "digest: ${{ steps.push.outputs.digest }}"
+            echo '```'
+            echo
+            echo "Выкатка: подставить digest в"
+            echo "\`gitops/04-messenger/messenger-services/values.yaml\`"
+            echo "и выключить \`image.allowMutableTag\`."
+          } >> "$GITHUB_STEP_SUMMARY"
