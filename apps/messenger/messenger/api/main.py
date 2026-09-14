@@ -253,7 +253,9 @@ async def list_sessions(request: Request, response: Response) -> dict[str, objec
     }
 
 
-@app.delete("/sessions/{session_id}", status_code=204)
+@app.delete(
+    "/sessions/{session_id}", status_code=204, response_class=Response, response_model=None
+)
 async def revoke_session(
     session_id: uuid.UUID, request: Request, response: Response
 ) -> Response | dict[str, str]:
