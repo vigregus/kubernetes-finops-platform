@@ -48,6 +48,18 @@ class RevokeResult:
         return self.rejection is None
 
 
+@dataclass(frozen=True, slots=True)
+class RevokeAllResult:
+    """Результат «выйти везде»: число закрытых сессий либо отказ токена."""
+
+    revoked: int = 0
+    rejection: TokenRejection | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.rejection is None
+
+
 async def list_for_token(
     conn: asyncpg.Connection,
     *,
@@ -124,3 +136,48 @@ async def revoke_for_token(
             },
         )
     return RevokeResult(revoked=revoked, current=current)
+
+
+async def revoke_all_for_token(
+    conn: asyncpg.Connection,
+    *,
+    token: str,
+    keys: oidc.JwksCache,
+    settings: oidc.OidcSettings,
+    device_id: DeviceId | None = None,
+    user_agent: str | None = None,
+) -> RevokeAllResult:
+    """Отзывает все действующие сессии владельца токена. Возвращает их число.
+
+    Число — не украшение: «выйти везде» обязано породить событие о каждом
+    закрытом входе, и сравнить число событий с числом строк — единственный
+    способ заметить, что путь доставки потерял часть. До появления G1-008
+    число фиксируется в журнале и метрике, чтобы этот счёт уже существовал.
+    """
+    auth = await identity.authenticate(
+        conn,
+        token=token,
+        keys=keys,
+        settings=settings,
+        device_id=device_id,
+        user_agent=user_agent,
+    )
+    if not auth.ok or auth.user is None or auth.session is None:
+        return RevokeAllResult(
+            rejection=auth.rejection or TokenRejection.MISSING_CLAIM
+        )
+
+    revoked = await sessions.revoke_user_sessions(
+        conn, user_id=auth.user.user_id, reason=RevocationReason.LOGOUT_ALL
+    )
+    metrics.sessions_revoked(RevocationReason.LOGOUT_ALL.value, revoked)
+    log.info(
+        "все сессии отозваны",
+        extra={
+            "event": "sessions_revoked_all",
+            "result": "success",
+            "reason": RevocationReason.LOGOUT_ALL.value,
+            "revoked": revoked,
+        },
+    )
+    return RevokeAllResult(revoked=revoked)

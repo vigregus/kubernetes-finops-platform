@@ -103,6 +103,14 @@ def test_закрытие_другого_устройства_не_снимае�
     assert "set-cookie" not in r.headers
 
 
+def test_выход_с_одного_устройства_требует_bearer(client, monkeypatch):
+    async def _не_вызывать(*args, **kwargs):
+        raise AssertionError("сервис вызван без удостоверения")
+
+    monkeypatch.setattr(session_service, "revoke_for_token", _не_вызывать)
+    assert client.delete(f"/sessions/{SID}").status_code == 401
+
+
 def test_недоступные_ключи_это_503(client, monkeypatch):
     async def _list(*args, **kwargs):
         return session_service.SessionListResult(rejection=TokenRejection.KEYS_UNAVAILABLE)
@@ -121,3 +129,32 @@ def test_не_uuid_не_доходит_до_сервиса(client, monkeypatch):
         "/sessions/not-a-uuid", headers={"Authorization": "Bearer access-token"}
     )
     assert r.status_code == 422
+
+
+def test_выход_везде_требует_bearer(client, monkeypatch):
+    async def _не_вызывать(*args, **kwargs):
+        raise AssertionError("сервис вызван без удостоверения")
+
+    monkeypatch.setattr(session_service, "revoke_all_for_token", _не_вызывать)
+    assert client.delete("/sessions").status_code == 401
+
+
+def test_выход_везде_снимает_cookie_и_отдаёт_204(client, monkeypatch):
+    async def _revoke_all(*args, **kwargs):
+        assert kwargs["token"] == "access-token"
+        return session_service.RevokeAllResult(revoked=2)
+
+    monkeypatch.setattr(session_service, "revoke_all_for_token", _revoke_all)
+    r = client.delete("/sessions", headers={"Authorization": "Bearer access-token"})
+    assert r.status_code == 204
+    assert "Max-Age=0" in r.headers["set-cookie"]
+    assert f"Path={main.REFRESH_COOKIE_PATH}" in r.headers["set-cookie"]
+
+
+def test_выход_везде_при_недоступных_ключах_503(client, monkeypatch):
+    async def _revoke_all(*args, **kwargs):
+        return session_service.RevokeAllResult(rejection=TokenRejection.KEYS_UNAVAILABLE)
+
+    monkeypatch.setattr(session_service, "revoke_all_for_token", _revoke_all)
+    r = client.delete("/sessions", headers={"Authorization": "Bearer access-token"})
+    assert r.status_code == 503
