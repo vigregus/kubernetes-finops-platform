@@ -168,6 +168,14 @@ async def auth_callback(
     if not result.ok:
         response.status_code = 503 if result.upstream_failed else 401
         return {"code": "unauthenticated", "title": "Требуется вход"}
+    if result.user_created and result.user is not None and not result.user.email_verified:
+        # При verifyEmail=false Keycloak выдаёт токен неподтверждённому
+        # пользователю, чтобы приложение могло дать ограниченный доступ.
+        # Первое письмо отправляется ровно при создании нашего профиля;
+        # неудача почты не отменяет вход — для повтора есть отдельная точка.
+        await verification_service.send_initial_verification(
+            user=result.user, admin=runtime.admin
+        )
     return _respond(result, response)
 
 

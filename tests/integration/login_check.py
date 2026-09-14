@@ -72,7 +72,14 @@ async def admin_token(http: httpx.AsyncClient) -> str:
     return r.json()["access_token"]
 
 
-async def create_user(http: httpx.AsyncClient, token: str, *, login: str, password: str) -> str:
+async def create_user(
+    http: httpx.AsyncClient,
+    token: str,
+    *,
+    login: str,
+    password: str,
+    email_verified: bool = True,
+) -> str:
     """Заводит учётную запись с подтверждённым адресом.
 
     Подтверждённым намеренно: реалм требует подтверждения, и без него
@@ -86,7 +93,7 @@ async def create_user(http: httpx.AsyncClient, token: str, *, login: str, passwo
         json={
             "username": login,
             "email": login,
-            "emailVerified": True,
+            "emailVerified": email_verified,
             "enabled": True,
             "firstName": "Проверка",
             "lastName": "Входа",

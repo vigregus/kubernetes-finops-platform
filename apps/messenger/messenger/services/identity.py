@@ -41,6 +41,10 @@ class AuthResult:
     session: Session | None = None
     device: Device | None = None
     rejection: TokenRejection | None = None
+    # Нужен вызывающему для одноразовых действий первого входа — например,
+    # отправить начальное письмо подтверждения ровно один раз, а не на
+    # каждой перезагрузке страницы.
+    user_created: bool = False
 
     @property
     def ok(self) -> bool:
@@ -110,7 +114,7 @@ async def authenticate(
     if claims.session_state is None:
         # Токен без `sid` — служебная учётная запись: у неё нет ни входа,
         # ни устройства, и заводить их нечего.
-        return AuthResult(user=user, claims=claims)
+        return AuthResult(user=user, claims=claims, user_created=result.created)
 
     # `sid` — непрозрачная строка, а не UUID; отображение живёт в домене.
     session_id = session_id_from_external(claims.session_state)
@@ -142,7 +146,13 @@ async def authenticate(
         expires_at=moment + SESSION_IDLE,
         external_session_id=claims.session_state,
     )
-    return AuthResult(user=user, claims=claims, session=session, device=device)
+    return AuthResult(
+        user=user,
+        claims=claims,
+        session=session,
+        device=device,
+        user_created=result.created,
+    )
 
 
 async def _device_for(

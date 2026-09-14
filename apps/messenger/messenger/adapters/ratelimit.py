@@ -95,12 +95,22 @@ class RateLimiter:
         """
         try:
             client = self.client()
-            used = await client.incr(key)
-            if used == 1:
-                await client.expire(key, window_seconds)
-            if used <= limit:
+            # INCR и EXPIRE одним скриптом: между двумя командами процесс
+            # мог умереть, оставив ключ без срока и вечную блокировку.
+            used, ttl = await client.eval(
+                """
+                local used = redis.call('INCR', KEYS[1])
+                if used == 1 then
+                    redis.call('EXPIRE', KEYS[1], ARGV[1])
+                end
+                return {used, redis.call('TTL', KEYS[1])}
+                """,
+                1,
+                key,
+                window_seconds,
+            )
+            if int(used) <= limit:
                 return LimitDecision(allowed=True)
-            ttl = await client.ttl(key)
             wait = int(ttl) if ttl and ttl > 0 else window_seconds
             return LimitDecision(allowed=False, retry_after_seconds=max(wait, 1))
         except (RedisError, OSError) as exc:

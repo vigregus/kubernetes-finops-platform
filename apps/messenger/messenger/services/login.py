@@ -43,6 +43,7 @@ class LoginResult:
     user: User | None = None
     session: Session | None = None
     device_id: DeviceId | None = None
+    user_created: bool = False
     # Внутренняя причина: в журнал и в метку `error_class`, не в ответ.
     error_class: str | None = None
     # Отличает «клиент не прав» от «мы не смогли»: 401 против 503.
@@ -172,4 +173,5 @@ async def _finish(
         user=auth.user,
         session=auth.session,
         device_id=auth.device.device_id if auth.device else None,
+        user_created=auth.user_created,
     )

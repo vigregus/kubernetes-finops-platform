@@ -139,6 +139,21 @@ spec:
                 echo "не удалось получить токен администратора" >&2; exit 1; }
               AUTH="Authorization: Bearer $TOKEN"
 
+              # Неподтверждённый пользователь должен получить access-токен
+              # с email_verified=false и попасть в приложение с урезанными
+              # возможностями. verifyEmail=true превращает подтверждение в
+              # required action до выдачи кода и делает наш endpoint повтора
+              # письма недостижимым. Берём полное представление, меняем одно
+              # поле и возвращаем целиком: частичный PUT у Keycloak способен
+              # сбросить неуказанные булевы настройки.
+              curl -sf -H "$AUTH" \
+                "$KEYCLOAK/admin/realms/$REALM" > /tmp/realm.json
+              jq '.verifyEmail = false' /tmp/realm.json > /tmp/realm-patched.json
+              curl -sf -X PUT -H "$AUTH" -H 'Content-Type: application/json' \
+                --data-binary @/tmp/realm-patched.json \
+                "$KEYCLOAK/admin/realms/$REALM"
+              rm -f /tmp/realm.json /tmp/realm-patched.json
+
               CLIENT=$(curl -sf -H "$AUTH" \
                 "$KEYCLOAK/admin/realms/$REALM/clients?clientId=messenger-api" | jq -r '.[0].id')
               [ -n "$CLIENT" ] && [ "$CLIENT" != "null" ] || {

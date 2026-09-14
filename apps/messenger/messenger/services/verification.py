@@ -39,6 +39,30 @@ class ResendResult:
     degraded: bool = False
 
 
+async def send_initial_verification(
+    *, user: User, admin: keycloak.AdminClient
+) -> bool:
+    """Отправляет первое письмо после создания локального профиля.
+
+    Первый вход определяется результатом атомарного ``ensure_user``, поэтому
+    перезагрузка вкладки письмо не повторяет. Лимит повторов начинается
+    отдельно: регистрационное письмо не должно съедать одну из трёх попыток
+    человека нажать «отправить ещё раз».
+    """
+    if user.email_verified:
+        return True
+    sent = await admin.send_verify_email(external_user_id=user.external_id)
+    metrics.verification_email("initial_sent" if sent else "initial_failed")
+    log.info(
+        "первое письмо о подтверждении обработано",
+        extra={
+            "event": "verify_email_initial",
+            "result": "success" if sent else "failed",
+        },
+    )
+    return sent
+
+
 async def resend_verification(
     *,
     user: User,
