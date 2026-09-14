@@ -25,6 +25,7 @@ import jwt
 from jwt import PyJWK
 
 from messenger.domain.identity import Claims, TokenCheck, TokenRejection
+from messenger.telemetry import metrics
 
 # Единственный допустимый алгоритм подписи. Список, а не строка: при
 # ротации на другой алгоритм здесь окажутся оба, и это будет видно.
@@ -138,6 +139,7 @@ class JwksCache:
         if keys:
             self._keys = keys
             self._fetched_at = now
+            metrics.oidc_keys(len(keys))
 
 
 async def verify_access_token(token: str, *, keys: JwksCache, settings: OidcSettings) -> TokenCheck:

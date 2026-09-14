@@ -74,3 +74,18 @@ def token_rejected(error_class: str) -> None:
 
 def user_created() -> None:
     USERS_CREATED.labels(service=SERVICE).inc()
+
+
+# Сколько ключей подписи сейчас в памяти. Ноль означает, что проверить
+# токен нечем, и узнать об этом надо до того, как это заметит первый
+# вошедший: прогрев при старте намеренно молчалив - недоступный Keycloak
+# не повод не подниматься, - и без этой метрики он остаётся невидимым.
+OIDC_KEYS = Gauge(
+    "messenger_oidc_signing_keys",
+    "Ключи подписи реалма, доступные процессу",
+    ["service"],
+)
+
+
+def oidc_keys(count: int) -> None:
+    OIDC_KEYS.labels(service=SERVICE).set(count)
