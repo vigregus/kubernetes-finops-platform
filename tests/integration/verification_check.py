@@ -14,7 +14,7 @@ import re
 import secrets
 import sys
 import uuid
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 import redis.asyncio as aioredis
@@ -111,6 +111,64 @@ def internal_link(external: str) -> str:
     return f"{KEYCLOAK}{parsed.path}" + (f"?{parsed.query}" if parsed.query else "")
 
 
+async def confirm_email(link: str, login: str, password: str) -> httpx.Response:
+    """Проходит одноразовую ссылку и повторный вход, запрошенный Keycloak."""
+    async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as browser:
+        response = await browser.get(internal_link(link))
+
+        for _ in range(8):
+            if response.status_code in (301, 302, 303, 307, 308):
+                location = response.headers.get("location")
+                if not location:
+                    return response
+                target = urljoin(str(response.url), html.unescape(location))
+                parsed = urlparse(target)
+                # Переходим только внутри Keycloak. Возврат в веб-клиент здесь
+                # означает, что серверная часть действия уже закончена.
+                if parsed.path.startswith(f"/realms/{REALM}/"):
+                    response = await browser.get(internal_link(target))
+                    continue
+                return response
+
+            form = re.search(r'<form[^>]+action="([^"]+)"', response.text)
+            if form:
+                action = internal_link(html.unescape(form.group(1)))
+                response = await browser.post(
+                    action,
+                    data={"username": login, "password": password},
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                )
+                continue
+
+            # После повторного входа Keycloak отдельно просит подтвердить
+            # выполнение действия кнопкой «Click here to proceed».
+            proceed = next(
+                (
+                    href
+                    for href, label in re.findall(
+                        r'<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
+                        response.text,
+                        flags=re.S | re.I,
+                    )
+                    if "proceed" in page_text(label).lower()
+                ),
+                None,
+            )
+            if proceed:
+                response = await browser.get(internal_link(html.unescape(proceed)))
+                continue
+            return response
+
+        return response
+
+
+def page_text(markup: str) -> str:
+    """Короткая диагностика страницы без action-token из ссылок."""
+    markup = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", markup, flags=re.S | re.I)
+    without_links = re.sub(r'href="[^"]+"', 'href="…"', markup)
+    return " ".join(re.sub(r"<[^>]+>", " ", without_links).split())[:500]
+
+
 async def run() -> None:
     login = f"verify-{uuid.uuid4().hex[:12]}@example.org"
     password = secrets.token_urlsafe(24)
@@ -179,11 +237,11 @@ async def run() -> None:
             check("в письме есть одноразовая ссылка Keycloak", link is not None)
             if link is None:
                 return
-            followed = await http.get(internal_link(link))
+            followed = await confirm_email(link, login, password)
             check(
-                "ссылка подтверждения принята",
+                "ссылка подтверждения и повторный вход обработаны Keycloak",
                 followed.status_code in (200, 302, 303),
-                f"статус {followed.status_code}",
+                f"{followed.status_code}: {followed.text[:180]}",
             )
 
             user_response = await http.get(
@@ -194,6 +252,7 @@ async def run() -> None:
                 "Keycloak отметил адрес подтверждённым",
                 user_response.status_code == 200
                 and user_response.json().get("emailVerified") is True,
+                f"страница: {page_text(followed.text)!r}; пользователь: "
                 f"{user_response.status_code}: {user_response.text[:160]}",
             )
 
@@ -233,6 +292,10 @@ async def run() -> None:
                 await pool.close()
             check("локальный профиль обновлён из нового токена", stored is True)
         finally:
+            if not message_ids:
+                message_ids = [
+                    message["ID"] for message in await messages_for(http, login)
+                ]
             if local_user_id:
                 redis = aioredis.from_url(REDIS)
                 try:
