@@ -89,6 +89,8 @@ kubectl -n "$NS" run "$POD" --restart=Never \
         {"name":"OIDC_ISSUER","value":"https://idp.finops.local/realms/messenger"},
         {"name":"OIDC_JWKS_URL","value":"http://messenger-idp-service.keycloak.svc.cluster.local:8080/realms/messenger/protocol/openid-connect/certs"},
         {"name":"OIDC_AUDIENCE","value":"messenger-api"},
+        {"name":"API_URL","value":"http://api.messenger.svc.cluster.local"},
+        {"name":"WEB_ORIGIN","value":"https://app.finops.local"},
         {"name":"KEYCLOAK_ADMIN","valueFrom":{"secretKeyRef":{"name":"keycloak-admin","key":"username"}}},
         {"name":"KEYCLOAK_ADMIN_PASSWORD","valueFrom":{"secretKeyRef":{"name":"keycloak-admin","key":"password"}}},
         {"name":"DATABASE_USER","valueFrom":{"secretKeyRef":{"name":"messenger-db-app","key":"username"}}},

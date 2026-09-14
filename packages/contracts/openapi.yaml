@@ -18,12 +18,59 @@ security:
   - bearerAuth: []
 
 tags:
+  - name: auth
   - name: conversations
   - name: messages
   - name: attachments
   - name: sessions
 
 paths:
+  /auth/callback:
+    post:
+      tags: [auth]
+      summary: Обмен кода авторизации на токены
+      description: |
+        Обмен делает сервер, а не браузер. Токен обновления уходит в cookie
+        `HttpOnly`, то есть недоступен скрипту на странице: межсайтовый
+        скрипт остаётся опасным, пока вкладка открыта, но не может унести
+        удостоверение наружу (ADR 0005).
+
+        Точка не аутентифицирована и потому ограничена по частоте: она
+        становится целью перебора.
+      operationId: exchangeAuthorizationCode
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AuthorizationCode' }
+      responses:
+        '200':
+          description: Вход выполнен, токен обновления установлен в cookie
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AccessToken' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/refresh:
+    post:
+      tags: [auth]
+      summary: Новый токен доступа по cookie
+      description: |
+        Токен доступа живёт в памяти вкладки и исчезает при перезагрузке,
+        поэтому клиент при старте обменивает cookie на новый. Несколько
+        вкладок обменивают каждая свой, и одновременные запросы - норма,
+        а не признак подбора.
+      operationId: refreshAccessToken
+      security: []
+      responses:
+        '200':
+          description: Выдан новый токен доступа
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AccessToken' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
   /conversations:
     get:
       tags: [conversations]
@@ -329,6 +376,46 @@ components:
           schema: { $ref: '#/components/schemas/Problem' }
 
   schemas:
+    AuthorizationCode:
+      type: object
+      required: [code, code_verifier, redirect_uri]
+      properties:
+        code:
+          type: string
+          description: Код авторизации, полученный браузером от Keycloak.
+        code_verifier:
+          type: string
+          description: |
+            Секрет PKCE, который браузер сгенерировал перед началом входа.
+            Без него перехваченный код обменивается на токен кем угодно.
+        redirect_uri:
+          type: string
+          format: uri
+          description: Тот же адрес, что был указан при выдаче кода.
+        device_id:
+          type: string
+          format: uuid
+          description: |
+            Устройство, с которого входят. Необязателен: если его нет
+            или он занят другим человеком, сервер выдаёт новый.
+
+    AccessToken:
+      type: object
+      required: [access_token, expires_in]
+      properties:
+        access_token:
+          type: string
+          description: |
+            Хранится только в памяти вкладки. `localStorage` для
+            удостоверений не используется никогда (ADR 0005).
+        expires_in:
+          type: integer
+          description: Секунды до истечения.
+        device_id:
+          type: string
+          format: uuid
+          description: Устройство, к которому привязан этот вход.
+
     Problem:
       description: RFC 9457. Один формат ошибки на весь API, а не свой на каждый метод.
       type: object

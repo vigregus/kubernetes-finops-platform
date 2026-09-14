@@ -21,8 +21,9 @@ from dataclasses import dataclass, field
 
 import asyncpg
 
-from messenger.adapters import oidc
+from messenger.adapters import keycloak, oidc
 from messenger.repositories import postgres
+from messenger.services.login import LoginSettings
 from messenger.telemetry import metrics
 
 log = logging.getLogger(__name__)
@@ -62,6 +63,22 @@ def oidc_settings_from_env() -> oidc.OidcSettings:
     )
 
 
+def login_settings_from_env(oidc_settings: oidc.OidcSettings) -> LoginSettings:
+    """Настройки входа. Адрес обмена внутренний, как и адрес ключей.
+
+    Клиент — браузерный и публичный: обмен делает сервер, но от имени
+    того же клиента, которому выдан код. Секрета у него нет и быть
+    не может — он живёт в странице.
+    """
+    return LoginSettings(
+        tokens=keycloak.TokenSettings(
+            token_url=os.getenv("OIDC_TOKEN_URL", ""),
+            client_id=os.getenv("OIDC_CLIENT_ID", "messenger-web"),
+        ),
+        oidc=oidc_settings,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ReadinessReport:
     """Что ответила каждая зависимость.
@@ -88,10 +105,13 @@ class Runtime:
     application_name: str = "messenger-api"
     pool: asyncpg.Pool | None = None
     keys: oidc.JwksCache | None = None
+    login: LoginSettings | None = None
 
     def __post_init__(self) -> None:
         if self.keys is None:
             self.keys = oidc.JwksCache(settings=self.oidc_settings)
+        if self.login is None:
+            self.login = login_settings_from_env(self.oidc_settings)
 
     async def start(self) -> None:
         """Пытается открыть пул и прогреть ключи. Неудача — не повод

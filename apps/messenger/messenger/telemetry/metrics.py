@@ -103,3 +103,27 @@ SESSIONS_REVOKED = Counter(
 def sessions_revoked(reason: str, count: int = 1) -> None:
     if count:
         SESSIONS_REVOKED.labels(service=SERVICE, reason=reason).inc(count)
+
+
+# Входы и отказы входа. Операция разделена: первый вход и обновление
+# токена ломаются по разным причинам, и в одном ряду всплеск одного
+# прячет провал другого.
+LOGINS = Counter(
+    "messenger_logins_total",
+    "Успешные обмены у Keycloak",
+    ["service", "operation"],
+)
+
+LOGIN_FAILURES = Counter(
+    "messenger_login_failures_total",
+    "Неудачные обмены у Keycloak",
+    ["service", "operation", "error_class"],
+)
+
+
+def login_succeeded(operation: str) -> None:
+    LOGINS.labels(service=SERVICE, operation=operation).inc()
+
+
+def login_failed(operation: str, error_class: str) -> None:
+    LOGIN_FAILURES.labels(service=SERVICE, operation=operation, error_class=error_class).inc()

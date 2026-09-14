@@ -103,6 +103,20 @@ spec:
             # другого клиента того же реалма открывает наше API.
             - name: OIDC_AUDIENCE
               value: {{ $.Values.dependencies.keycloak.audience | quote }}
+            # Обмен кода на токены делает сервер, а не браузер: только так
+            # токен обновления попадает в cookie HttpOnly (ADR 0005).
+            # Клиент тот же, что у страницы, — публичный, с PKCE.
+            - name: OIDC_TOKEN_URL
+              value: {{ $.Values.dependencies.keycloak.tokenUrl | quote }}
+            - name: OIDC_CLIENT_ID
+              value: {{ $.Values.dependencies.keycloak.clientId | quote }}
+            # Источник, которому позволено обращаться к точкам обмена,
+            # и путь cookie. Cookie браузер прикладывает сам, поэтому
+            # источник проверяется — WEBSEC-003.
+            - name: WEB_ORIGIN
+              value: {{ $.Values.web.origin | quote }}
+            - name: AUTH_COOKIE_PATH
+              value: {{ $.Values.web.authCookiePath | quote }}
             - name: CENTRIFUGO_API_URL
               value: {{ $.Values.dependencies.centrifugo.apiUrl | quote }}
             - name: CENTRIFUGO_HTTP_API_KEY

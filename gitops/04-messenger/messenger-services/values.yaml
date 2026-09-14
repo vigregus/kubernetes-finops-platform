@@ -48,9 +48,24 @@ dependencies:
     # Внутренний адрес: ровно то, что достижимо из пода.
     jwksUrl: http://messenger-idp-service.keycloak.svc.cluster.local:8080/realms/messenger/protocol/openid-connect/certs
     audience: messenger-api
+    # Внутренний адрес, как и у ключей: обмен идёт из пода.
+    tokenUrl: http://messenger-idp-service.keycloak.svc.cluster.local:8080/realms/messenger/protocol/openid-connect/token
+    # Браузерный клиент. Секрета у него нет и быть не может - он живёт
+    # в странице; вместо секрета PKCE.
+    clientId: messenger-web
   centrifugo:
     apiUrl: http://messenger-centrifugo.messenger.svc.cluster.local:9000/api
     secret: messenger-centrifugo
+
+web:
+  # Откуда приходит страница. Проверяется на точках обмена: cookie
+  # браузер прикладывает сам, и без этой проверки чужая страница
+  # инициирует обновление токена от имени вошедшего.
+  origin: https://app.finops.local
+  # Путь cookie обновления. Узкий намеренно: на обычные запросы API
+  # браузер её не приложит, и подделка межсайтового запроса на них
+  # не работает в принципе.
+  authCookiePath: /api/v1/auth
 
 priorityClasses:
   create: true
@@ -78,7 +93,7 @@ services:
       port: 8080
     image:
       repository: ghcr.io/vigregus/messenger-api
-      tag: "local-382a2c0dce19"
+      tag: "local-50f0bac571f1"
     resources:
       requests: {cpu: 50m, memory: 128Mi}
       limits: {cpu: "1", memory: 512Mi}

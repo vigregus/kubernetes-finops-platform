@@ -10,13 +10,17 @@ from __future__ import annotations
 
 import os
 import time
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Response
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
+from pydantic import BaseModel, Field
 from starlette.requests import Request
 
+from messenger.domain.ids import DeviceId
+from messenger.services import login as login_service
 from messenger.services import runtime as runtime_service
 from messenger.telemetry import metrics
 from messenger.telemetry.logging import configure
@@ -59,6 +63,139 @@ app = FastAPI(title="Messenger API", docs_url=None, redoc_url=None, lifespan=lif
 app.state.runtime = runtime_service.Runtime(
     settings=runtime_service.pool_settings_from_env(), application_name=SERVICE
 )
+
+# --- вход -------------------------------------------------------------------
+
+# Имя и путь cookie. Путь узкий: cookie отправляется только на точки обмена,
+# и на обычные запросы API браузер её не прикладывает. Это и есть причина,
+# по которой подделка межсайтового запроса не работает на остальном API —
+# заголовок `Authorization` браузер сам не ставит.
+REFRESH_COOKIE = os.getenv("AUTH_COOKIE_NAME", "messenger_refresh")
+REFRESH_COOKIE_PATH = os.getenv("AUTH_COOKIE_PATH", "/api/v1/auth")
+# Источник, которому разрешено обращаться к точкам обмена. Проверяется,
+# потому что cookie браузер прикладывает сам, — это WEBSEC-003.
+WEB_ORIGIN = os.getenv("WEB_ORIGIN", "https://app.finops.local")
+# Локально страница может открываться по HTTP, и тогда `Secure` означает,
+# что cookie не будет установлена вовсе. Значение по умолчанию строгое.
+COOKIE_SECURE = os.getenv("AUTH_COOKIE_SECURE", "true").lower() != "false"
+
+
+class AuthorizationCode(BaseModel):
+    """Тело `POST /auth/callback`. Имена совпадают с контрактом."""
+
+    code: str = Field(min_length=1)
+    code_verifier: str = Field(min_length=1)
+    redirect_uri: str = Field(min_length=1)
+    device_id: uuid.UUID | None = None
+
+
+def _origin_allowed(request: Request) -> bool:
+    """Источник запроса — свой.
+
+    Заголовка может не быть вовсе: его ставит браузер, а сервер-к-серверу
+    обращается без него. Отсутствие не считается нарушением — подделка
+    межсайтового запроса возможна только из браузера, а он `Origin`
+    на POST присылает всегда.
+    """
+    origin = request.headers.get("origin")
+    return origin is None or origin == WEB_ORIGIN
+
+
+def _device_from(value: uuid.UUID | None, request: Request) -> DeviceId | None:
+    if value is not None:
+        return DeviceId(value)
+    header = request.headers.get("x-device-id")
+    if not header:
+        return None
+    try:
+        return DeviceId(uuid.UUID(header))
+    except ValueError:
+        # Мусор в заголовке — не повод отказывать во входе: сервер просто
+        # выдаст новое устройство.
+        return None
+
+
+def _respond(result: login_service.LoginResult, response: Response) -> dict[str, object]:
+    """Кладёт токен обновления в cookie, а в тело — только токен доступа.
+
+    Токен обновления в теле означал бы, что скрипт на странице может его
+    прочитать и унести, — ровно то, ради чего выбран `HttpOnly` (ADR 0005).
+    """
+    if result.refresh_token:
+        response.set_cookie(
+            REFRESH_COOKIE,
+            result.refresh_token,
+            max_age=result.refresh_expires_in or None,
+            path=REFRESH_COOKIE_PATH,
+            httponly=True,
+            secure=COOKIE_SECURE,
+            samesite="strict",
+        )
+    return {
+        "access_token": result.access_token,
+        "expires_in": result.expires_in,
+        "device_id": str(result.device_id) if result.device_id else None,
+    }
+
+
+@app.post("/auth/callback")
+async def auth_callback(
+    body: AuthorizationCode, request: Request, response: Response
+) -> dict[str, object]:
+    """Обмен кода на токены. Делает сервер, а не браузер."""
+    if not _origin_allowed(request):
+        response.status_code = 403
+        return {"code": "forbidden", "title": "Действие недоступно"}
+
+    runtime = request.app.state.runtime
+    async with runtime.connection() as conn:
+        result = await login_service.login_with_code(
+            conn,
+            code=body.code,
+            code_verifier=body.code_verifier,
+            redirect_uri=body.redirect_uri,
+            settings=runtime.login,
+            keys=runtime.keys,
+            device_id=_device_from(body.device_id, request),
+            user_agent=request.headers.get("user-agent"),
+        )
+
+    if not result.ok:
+        response.status_code = 503 if result.upstream_failed else 401
+        return {"code": "unauthenticated", "title": "Требуется вход"}
+    return _respond(result, response)
+
+
+@app.post("/auth/refresh")
+async def auth_refresh(request: Request, response: Response) -> dict[str, object]:
+    """Новый токен доступа по cookie. Вызывается при каждой загрузке вкладки."""
+    if not _origin_allowed(request):
+        response.status_code = 403
+        return {"code": "forbidden", "title": "Действие недоступно"}
+
+    token = request.cookies.get(REFRESH_COOKIE)
+    if not token:
+        response.status_code = 401
+        return {"code": "unauthenticated", "title": "Требуется вход"}
+
+    runtime = request.app.state.runtime
+    async with runtime.connection() as conn:
+        result = await login_service.refresh_access(
+            conn,
+            refresh_token=token,
+            settings=runtime.login,
+            keys=runtime.keys,
+            device_id=_device_from(None, request),
+            user_agent=request.headers.get("user-agent"),
+        )
+
+    if not result.ok:
+        # Cookie снимается: она больше не работает, и оставлять её значит
+        # обрекать вкладку на повторные отказы при каждой перезагрузке.
+        response.delete_cookie(REFRESH_COOKIE, path=REFRESH_COOKIE_PATH)
+        response.status_code = 503 if result.upstream_failed else 401
+        return {"code": "unauthenticated", "title": "Требуется вход"}
+    return _respond(result, response)
 
 # «Что сейчас запущено» — непрерывный ряд. Из него нельзя строить отметки
 # на графиках: Grafana поставит отметку на каждой точке. Для «когда
