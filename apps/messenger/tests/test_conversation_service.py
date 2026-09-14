@@ -1,0 +1,177 @@
+"""Сценарий обычного создания direct-беседы; конкурентная гонка — G1-011."""
+from __future__ import annotations
+
+import asyncio
+import uuid
+from datetime import UTC, datetime
+
+import pytest
+
+from messenger.domain.conversation import Conversation, ConversationType
+from messenger.domain.errors import Reason
+from messenger.domain.ids import ConversationId, ConversationSeq, UserId, direct_key
+from messenger.domain.user import User
+from messenger.services import conversations as service
+
+NOW = datetime(2026, 9, 15, tzinfo=UTC)
+ACTOR_ID = UserId(uuid.UUID("11111111-1111-1111-1111-111111111111"))
+OTHER_ID = UserId(uuid.UUID("22222222-2222-2222-2222-222222222222"))
+
+
+class Transaction:
+    def __init__(self) -> None:
+        self.entered = False
+        self.exited = False
+
+    async def __aenter__(self):
+        self.entered = True
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        self.exited = True
+
+
+class Connection:
+    def __init__(self) -> None:
+        self.tx = Transaction()
+
+    def transaction(self) -> Transaction:
+        return self.tx
+
+
+def _user(user_id: UserId, *, verified: bool = True, deleted: bool = False) -> User:
+    return User(
+        user_id=user_id,
+        external_id=f"kc-{user_id}",
+        display_name="Аня" if user_id == ACTOR_ID else "Борис",
+        email=f"{user_id}@example.org",
+        email_verified=verified,
+        created_at=NOW,
+        updated_at=NOW,
+        deleted_at=NOW if deleted else None,
+    )
+
+
+def _conversation() -> Conversation:
+    return Conversation(
+        conversation_id=ConversationId(uuid.uuid4()),
+        type=ConversationType.DIRECT,
+        direct_key=direct_key(ACTOR_ID, OTHER_ID),
+        last_seq=ConversationSeq(0),
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
+def test_неподтверждённый_не_может_начать_беседу(monkeypatch):
+    async def _не_вызывать(*args, **kwargs):
+        raise AssertionError("репозиторий вызван до проверки возможности")
+
+    monkeypatch.setattr(service.users, "fetch_user", _не_вызывать)
+    result = asyncio.run(
+        service.create_direct(
+            Connection(), actor=_user(ACTOR_ID, verified=False), participant_id=OTHER_ID
+        )
+    )
+    assert result.rejection is Reason.EMAIL_UNVERIFIED
+
+
+def test_беседа_с_собой_отклоняется_до_базы(monkeypatch):
+    async def _не_вызывать(*args, **kwargs):
+        raise AssertionError("репозиторий вызван для беседы с собой")
+
+    monkeypatch.setattr(service.users, "fetch_user", _не_вызывать)
+    result = asyncio.run(
+        service.create_direct(Connection(), actor=_user(ACTOR_ID), participant_id=ACTOR_ID)
+    )
+    assert result.rejection is Reason.SELF_CONVERSATION
+
+
+@pytest.mark.parametrize("participant", [None, _user(OTHER_ID, deleted=True)])
+def test_отсутствующий_или_удалённый_участник_скрыт(monkeypatch, participant):
+    async def _fetch(*args, **kwargs):
+        return participant
+
+    monkeypatch.setattr(service.users, "fetch_user", _fetch)
+    result = asyncio.run(
+        service.create_direct(Connection(), actor=_user(ACTOR_ID), participant_id=OTHER_ID)
+    )
+    assert result.rejection is Reason.USER_NOT_FOUND
+
+
+def test_блокировка_в_любую_сторону_запрещает_создание(monkeypatch):
+    async def _fetch(*args, **kwargs):
+        return _user(OTHER_ID)
+
+    async def _blocked(*args, **kwargs):
+        assert {kwargs["first"], kwargs["second"]} == {ACTOR_ID, OTHER_ID}
+        return True
+
+    monkeypatch.setattr(service.users, "fetch_user", _fetch)
+    monkeypatch.setattr(service.conversations, "creation_blocked_between", _blocked)
+    result = asyncio.run(
+        service.create_direct(Connection(), actor=_user(ACTOR_ID), participant_id=OTHER_ID)
+    )
+    assert result.rejection is Reason.BLOCKED
+
+
+def test_первый_запрос_атомарно_создаёт_беседу_и_два_членства(monkeypatch):
+    conn = Connection()
+    expected = _conversation()
+    members: list[UserId] = []
+
+    async def _fetch(*args, **kwargs):
+        return _user(OTHER_ID)
+
+    async def _not_blocked(*args, **kwargs):
+        return False
+
+    async def _no_existing(*args, **kwargs):
+        return None
+
+    async def _insert(*args, **kwargs):
+        assert kwargs["direct_key"] == direct_key(ACTOR_ID, OTHER_ID)
+        return expected
+
+    async def _add(*args, **kwargs):
+        members.append(kwargs["user_id"])
+
+    monkeypatch.setattr(service.users, "fetch_user", _fetch)
+    monkeypatch.setattr(service.conversations, "creation_blocked_between", _not_blocked)
+    monkeypatch.setattr(service.conversations, "fetch_direct_conversation", _no_existing)
+    monkeypatch.setattr(service.conversations, "insert_conversation", _insert)
+    monkeypatch.setattr(service.conversations, "add_member", _add)
+
+    result = asyncio.run(
+        service.create_direct(conn, actor=_user(ACTOR_ID), participant_id=OTHER_ID)
+    )
+    assert result.ok and result.created and result.conversation == expected
+    assert members == [ACTOR_ID, OTHER_ID]
+    assert conn.tx.entered and conn.tx.exited
+
+
+def test_последовательный_повтор_возвращает_существующую(monkeypatch):
+    expected = _conversation()
+
+    async def _fetch(*args, **kwargs):
+        return _user(OTHER_ID)
+
+    async def _not_blocked(*args, **kwargs):
+        return False
+
+    async def _existing(*args, **kwargs):
+        return expected
+
+    async def _не_вставлять(*args, **kwargs):
+        raise AssertionError("повтор попытался создать дубль")
+
+    monkeypatch.setattr(service.users, "fetch_user", _fetch)
+    monkeypatch.setattr(service.conversations, "creation_blocked_between", _not_blocked)
+    monkeypatch.setattr(service.conversations, "fetch_direct_conversation", _existing)
+    monkeypatch.setattr(service.conversations, "insert_conversation", _не_вставлять)
+
+    result = asyncio.run(
+        service.create_direct(Connection(), actor=_user(ACTOR_ID), participant_id=OTHER_ID)
+    )
+    assert result.ok and not result.created and result.conversation == expected
+    assert [user.user_id for user in result.participants] == [ACTOR_ID, OTHER_ID]
