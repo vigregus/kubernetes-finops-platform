@@ -20,6 +20,27 @@ config:
     # Иначе подписка на чужую беседу - это вопрос знания её идентификатора.
     allowed_origins:
       - "https://*.finops.local"
+    proxy:
+      # Centrifugo получает свой client id до допуска сокета. Backend в этой
+      # точке проверяет короткий ticket и живую сессию, поэтому отозванный
+      # ticket нельзя повторно использовать для подключения.
+      connect:
+        enabled: true
+        endpoint: http://api.messenger.svc.cluster.local/internal/centrifugo/connect
+        timeout: 2s
+        http:
+          static_headers:
+            X-Realtime-Proxy-Key: "${CENTRIFUGO_VAR_PROXY_SECRET}"
+      # Периодическая сверка закрывает соединение, если сессия истекла или
+      # была отозвана в редком окне между ответом proxy и активацией сокета.
+      refresh:
+        enabled: true
+        endpoint: http://api.messenger.svc.cluster.local/internal/centrifugo/refresh
+        timeout: 2s
+        include_connection_meta: true
+        http:
+          static_headers:
+            X-Realtime-Proxy-Key: "${CENTRIFUGO_VAR_PROXY_SECRET}"
 
   channel:
     namespaces:
@@ -53,6 +74,15 @@ config:
 # Секрет создаёт messenger-secrets-bootstrap; чарт секретов не создаёт и
 # не умеет. Все ключи из него становятся переменными окружения.
 existingSecret: messenger-centrifugo
+
+# Тот же случайный ключ получает API как CENTRIFUGO_HTTP_API_KEY. Здесь он
+# только получает разрешённый для подстановки префикс CENTRIFUGO_VAR_: секрет
+# не дублируется и не попадает в values или ConfigMap.
+envSecret:
+  - name: CENTRIFUGO_VAR_PROXY_SECRET
+    secretKeyRef:
+      name: messenger-centrifugo
+      key: CENTRIFUGO_HTTP_API_KEY
 
 podLabels:
   finops.internal/product: messenger

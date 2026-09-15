@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 from messenger.domain.identity import Claims, TokenRejection
 from messenger.domain.ids import DeviceId, SessionId, UserId
@@ -58,11 +59,20 @@ class FakeRealtime:
     """Отдаёт фиксированный токен; срок записывается для проверки."""
 
     def __init__(self):
-        self.issued: list[tuple[str, list[str]]] = []
+        self.issued: list[tuple[str, str, list[str]]] = []
+        self.settings = SimpleNamespace(token_ttl_seconds=120)
+        self.claims = {
+            "sub": str(USER_ID),
+            "sid": str(SESSION_ID),
+            "channels": [f"user:{USER_ID}"],
+        }
 
-    def issue_token(self, user_id, channels, *, ttl_seconds=None):
-        self.issued.append((user_id, channels))
+    def issue_token(self, user_id, session_id, channels, *, ttl_seconds=None):
+        self.issued.append((user_id, session_id, channels))
         return "connect-token", NOW + timedelta(minutes=2)
+
+    def verify_ticket(self, token):
+        return self.claims if token == "connect-token" else None
 
 
 def test_выдача_токена_на_личный_канал(monkeypatch):
@@ -80,7 +90,9 @@ def test_выдача_токена_на_личный_канал(monkeypatch):
     assert result.expires_at is not None
     # Идентификатора соединения в результате больше нет.
     assert not hasattr(result, "client_id")
-    assert realtime.issued == [(str(USER_ID), [f"user:{USER_ID}"])]
+    assert realtime.issued == [
+        (str(USER_ID), str(SESSION_ID), [f"user:{USER_ID}"])
+    ]
 
 
 def test_выдача_токена_при_отказе_токена(monkeypatch):
@@ -118,7 +130,7 @@ def test_привязка_соединения_к_своей_сессии(monkey
         return True
 
     monkeypatch.setattr(identity, "authenticate", _authenticate)
-    monkeypatch.setattr(service.sessions, "set_realtime_client_id", _set)
+    monkeypatch.setattr(service.sessions, "register_realtime_connection", _set)
 
     result = asyncio.run(service.register_connection(
         None, token="token", client_id="centrifugo-client-1", keys=None, settings=None,
@@ -137,7 +149,7 @@ def test_привязка_соединения_при_отказе_токена(
         raise AssertionError("репозиторий вызван после отказа токена")
 
     monkeypatch.setattr(identity, "authenticate", _authenticate)
-    monkeypatch.setattr(service.sessions, "set_realtime_client_id", _не_вызывать)
+    monkeypatch.setattr(service.sessions, "register_realtime_connection", _не_вызывать)
 
     result = asyncio.run(service.register_connection(
         None, token="bad", client_id="c1", keys=None, settings=None,
@@ -154,10 +166,59 @@ def test_привязка_к_уже_отозванной_сессии_не_ош�
         return False  # строка уже отозвана — привязать не к чему
 
     monkeypatch.setattr(identity, "authenticate", _authenticate)
-    monkeypatch.setattr(service.sessions, "set_realtime_client_id", _set)
+    monkeypatch.setattr(service.sessions, "register_realtime_connection", _set)
 
     result = asyncio.run(service.register_connection(
         None, token="token", client_id="c1", keys=None, settings=None,
     ))
     # Не отказ токена: доступ уже отрезан отзывом, привязка просто не нужна.
     assert result.ok and not result.registered
+
+
+def test_connect_proxy_регистрирует_client_до_допуска(monkeypatch):
+    seen = {}
+
+    async def _register(conn, **kwargs):
+        seen.update(kwargs)
+        return True
+
+    monkeypatch.setattr(service.sessions, "register_realtime_connection", _register)
+    result = asyncio.run(service.connect_from_ticket(
+        None,
+        ticket="connect-token",
+        client_id="client-tab-1",
+        realtime=FakeRealtime(),
+    ))
+    assert result.accepted
+    assert result.user_id == str(USER_ID)
+    assert result.session_id == str(SESSION_ID)
+    assert result.channels == (f"user:{USER_ID}",)
+    assert seen["client_id"] == "client-tab-1"
+
+
+def test_connect_proxy_не_принимает_отозванную_сессию(monkeypatch):
+    async def _register(conn, **kwargs):
+        return False
+
+    monkeypatch.setattr(service.sessions, "register_realtime_connection", _register)
+    result = asyncio.run(service.connect_from_ticket(
+        None,
+        ticket="connect-token",
+        client_id="client-after-logout",
+        realtime=FakeRealtime(),
+    ))
+    assert not result.accepted
+
+
+def test_connect_proxy_не_принимает_поддельный_ticket(monkeypatch):
+    async def _never(*args, **kwargs):
+        raise AssertionError("репозиторий вызван для поддельного ticket")
+
+    monkeypatch.setattr(service.sessions, "register_realtime_connection", _never)
+    result = asyncio.run(service.connect_from_ticket(
+        None,
+        ticket="forged",
+        client_id="client",
+        realtime=FakeRealtime(),
+    ))
+    assert not result.accepted

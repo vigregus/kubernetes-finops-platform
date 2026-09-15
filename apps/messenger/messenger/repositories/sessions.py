@@ -20,16 +20,10 @@ from messenger.domain.session import Device, RevocationReason, Session, SessionV
 
 @dataclass(frozen=True, slots=True)
 class RevokedSession:
-    """Отозванная сессия и её realtime-соединение, если оно было.
-
-    ``realtime_client_id`` — идентификатор, которым Centrifugo сам пометил
-    соединение. Его знает только клиент после подключения и сообщает через
-    ``POST /realtime/connections``; без него разорвать ровно это соединение
-    нельзя, поэтому ``None`` здесь — законное состояние, а не пропуск.
-    """
+    """Отозванная сессия и все её realtime-соединения."""
 
     session_id: SessionId
-    realtime_client_id: str | None
+    realtime_client_ids: tuple[str, ...] = ()
 
 
 def _to_device(row: asyncpg.Record) -> Device:
@@ -217,28 +211,35 @@ async def revoke_session(
     первого. Иначе «выйти везде», нажатое дважды, переписывало бы причину
     и время, а аудит потерял бы момент, который расследуют.
 
-    Возвращает и `realtime_client_id`: отозванное соединение обязано
-    рваться немедленно, а идентификатор читается тем же `RETURNING`,
-    которым сессия отзывается, — отдельный запрос дал бы гонку.
+    Идентификаторы всех соединений читаются в той же транзакции, которой
+    отзывается сессия: connect-proxy использует ту же блокировку строки.
     """
-    row = await conn.fetchrow(
-        """
-        UPDATE sessions
-           SET revoked_at = now(), revoked_reason = $3
-         WHERE session_id = $1
-           AND user_id = $2
-           AND revoked_at IS NULL
-        RETURNING session_id, realtime_client_id
-        """,
-        session_id,
-        user_id,
-        reason.value,
-    )
-    if row is None:
-        return None
+    async with conn.transaction():
+        row = await conn.fetchrow(
+            """
+            UPDATE sessions
+               SET revoked_at = now(), revoked_reason = $3
+             WHERE session_id = $1
+               AND user_id = $2
+               AND revoked_at IS NULL
+            RETURNING session_id
+            """,
+            session_id,
+            user_id,
+            reason.value,
+        )
+        if row is None:
+            return None
+        clients = await conn.fetch(
+            "SELECT client_id FROM realtime_connections WHERE session_id = $1",
+            session_id,
+        )
+        await conn.execute(
+            "DELETE FROM realtime_connections WHERE session_id = $1", session_id
+        )
     return RevokedSession(
         session_id=SessionId(row["session_id"]),
-        realtime_client_id=row["realtime_client_id"],
+        realtime_client_ids=tuple(item["client_id"] for item in clients),
     )
 
 
@@ -274,6 +275,80 @@ async def set_realtime_client_id(
     return row is not None
 
 
+async def register_realtime_connection(
+    conn: asyncpg.Connection,
+    *,
+    session_id: SessionId,
+    user_id: UserId,
+    client_id: str,
+) -> bool:
+    """Атомарно допускает соединение только для живой сессии.
+
+    Блокировка строки согласована с отзывом в сервисе: либо соединение
+    попадёт в реестр раньше отзыва и будет разорвано, либо увидит уже
+    отозванную строку и Centrifugo не примет его вовсе.
+    """
+    async with conn.transaction():
+        row = await conn.fetchrow(
+            """
+            SELECT session_id
+              FROM sessions
+             WHERE session_id = $1
+               AND user_id = $2
+               AND revoked_at IS NULL
+               AND expires_at > now()
+             FOR UPDATE
+            """,
+            session_id,
+            user_id,
+        )
+        if row is None:
+            return False
+        await conn.execute(
+            """
+            INSERT INTO realtime_connections (client_id, session_id, user_id)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (client_id) DO UPDATE
+               SET refreshed_at = now()
+             WHERE realtime_connections.session_id = EXCLUDED.session_id
+               AND realtime_connections.user_id = EXCLUDED.user_id
+            """,
+            client_id,
+            session_id,
+            user_id,
+        )
+    return True
+
+
+async def refresh_realtime_connection(
+    conn: asyncpg.Connection,
+    *,
+    session_id: SessionId,
+    user_id: UserId,
+    client_id: str,
+) -> bool:
+    """Продлевает только зарегистрированное соединение живой сессии."""
+    row = await conn.fetchrow(
+        """
+        UPDATE realtime_connections AS rc
+           SET refreshed_at = now()
+          FROM sessions AS s
+         WHERE rc.client_id = $1
+           AND rc.session_id = $2
+           AND rc.user_id = $3
+           AND s.session_id = rc.session_id
+           AND s.user_id = rc.user_id
+           AND s.revoked_at IS NULL
+           AND s.expires_at > now()
+        RETURNING rc.client_id
+        """,
+        client_id,
+        session_id,
+        user_id,
+    )
+    return row is not None
+
+
 async def revoke_user_sessions(
     conn: asyncpg.Connection, *, user_id: UserId, reason: RevocationReason
 ) -> list[RevokedSession]:
@@ -284,21 +359,37 @@ async def revoke_user_sessions(
     отозвано, можно только зная сами идентификаторы. Число — `len(списка)` —
     берёт вызывающий.
     """
-    rows = await conn.fetch(
-        """
-        UPDATE sessions
-           SET revoked_at = now(), revoked_reason = $2
-         WHERE user_id = $1
-           AND revoked_at IS NULL
-        RETURNING session_id, realtime_client_id
-        """,
-        user_id,
-        reason.value,
-    )
-    return [
-        RevokedSession(
-            session_id=SessionId(row["session_id"]),
-            realtime_client_id=row["realtime_client_id"],
+    async with conn.transaction():
+        rows = await conn.fetch(
+            """
+            UPDATE sessions
+               SET revoked_at = now(), revoked_reason = $2
+             WHERE user_id = $1
+               AND revoked_at IS NULL
+            RETURNING session_id
+            """,
+            user_id,
+            reason.value,
         )
-        for row in rows
+        if not rows:
+            return []
+        session_ids = [SessionId(row["session_id"]) for row in rows]
+        clients = await conn.fetch(
+            """
+            SELECT session_id, client_id
+              FROM realtime_connections
+             WHERE session_id = ANY($1::uuid[])
+            """,
+            session_ids,
+        )
+        await conn.execute(
+            "DELETE FROM realtime_connections WHERE session_id = ANY($1::uuid[])",
+            session_ids,
+        )
+    by_session: dict[SessionId, list[str]] = {sid: [] for sid in session_ids}
+    for item in clients:
+        by_session[SessionId(item["session_id"])].append(item["client_id"])
+    return [
+        RevokedSession(session_id=sid, realtime_client_ids=tuple(by_session[sid]))
+        for sid in session_ids
     ]

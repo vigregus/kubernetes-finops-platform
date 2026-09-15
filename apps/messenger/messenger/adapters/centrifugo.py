@@ -14,6 +14,7 @@ API (`/publish`, `/disconnect`), по которому отзыв сессии �
 from __future__ import annotations
 
 import logging
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -26,7 +27,7 @@ log = logging.getLogger(__name__)
 # (нормальное завершение) намеренно: клиент должен отличать «сервер выгнал
 # за отзыв доступа» от «пользователь закрыл вкладку» и не пытаться
 # переподключиться в первом случае.
-DISCONNECT_CODE_SESSION_REVOKED = 3000
+DISCONNECT_CODE_SESSION_REVOKED = 4501
 REASON_SESSION_REVOKED = "session_revoked"
 
 
@@ -55,29 +56,57 @@ class CentrifugoClient:
     def issue_token(
         self,
         user_id: str,
+        session_id: str,
         channels: list[str],
         *,
         ttl_seconds: int | None = None,
     ) -> tuple[str, datetime]:
-        """Connect-токен на подписку на перечисленные каналы.
+        """Короткий ticket для connect-proxy.
 
-        `sub` — идентификатор пользователя, `channels` — явный список.
-        Клиент не выбирает канал сам: иначе подписка на чужую беседу
-        сводится к знанию её идентификатора (то же правило, что в
-        `contracts/websocket/channels.json`).
+        Его не проверяет Centrifugo напрямую: клиент передаёт ticket в
+        connect-data, а proxy сверяет подпись и живую сессию до допуска
+        соединения. Поэтому отозванный ticket нельзя повторно предъявить.
         """
         ttl = ttl_seconds or self.settings.token_ttl_seconds
         expires_at = datetime.now(UTC) + timedelta(seconds=ttl)
         token = jwt.encode(
             {
                 "sub": user_id,
+                "sid": session_id,
                 "exp": int(expires_at.timestamp()),
+                "iat": int(datetime.now(UTC).timestamp()),
+                "jti": str(uuid.uuid4()),
+                "aud": "centrifugo-connect-proxy",
+                "iss": "messenger-api",
                 "channels": channels,
             },
             self.settings.token_hmac_secret_key,
             algorithm="HS256",
         )
         return token, expires_at
+
+    def verify_ticket(self, token: str) -> dict[str, object] | None:
+        """Проверяет ticket proxy; любой мусор даёт отказ без исключения."""
+        try:
+            claims = jwt.decode(
+                token,
+                self.settings.token_hmac_secret_key,
+                algorithms=["HS256"],
+                audience="centrifugo-connect-proxy",
+                issuer="messenger-api",
+            )
+        except jwt.PyJWTError:
+            return None
+        if not isinstance(claims.get("sub"), str) or not isinstance(
+            claims.get("sid"), str
+        ):
+            return None
+        channels = claims.get("channels")
+        if not isinstance(channels, list) or not all(
+            isinstance(channel, str) for channel in channels
+        ):
+            return None
+        return claims
 
     async def publish(self, channel: str, data: dict) -> bool:
         """Публикует событие в канал. `False` при недоступности Centrifugo."""
@@ -122,8 +151,20 @@ class CentrifugoClient:
                     headers={"X-API-Key": self.settings.api_key},
                 )
                 response.raise_for_status()
+                body = response.json()
+                if not isinstance(body, dict) or body.get("error") is not None:
+                    log.warning(
+                        "Centrifugo отклонил команду",
+                        extra={
+                            "event": "centrifugo_api_error",
+                            "result": "failed",
+                            "dependency": "centrifugo",
+                            "method": method,
+                        },
+                    )
+                    return False
                 return True
-        except (httpx.HTTPError, OSError) as exc:
+        except (httpx.HTTPError, OSError, ValueError) as exc:
             log.warning(
                 "Centrifugo недоступен",
                 extra={

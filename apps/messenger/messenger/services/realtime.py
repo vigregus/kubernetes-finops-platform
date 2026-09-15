@@ -1,35 +1,22 @@
-"""Выдача connect-токена и привязка realtime-соединения к сессии.
-
-HTTP-слой не знает ни про Centrifugo, ни про формат токена: он передаёт
-проверенный bearer-токен сюда, а сервис связывает удостоверение с профилем
-и выдаёт токен на подписку на личный канал.
-
-Связь session_id → соединение замыкается иначе, чем кажется: Centrifugo v6
-сам генерирует идентификатор соединения и возвращает его клиенту в ответе
-на подключение, задать его заранее нельзя. Поэтому клиент после подключения
-сообщает его обратно через ``POST /realtime/connections``, и он ложится в
-``sessions.realtime_client_id``. По нему отзыв на устройстве рвёт ровно это
-соединение вызовом ``disconnect{user, client}``.
-"""
+"""Realtime-аутентификация через Centrifugo connect/refresh proxy."""
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 import asyncpg
 
 from messenger.adapters import oidc
 from messenger.adapters.centrifugo import CentrifugoClient
 from messenger.domain.identity import TokenRejection
-from messenger.domain.ids import DeviceId
+from messenger.domain.ids import DeviceId, SessionId, UserId
 from messenger.repositories import sessions
 from messenger.services import identity
 
 
 @dataclass(frozen=True, slots=True)
 class RealtimeTokenResult:
-    """Connect-токен либо причина отказа."""
-
     token: str = ""
     expires_at: datetime | None = None
     rejection: TokenRejection | None = None
@@ -41,14 +28,21 @@ class RealtimeTokenResult:
 
 @dataclass(frozen=True, slots=True)
 class RegisterConnectionResult:
-    """Итог привязки соединения к сессии либо причина отказа токена."""
-
     registered: bool = False
     rejection: TokenRejection | None = None
 
     @property
     def ok(self) -> bool:
         return self.rejection is None
+
+
+@dataclass(frozen=True, slots=True)
+class ProxyConnectResult:
+    accepted: bool = False
+    user_id: str = ""
+    session_id: str = ""
+    channels: tuple[str, ...] = ()
+    expire_at: int = 0
 
 
 async def issue_token_for_user(
@@ -61,12 +55,7 @@ async def issue_token_for_user(
     device_id: DeviceId | None = None,
     user_agent: str | None = None,
 ) -> RealtimeTokenResult:
-    """Connect-токен на подписку на личный канал вошедшего.
-
-    Отказ токена доходит как `rejection` и обрабатывается как любой отказ
-    входа. Ненастроенный Centrifugo — это «подключиться некуда», то есть
-    отказ системы (503), а не пользователя.
-    """
+    """Выдаёт короткий ticket, который проверит connect-proxy."""
     auth = await identity.authenticate(
         conn,
         token=token,
@@ -79,15 +68,82 @@ async def issue_token_for_user(
         return RealtimeTokenResult(
             rejection=auth.rejection or TokenRejection.MISSING_CLAIM
         )
-
     if realtime is None:
         return RealtimeTokenResult(rejection=TokenRejection.KEYS_UNAVAILABLE)
 
     user_id = str(auth.user.user_id)
     issued, expires_at = realtime.issue_token(
-        user_id, channels=[f"user:{user_id}"]
+        user_id,
+        str(auth.session.session_id),
+        channels=[f"user:{user_id}"],
     )
     return RealtimeTokenResult(token=issued, expires_at=expires_at)
+
+
+async def connect_from_ticket(
+    conn: asyncpg.Connection,
+    *,
+    ticket: str,
+    client_id: str,
+    realtime: CentrifugoClient | None,
+) -> ProxyConnectResult:
+    """Проверяет ticket и регистрирует соединение до допуска Centrifugo."""
+    if realtime is None:
+        return ProxyConnectResult()
+    claims = realtime.verify_ticket(ticket)
+    if claims is None:
+        return ProxyConnectResult()
+    try:
+        user_id = UserId(uuid.UUID(str(claims["sub"])))
+        session_id = SessionId(uuid.UUID(str(claims["sid"])))
+    except (KeyError, ValueError):
+        return ProxyConnectResult()
+    channels = tuple(str(channel) for channel in claims["channels"])
+
+    accepted = await sessions.register_realtime_connection(
+        conn,
+        session_id=session_id,
+        user_id=user_id,
+        client_id=client_id,
+    )
+    if not accepted:
+        return ProxyConnectResult()
+    expire_at = int(
+        (datetime.now(UTC) + timedelta(seconds=realtime.settings.token_ttl_seconds)).timestamp()
+    )
+    return ProxyConnectResult(
+        accepted=True,
+        user_id=str(user_id),
+        session_id=str(session_id),
+        channels=channels,
+        expire_at=expire_at,
+    )
+
+
+async def refresh_connection(
+    conn: asyncpg.Connection,
+    *,
+    user_id: str,
+    session_id: str,
+    client_id: str,
+    realtime: CentrifugoClient | None,
+) -> int | None:
+    """Продлевает соединение либо просит Centrifugo закрыть его."""
+    if realtime is None:
+        return None
+    try:
+        uid = UserId(uuid.UUID(user_id))
+        sid = SessionId(uuid.UUID(session_id))
+    except ValueError:
+        return None
+    alive = await sessions.refresh_realtime_connection(
+        conn, session_id=sid, user_id=uid, client_id=client_id
+    )
+    if not alive:
+        return None
+    return int(
+        (datetime.now(UTC) + timedelta(seconds=realtime.settings.token_ttl_seconds)).timestamp()
+    )
 
 
 async def register_connection(
@@ -100,15 +156,7 @@ async def register_connection(
     device_id: DeviceId | None = None,
     user_agent: str | None = None,
 ) -> RegisterConnectionResult:
-    """Привязывает соединение Centrifugo к действующей своей сессии.
-
-    ``client_id`` — значение, которое Centrifugo сам вернул клиенту, то есть
-    недоверенное. Привязка идёт строго к собственной действующей сессии
-    (условие `user_id` и `revoked_at IS NULL` в `UPDATE`), поэтому подобранным
-    идентификатором нельзя пометить чужое соединение. Уже отозванная сессия
-    не принимает привязку — ``registered`` остаётся ложным, но это не отказ
-    токена: отзыв в Postgres уже отрезал доступ, и привязывать не к чему.
-    """
+    """Совместимый старый endpoint; новые клиенты используют connect-proxy."""
     auth = await identity.authenticate(
         conn,
         token=token,
@@ -121,8 +169,7 @@ async def register_connection(
         return RegisterConnectionResult(
             rejection=auth.rejection or TokenRejection.MISSING_CLAIM
         )
-
-    registered = await sessions.set_realtime_client_id(
+    registered = await sessions.register_realtime_connection(
         conn,
         session_id=auth.session.session_id,
         user_id=auth.user.user_id,

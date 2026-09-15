@@ -123,7 +123,11 @@ def centrifugo_client_from_env() -> centrifugo.CentrifugoClient | None:
     готовность. `None` просит сервисы пропустить разрыв молча.
     """
     settings = centrifugo_settings_from_env()
-    if not settings.api_url or not settings.api_key:
+    if (
+        not settings.api_url
+        or not settings.api_key
+        or not settings.token_hmac_secret_key
+    ):
         return None
     return centrifugo.CentrifugoClient(settings=settings)
 
