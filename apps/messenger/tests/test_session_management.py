@@ -138,8 +138,8 @@ def test_выход_везде_ограничен_пользователем_и�
     async def _revoke_all(conn, **kwargs):
         seen.update(kwargs)
         return [
-            service.sessions.RevokedSession(session_id=SESSION_ID, realtime_client_id=None),
-            service.sessions.RevokedSession(session_id=OTHER_ID, realtime_client_id=None),
+            service.sessions.RevokedSession(session_id=SESSION_ID),
+            service.sessions.RevokedSession(session_id=OTHER_ID),
         ]
 
     monkeypatch.setattr(identity, "authenticate", _authenticate)
@@ -159,7 +159,7 @@ def test_выход_на_устройстве_рвёт_только_это_со�
 
     async def _revoke(conn, **kwargs):
         return service.sessions.RevokedSession(
-            session_id=OTHER_ID, realtime_client_id="client-other"
+            session_id=OTHER_ID, realtime_client_ids=("client-other", "client-tab-2")
         )
 
     realtime = FakeRealtime()
@@ -173,7 +173,10 @@ def test_выход_на_устройстве_рвёт_только_это_со�
     assert result.ok and result.revoked
     # Весь user рвать нельзя: только соединение отозванного session_id,
     # адресуемое парой (user, client).
-    assert realtime.disconnected_clients == [(str(USER_ID), "client-other")]
+    assert realtime.disconnected_clients == [
+        (str(USER_ID), "client-other"),
+        (str(USER_ID), "client-tab-2"),
+    ]
     assert realtime.disconnected_users == []
     assert realtime.published == [
         (f"user:{USER_ID}", {"type": "session.revoked", "session_id": str(OTHER_ID)})
@@ -186,7 +189,7 @@ def test_выход_на_устройстве_без_client_id_рвётся_то
 
     async def _revoke(conn, **kwargs):
         return service.sessions.RevokedSession(
-            session_id=OTHER_ID, realtime_client_id=None
+            session_id=OTHER_ID
         )
 
     realtime = FakeRealtime()
@@ -211,8 +214,12 @@ def test_выход_везде_рвёт_весь_user_и_шлёт_событие
 
     async def _revoke_all(conn, **kwargs):
         return [
-            service.sessions.RevokedSession(session_id=SESSION_ID, realtime_client_id="client-a"),
-            service.sessions.RevokedSession(session_id=OTHER_ID, realtime_client_id="client-b"),
+            service.sessions.RevokedSession(
+                session_id=SESSION_ID, realtime_client_ids=("client-a",)
+            ),
+            service.sessions.RevokedSession(
+                session_id=OTHER_ID, realtime_client_ids=("client-b",)
+            ),
         ]
 
     realtime = FakeRealtime()
@@ -254,7 +261,7 @@ def test_недоступный_realtime_не_отменяет_отзыв(monkey
 
     async def _revoke(conn, **kwargs):
         return service.sessions.RevokedSession(
-            session_id=OTHER_ID, realtime_client_id="client-other"
+            session_id=OTHER_ID, realtime_client_ids=("client-other",)
         )
 
     realtime = FakeRealtime(ok=False)

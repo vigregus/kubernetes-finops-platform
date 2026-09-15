@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import hmac
 import os
 import time
 import uuid
@@ -341,14 +342,39 @@ class RealtimeConnection(BaseModel):
     client_id: str = Field(min_length=1, max_length=128)
 
 
+class CentrifugoConnectRequest(BaseModel):
+    """Внутренний запрос connect-proxy от Centrifugo."""
+
+    client: str = Field(min_length=1, max_length=128)
+    data: dict[str, object] = Field(default_factory=dict)
+
+
+class CentrifugoRefreshRequest(BaseModel):
+    """Внутренний запрос refresh-proxy от Centrifugo."""
+
+    client: str = Field(min_length=1, max_length=128)
+    user: str = Field(min_length=1, max_length=128)
+    meta: dict[str, object] = Field(default_factory=dict)
+
+
+def _centrifugo_proxy_authorized(request: Request) -> bool:
+    runtime = request.app.state.runtime
+    realtime = runtime.centrifugo
+    if realtime is None:
+        return False
+    supplied = request.headers.get("x-realtime-proxy-key", "")
+    return bool(supplied) and hmac.compare_digest(
+        supplied, realtime.settings.api_key
+    )
+
+
 @app.post("/realtime/token")
 async def issue_realtime_token(request: Request, response: Response) -> dict[str, object]:
-    """Connect-токен на подписку на личный канал.
+    """Короткий ticket для подключения через connect-proxy.
 
     Тот же путь, что у клиента: проверенный bearer обменивается на токен
-    Centrifugo с каналом `user:{user_id}`. Идентификатора соединения в ответе
-    нет — Centrifugo v6 назначает его сам и возвращает клиенту при
-    подключении, а тот сообщает его через `POST /realtime/connections`.
+    Клиент передаёт его в поле `data.ticket`, а Centrifugo до допуска
+    соединения сверяет ticket и живую сессию через внутренний proxy.
     """
     token = _bearer_token(request)
     if token is None:
@@ -374,16 +400,68 @@ async def issue_realtime_token(request: Request, response: Response) -> dict[str
     }
 
 
+@app.post("/internal/centrifugo/connect")
+async def centrifugo_connect_proxy(
+    body: CentrifugoConnectRequest, request: Request
+) -> dict[str, object]:
+    """Допускает WebSocket только после проверки живой сессии."""
+    if not _centrifugo_proxy_authorized(request):
+        return {"disconnect": {"code": 4501, "reason": "unauthorized"}}
+    ticket = body.data.get("ticket")
+    if not isinstance(ticket, str):
+        return {"disconnect": {"code": 4501, "reason": "unauthorized"}}
+    runtime = request.app.state.runtime
+    async with runtime.connection() as conn:
+        result = await realtime_service.connect_from_ticket(
+            conn,
+            ticket=ticket,
+            client_id=body.client,
+            realtime=runtime.centrifugo,
+        )
+    if not result.accepted:
+        return {"disconnect": {"code": 4501, "reason": "session_revoked"}}
+    return {
+        "result": {
+            "user": result.user_id,
+            "channels": list(result.channels),
+            "meta": {"session_id": result.session_id},
+            "expire_at": result.expire_at,
+        }
+    }
+
+
+@app.post("/internal/centrifugo/refresh")
+async def centrifugo_refresh_proxy(
+    body: CentrifugoRefreshRequest, request: Request
+) -> dict[str, object]:
+    """Не продлевает соединение отозванной или истёкшей сессии."""
+    if not _centrifugo_proxy_authorized(request):
+        return {"result": {"expired": True}}
+    session_id = body.meta.get("session_id")
+    if not isinstance(session_id, str):
+        return {"result": {"expired": True}}
+    runtime = request.app.state.runtime
+    async with runtime.connection() as conn:
+        expire_at = await realtime_service.refresh_connection(
+            conn,
+            user_id=body.user,
+            session_id=session_id,
+            client_id=body.client,
+            realtime=runtime.centrifugo,
+        )
+    if expire_at is None:
+        return {"result": {"expired": True}}
+    return {"result": {"expire_at": expire_at}}
+
+
 @app.post("/realtime/connections", status_code=204, response_model=None)
 async def register_realtime_connection(
     body: RealtimeConnection, request: Request, response: Response
 ) -> Response | dict[str, str]:
-    """Привязывает открытое соединение Centrifugo к текущей сессии.
+    """Устаревший совместимый путь для клиентов предыдущей сборки.
 
-    Клиент вызывает это сразу после подключения, передавая `client`, который
-    Centrifugo вернул в ответе на connect. По нему отзыв на устройстве рвёт
-    ровно это соединение. Привязка к уже отозванной сессии не отменяет отзыв
-    и не считается ошибкой — соединение просто остаётся без разрыва.
+    Новые клиенты не регистрируются после подключения: это делается
+    connect-proxy до допуска WebSocket и без прежнего окна гонки.
     """
     token = _bearer_token(request)
     if token is None:

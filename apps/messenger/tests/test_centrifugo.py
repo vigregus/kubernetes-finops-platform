@@ -23,8 +23,14 @@ def _settings() -> CentrifugoSettings:
 
 
 class FakeResponse:
+    def __init__(self, body=None):
+        self.body = body or {"result": {}}
+
     def raise_for_status(self):
         return None
+
+    def json(self):
+        return self.body
 
 
 class FakeHTTP:
@@ -49,10 +55,16 @@ class FakeHTTP:
 
 def test_connect_токен_подписан_hs256_и_несёт_sub_каналы_и_срок():
     client = CentrifugoClient(_settings())
-    token, expires_at = client.issue_token("user-1", channels=["user:user-1"])
+    token, expires_at = client.issue_token(
+        "user-1", "session-1", channels=["user:user-1"]
+    )
 
-    decoded = jwt.decode(token, "hmac-secret", algorithms=["HS256"])
+    decoded = jwt.decode(
+        token, "hmac-secret", algorithms=["HS256"],
+        audience="centrifugo-connect-proxy", issuer="messenger-api",
+    )
     assert decoded["sub"] == "user-1"
+    assert decoded["sid"] == "session-1"
     assert decoded["channels"] == ["user:user-1"]
     # exp в токене — тот же момент, что возвращён вызывающему как срок.
     assert decoded["exp"] == int(expires_at.timestamp())
@@ -60,9 +72,14 @@ def test_connect_токен_подписан_hs256_и_несёт_sub_канал�
 
 def test_connect_токен_уважает_собственный_ttl():
     client = CentrifugoClient(_settings())
-    token, expires_at = client.issue_token("u", channels=[], ttl_seconds=60)
+    token, expires_at = client.issue_token(
+        "u", "s", channels=[], ttl_seconds=60
+    )
 
-    decoded = jwt.decode(token, "hmac-secret", algorithms=["HS256"])
+    decoded = jwt.decode(
+        token, "hmac-secret", algorithms=["HS256"],
+        audience="centrifugo-connect-proxy", issuer="messenger-api",
+    )
     assert decoded["exp"] == int(expires_at.timestamp())
 
 
@@ -128,4 +145,15 @@ def test_недоступность_centrifugo_возвращает_false_а_н�
     ok = asyncio.run(CentrifugoClient(_settings()).disconnect_user(
         "user-1", code=DISCONNECT_CODE_SESSION_REVOKED, reason=REASON_SESSION_REVOKED
     ))
+    assert not ok
+
+
+def test_логическая_ошибка_при_http_200_не_считается_успехом(monkeypatch):
+    class ErrorHTTP(FakeHTTP):
+        async def post(self, url, *, json, headers):
+            self.calls.append((url, json, headers))
+            return FakeResponse({"error": {"code": 102, "message": "unknown channel"}})
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: ErrorHTTP())
+    ok = asyncio.run(CentrifugoClient(_settings()).publish("missing:x", {}))
     assert not ok

@@ -4,6 +4,7 @@ from __future__ import annotations
 import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -24,7 +25,7 @@ DEVICE = uuid.UUID("c95058ec-cf19-4c3b-813a-c8fd7c0b2679")
 class FakeRuntime:
     keys = None
     oidc_settings = None
-    centrifugo = None
+    centrifugo = SimpleNamespace(settings=SimpleNamespace(api_key="proxy-secret"))
 
     @asynccontextmanager
     async def connection(self):
@@ -254,3 +255,60 @@ def test_привязка_соединения_при_недоступных_к�
         headers={"Authorization": "Bearer access-token"},
     )
     assert r.status_code == 503
+
+
+def test_connect_proxy_возвращает_user_каналы_и_meta(client, monkeypatch):
+    async def _connect(*args, **kwargs):
+        assert kwargs["ticket"] == "signed-ticket"
+        assert kwargs["client_id"] == "centrifugo-client"
+        return realtime_service.ProxyConnectResult(
+            accepted=True,
+            user_id=str(SID),
+            session_id=str(OTHER_SID),
+            channels=(f"user:{SID}",),
+            expire_at=1_800_000_000,
+        )
+
+    monkeypatch.setattr(realtime_service, "connect_from_ticket", _connect)
+    r = client.post(
+        "/internal/centrifugo/connect",
+        json={"client": "centrifugo-client", "data": {"ticket": "signed-ticket"}},
+        headers={"X-Realtime-Proxy-Key": "proxy-secret"},
+    )
+    assert r.status_code == 200
+    assert r.json() == {"result": {
+        "user": str(SID),
+        "channels": [f"user:{SID}"],
+        "meta": {"session_id": str(OTHER_SID)},
+        "expire_at": 1_800_000_000,
+    }}
+
+
+def test_connect_proxy_отклоняет_негодный_ticket(client, monkeypatch):
+    async def _connect(*args, **kwargs):
+        return realtime_service.ProxyConnectResult()
+
+    monkeypatch.setattr(realtime_service, "connect_from_ticket", _connect)
+    r = client.post(
+        "/internal/centrifugo/connect",
+        json={"client": "centrifugo-client", "data": {"ticket": "bad"}},
+        headers={"X-Realtime-Proxy-Key": "proxy-secret"},
+    )
+    assert r.json()["disconnect"]["code"] == 4501
+
+
+def test_refresh_proxy_закрывает_отозванную_сессию(client, monkeypatch):
+    async def _refresh(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(realtime_service, "refresh_connection", _refresh)
+    r = client.post(
+        "/internal/centrifugo/refresh",
+        json={
+            "client": "centrifugo-client",
+            "user": str(SID),
+            "meta": {"session_id": str(OTHER_SID)},
+        },
+        headers={"X-Realtime-Proxy-Key": "proxy-secret"},
+    )
+    assert r.json() == {"result": {"expired": True}}

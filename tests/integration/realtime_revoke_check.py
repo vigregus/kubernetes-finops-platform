@@ -1,11 +1,10 @@
 """AUTH-003 realtime: отзыв сессии рвёт настоящий WebSocket, а не только строку.
 
-G1-008. Два входа открывают по WebSocket-соединению к Centrifugo тем же путём,
-что клиент: `POST /realtime/token` даёт connect-токен, подключение сообщает
-назначенный Centrifugo `client` обратно через `POST /realtime/connections`.
+G1-008. Два входа открывают WebSocket к Centrifugo через connect-proxy.
+У первого входа две вкладки: отзыв обязан разорвать обе.
 
 Дальше доказывается именно разрыв сокета, а не отзыв в базе:
-- «выйти на устройстве A» рвёт WebSocket A (disconnect code 3000), при этом
+- «выйти на устройстве A» рвёт обе вкладки A (terminal code 4501), при этом
   WebSocket B остаётся открытым и получает событие `session.revoked` с
   идентификатором сессии A;
 - «выйти везде» рвёт WebSocket B тем же кодом.
@@ -41,7 +40,7 @@ from login_check import (
 failures: list[str] = []
 
 # Тот же код и причина, что сервер кладёт в disconnect при отзыве сессии.
-DISCONNECT_CODE = 3000
+DISCONNECT_CODE = 4501
 REASON = "session_revoked"
 
 CENTRIFUGO_URL = os.getenv(
@@ -132,27 +131,21 @@ async def _realtime_token(
     return r.json().get("token")
 
 
-async def _connect(
-    http: httpx.AsyncClient, access: str, device_id: uuid.UUID, token: str
-) -> tuple[object | None, str | None]:
-    """Открывает WebSocket, подключается и регистрирует `client` у API."""
+async def _connect(token: str) -> tuple[object | None, str | None]:
+    """Открывает WebSocket; регистрацию до допуска делает connect-proxy."""
     try:
         ws = await websockets.connect(CENTRIFUGO_URL, open_timeout=10.0)
     except Exception:
         return None, None
     try:
-        await ws.send(json.dumps({"id": 1, "connect": {"token": token, "name": "checks"}}))
+        await ws.send(json.dumps({
+            "id": 1,
+            "connect": {"data": {"ticket": token}, "name": "checks"},
+        }))
         reply = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
         connect = reply.get("connect") if isinstance(reply, dict) else None
         client_id = connect.get("client") if isinstance(connect, dict) else None
         if not client_id:
-            return ws, None
-        registered = await http.post(
-            f"{API}/realtime/connections",
-            json={"client_id": client_id},
-            headers=_auth_headers(access, device_id),
-        )
-        if registered.status_code != 204:
             return ws, None
         return ws, client_id
     except Exception:
@@ -164,7 +157,7 @@ async def _connect(
 
 
 async def _expect_disconnect(ws, timeout: float = 20.0) -> tuple[bool, str]:
-    """Ждёт disconnect-код 3000 либо закрытие сокета — признак разрыва сервером."""
+    """Ждёт terminal disconnect 4501 либо закрытие сокета сервером."""
     try:
         while True:
             msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=timeout))
@@ -173,7 +166,7 @@ async def _expect_disconnect(ws, timeout: float = 20.0) -> tuple[bool, str]:
                 code = disc.get("code")
                 reason = disc.get("reason", "")
                 if code == DISCONNECT_CODE and reason == REASON:
-                    return True, "disconnect code=3000 reason=session_revoked"
+                    return True, "disconnect code=4501 reason=session_revoked"
                 return True, f"disconnect code={code} reason={reason!r}"
     except ConnectionClosed as exc:
         # Сокет закрылся — сервер уже разорвал соединение, и это главное.
@@ -206,7 +199,7 @@ async def run() -> None:
     login = f"realtime-revoke-{uuid.uuid4().hex[:12]}@example.org"
     password = secrets.token_urlsafe(24)
     device_a, device_b = uuid.uuid4(), uuid.uuid4()
-    ws_a = ws_b = None
+    ws_a = ws_a2 = ws_b = None
 
     async with httpx.AsyncClient(timeout=15.0) as http:
         admin = await admin_token(http)
@@ -239,11 +232,13 @@ async def run() -> None:
             if not (token_a and token_b):
                 return
 
-            ws_a, client_a = await _connect(http, access_a, device_a, token_a)
+            ws_a, client_a = await _connect(token_a)
             check("WebSocket A открыт и зарегистрирован", ws_a is not None and bool(client_a))
-            ws_b, client_b = await _connect(http, access_b, device_b, token_b)
+            ws_a2, client_a2 = await _connect(token_a)
+            check("вторая вкладка A открыта", ws_a2 is not None and bool(client_a2))
+            ws_b, client_b = await _connect(token_b)
             check("WebSocket B открыт и зарегистрирован", ws_b is not None and bool(client_b))
-            if ws_a is None or ws_b is None:
+            if ws_a is None or ws_a2 is None or ws_b is None:
                 return
 
             # --- выход на устройстве A ---------------------------------
@@ -253,7 +248,17 @@ async def run() -> None:
             check("выход на устройстве A вернул 204", ended.status_code == 204, str(ended.status_code))
 
             broken_a, detail_a = await _expect_disconnect(ws_a)
-            check("WebSocket A разорван сервером (disconnect 3000)", broken_a, detail_a)
+            check("первая вкладка A разорвана сервером", broken_a, detail_a)
+            broken_a2, detail_a2 = await _expect_disconnect(ws_a2)
+            check("вторая вкладка A тоже разорвана", broken_a2, detail_a2)
+
+            replay_ws, replay_client = await _connect(token_a)
+            check(
+                "старый ticket отозванной сессии не переподключается",
+                replay_client is None,
+            )
+            if replay_ws is not None:
+                await replay_ws.close()
 
             alive_b, detail_b = await _expect_event(ws_b, session_a)
             check(
@@ -269,9 +274,9 @@ async def run() -> None:
             check("выход везде вернул 204", ended_all.status_code == 204, str(ended_all.status_code))
 
             broken_b, detail_b2 = await _expect_disconnect(ws_b)
-            check("WebSocket B разорван сервером (disconnect 3000)", broken_b, detail_b2)
+            check("WebSocket B разорван сервером", broken_b, detail_b2)
         finally:
-            for ws in (ws_a, ws_b):
+            for ws in (ws_a, ws_a2, ws_b):
                 if ws is not None:
                     try:
                         await ws.close()

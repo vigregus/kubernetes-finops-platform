@@ -112,8 +112,8 @@ async def revoke_for_token(
     различие не выходит, иначе UUID превращается в способ перечислять входы
     другого пользователя.
 
-    Отозванное соединение рвётся сразу: `disconnect{user, client}` по
-    `realtime_client_id`, который клиент сообщил после подключения. Весь
+    Все соединения сессии рвутся сразу: `disconnect{user, client}` по
+    реестру connect-proxy. Весь
     `user_id` здесь рвать нельзя — человек мог войти с нескольких устройств,
     и выход на одном не должен закрывать остальные.
     """
@@ -225,9 +225,7 @@ async def _drop_connections(
     видно на дашборде, а не прячется за «соединение не порвалось».
 
     ``disconnect_by_user`` различает два пути: «выйти везде» рвёт весь
-    `user_id`, «выйти на устройстве» — ровно соединение отозванной сессии
-    по её `realtime_client_id`. Сессия, которая не сообщила идентификатор
-    соединения, рвётся только событием — рвать нечего, и это не ошибка.
+    `user_id`, «выйти на устройстве» — все соединения отозванной сессии.
     """
     if realtime is None:
         return
@@ -241,15 +239,14 @@ async def _drop_connections(
         metrics.realtime_disconnected("ok" if disconnected else "failed")
     else:
         for rev in revoked:
-            if rev.realtime_client_id is None:
-                continue
-            disconnected = await realtime.disconnect_client(
-                user_id,
-                rev.realtime_client_id,
-                code=DISCONNECT_CODE_SESSION_REVOKED,
-                reason=REASON_SESSION_REVOKED,
-            )
-            metrics.realtime_disconnected("ok" if disconnected else "failed")
+            for client_id in rev.realtime_client_ids:
+                disconnected = await realtime.disconnect_client(
+                    user_id,
+                    client_id,
+                    code=DISCONNECT_CODE_SESSION_REVOKED,
+                    reason=REASON_SESSION_REVOKED,
+                )
+                metrics.realtime_disconnected("ok" if disconnected else "failed")
 
     for rev in revoked:
         published = await realtime.publish(
