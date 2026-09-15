@@ -34,6 +34,8 @@ print(f"{repo}:{tag}")
 PY
 )"
 IMAGE="${INTEGRATION_IMAGE:-$DEFAULT_IMAGE}"
+API_ENDPOINT="${INTEGRATION_API_URL:-http://api.messenger.svc.cluster.local}"
+CENTRIFUGO_ENDPOINT="${INTEGRATION_CENTRIFUGO_URL:-ws://messenger-centrifugo.messenger.svc.cluster.local:8000/connection/websocket}"
 echo "  образ: $IMAGE"
 
 args=(--from-file="run.sh=$ROOT/tests/integration/run.sh")
@@ -90,9 +92,9 @@ kubectl -n "$NS" run "$POD" --restart=Never \
         {"name":"OIDC_ISSUER","value":"https://idp.finops.local/realms/messenger"},
         {"name":"OIDC_JWKS_URL","value":"http://messenger-idp-service.keycloak.svc.cluster.local:8080/realms/messenger/protocol/openid-connect/certs"},
         {"name":"OIDC_AUDIENCE","value":"messenger-api"},
-        {"name":"API_URL","value":"http://api.messenger.svc.cluster.local"},
+        {"name":"API_URL","value":"$API_ENDPOINT"},
         {"name":"WEB_ORIGIN","value":"https://app.finops.local"},
-        {"name":"CENTRIFUGO_CLIENT_URL","value":"ws://messenger-centrifugo.messenger.svc.cluster.local:8000/connection/websocket"},
+        {"name":"CENTRIFUGO_CLIENT_URL","value":"$CENTRIFUGO_ENDPOINT"},
         {"name":"KEYCLOAK_ADMIN","valueFrom":{"secretKeyRef":{"name":"keycloak-admin","key":"username"}}},
         {"name":"KEYCLOAK_ADMIN_PASSWORD","valueFrom":{"secretKeyRef":{"name":"keycloak-admin","key":"password"}}},
         {"name":"DATABASE_USER","valueFrom":{"secretKeyRef":{"name":"messenger-db-app","key":"username"}}},
