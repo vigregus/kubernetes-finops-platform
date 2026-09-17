@@ -78,3 +78,21 @@ class TokenCheck:
     @classmethod
     def rejected(cls, rejection: TokenRejection) -> TokenCheck:
         return cls(rejection=rejection)
+
+
+@dataclass(frozen=True, slots=True)
+class LogoutClaims:
+    """Минимум из OIDC Back-Channel Logout Token, нужный приложению."""
+
+    subject: str | None
+    session_state: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class LogoutTokenCheck:
+    claims: LogoutClaims | None = None
+    rejection: TokenRejection | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.claims is not None

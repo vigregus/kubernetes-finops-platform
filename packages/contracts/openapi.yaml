@@ -166,7 +166,12 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Conversation' }
         '403':
-          description: Собеседник заблокировал отправителя
+          description: "Действие недоступно: блокировка, неподтверждённый адрес или свой ID"
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          description: Участник не найден или недоступен
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }

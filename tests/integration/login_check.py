@@ -30,6 +30,7 @@ KEYCLOAK = os.getenv(
     "KEYCLOAK_URL", "http://messenger-idp-service.keycloak.svc.cluster.local:8080"
 )
 REALM = os.getenv("KEYCLOAK_REALM", "messenger")
+OIDC_CLIENT_ID = os.getenv("INTEGRATION_OIDC_CLIENT_ID", "messenger-web")
 API = os.getenv("API_URL", "http://api.messenger.svc.cluster.local")
 ORIGIN = os.getenv("WEB_ORIGIN", "https://app.finops.local")
 REDIRECT = f"{ORIGIN}/callback"
@@ -115,7 +116,7 @@ async def authorization_code(login: str, password: str, challenge: str) -> str |
         page = await browser.get(
             f"{KEYCLOAK}/realms/{REALM}/protocol/openid-connect/auth",
             params={
-                "client_id": "messenger-web",
+                "client_id": OIDC_CLIENT_ID,
                 "response_type": "code",
                 "scope": "openid",
                 "redirect_uri": REDIRECT,

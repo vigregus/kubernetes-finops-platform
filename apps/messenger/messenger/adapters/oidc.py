@@ -25,12 +25,19 @@ import httpx
 import jwt
 from jwt import PyJWK
 
-from messenger.domain.identity import Claims, TokenCheck, TokenRejection
+from messenger.domain.identity import (
+    Claims,
+    LogoutClaims,
+    LogoutTokenCheck,
+    TokenCheck,
+    TokenRejection,
+)
 from messenger.telemetry import metrics
 
 # Единственный допустимый алгоритм подписи. Список, а не строка: при
 # ротации на другой алгоритм здесь окажутся оба, и это будет видно.
 ALGORITHMS = ("RS256",)
+BACKCHANNEL_LOGOUT_EVENT = "http://schemas.openid.net/event/backchannel-logout"
 
 log = logging.getLogger(__name__)
 
@@ -211,6 +218,73 @@ async def verify_access_token(token: str, *, keys: JwksCache, settings: OidcSett
         return TokenCheck.rejected(TokenRejection.MALFORMED)
 
     return TokenCheck.accepted(_to_claims(payload))
+
+
+async def verify_logout_token(
+    token: str,
+    *,
+    keys: JwksCache,
+    settings: OidcSettings,
+    audience: str,
+) -> LogoutTokenCheck:
+    """Проверяет OIDC Back-Channel Logout Token.
+
+    Logout Token не является access-токеном: у него нет ``exp``, зато
+    обязательны ``iat``, ``jti`` и специальное событие. Смешивать два
+    формата в одной функции означало бы ослабить требования к обоим.
+    """
+    try:
+        header = jwt.get_unverified_header(token)
+    except jwt.PyJWTError:
+        return LogoutTokenCheck(rejection=TokenRejection.MALFORMED)
+    kid = header.get("kid")
+    if not kid:
+        return LogoutTokenCheck(rejection=TokenRejection.MALFORMED)
+    key = await keys.key_for(kid)
+    if key is None:
+        rejection = (
+            TokenRejection.KEYS_UNAVAILABLE
+            if not keys.has_keys
+            else TokenRejection.UNKNOWN_KEY
+        )
+        return LogoutTokenCheck(rejection=rejection)
+    try:
+        payload = jwt.decode(
+            token,
+            key=key,
+            algorithms=list(ALGORITHMS),
+            audience=audience,
+            issuer=settings.issuer,
+            leeway=settings.leeway_seconds,
+            options={
+                "require": ["iat", "jti", "iss", "aud", "events"],
+                "verify_exp": False,
+            },
+        )
+    except jwt.InvalidAudienceError:
+        return LogoutTokenCheck(rejection=TokenRejection.WRONG_AUDIENCE)
+    except jwt.InvalidIssuerError:
+        return LogoutTokenCheck(rejection=TokenRejection.WRONG_ISSUER)
+    except jwt.MissingRequiredClaimError:
+        return LogoutTokenCheck(rejection=TokenRejection.MISSING_CLAIM)
+    except jwt.InvalidSignatureError:
+        return LogoutTokenCheck(rejection=TokenRejection.BAD_SIGNATURE)
+    except jwt.PyJWTError:
+        return LogoutTokenCheck(rejection=TokenRejection.MALFORMED)
+
+    events = payload.get("events")
+    subject = payload.get("sub")
+    session_state = payload.get("sid")
+    if (
+        not isinstance(events, dict)
+        or BACKCHANNEL_LOGOUT_EVENT not in events
+        or (not subject and not session_state)
+        or "nonce" in payload
+    ):
+        return LogoutTokenCheck(rejection=TokenRejection.MALFORMED)
+    return LogoutTokenCheck(
+        claims=LogoutClaims(subject=subject, session_state=session_state)
+    )
 
 
 def _to_claims(payload: dict) -> Claims:

@@ -6,7 +6,14 @@
 # Первая редакция на этом и сломалась - под поднял uvicorn вместо проверок.
 rc=0
 for f in /checks/*_check.py; do
-    echo "  -- $(basename "$f")"
+    name="$(basename "$f")"
+    if [ -n "${INTEGRATION_ONLY:-}" ]; then
+        case ",$INTEGRATION_ONLY," in
+            *",$name,"*) ;;
+            *) continue ;;
+        esac
+    fi
+    echo "  -- $name"
     python "$f" || rc=1
 done
 exit $rc

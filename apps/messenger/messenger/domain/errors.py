@@ -20,8 +20,11 @@ class Reason(str, Enum):
 
     NOT_A_MEMBER = "not_a_member"
     CONVERSATION_NOT_FOUND = "conversation_not_found"
+    USER_NOT_FOUND = "user_not_found"
     MESSAGE_NOT_FOUND = "message_not_found"
     BLOCKED = "blocked"
+    EMAIL_UNVERIFIED = "email_unverified"
+    SELF_CONVERSATION = "self_conversation"
     DUPLICATE_MESSAGE = "duplicate_message"
     PAYLOAD_TOO_LARGE = "payload_too_large"
     UNSUPPORTED_MEDIA_TYPE = "unsupported_media_type"
@@ -64,8 +67,11 @@ _HIDDEN_NOT_FOUND = Problem(404, "resource_not_found", "Ресурс не най
 
 _PUBLIC: dict[Reason, Problem] = {
     Reason.CONVERSATION_NOT_FOUND: _HIDDEN_NOT_FOUND,
+    Reason.USER_NOT_FOUND: _HIDDEN_NOT_FOUND,
     Reason.MESSAGE_NOT_FOUND: _HIDDEN_NOT_FOUND,
     Reason.BLOCKED: Problem(403, "forbidden", "Действие недоступно"),
+    Reason.EMAIL_UNVERIFIED: Problem(403, "forbidden", "Действие недоступно"),
+    Reason.SELF_CONVERSATION: Problem(403, "forbidden", "Действие недоступно"),
     Reason.DUPLICATE_MESSAGE: Problem(200, "duplicate_message", "Сообщение уже принято"),
     Reason.PAYLOAD_TOO_LARGE: Problem(413, "payload_too_large", "Содержимое слишком велико"),
     Reason.UNSUPPORTED_MEDIA_TYPE: Problem(415, "unsupported_media_type", "Тип не разрешён"),

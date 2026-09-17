@@ -14,15 +14,19 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from urllib.parse import parse_qs
 
 from fastapi import FastAPI, Response
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
 from pydantic import BaseModel, Field
 from starlette.requests import Request
 
+from messenger.domain.errors import to_problem
 from messenger.domain.identity import TokenRejection
-from messenger.domain.ids import DeviceId, SessionId
+from messenger.domain.ids import DeviceId, SessionId, UserId
 from messenger.domain.user import capabilities_of
+from messenger.services import backchannel as backchannel_service
+from messenger.services import conversations as conversation_service
 from messenger.services import identity as identity_service
 from messenger.services import login as login_service
 from messenger.services import realtime as realtime_service
@@ -71,6 +75,38 @@ app.state.runtime = runtime_service.Runtime(
     settings=runtime_service.pool_settings_from_env(), application_name=SERVICE
 )
 
+
+@app.post("/internal/oidc/backchannel-logout")
+async def oidc_backchannel_logout(request: Request, response: Response) -> dict[str, object]:
+    """Принимает подписанный logout-token от Keycloak.
+
+    Точка внутренняя, но доверие строится не на сети: подпись, издатель,
+    аудитория и тип события проверяются так же строго, как у access-токена.
+    """
+    try:
+        form = parse_qs((await request.body()).decode("utf-8", errors="strict"))
+    except UnicodeDecodeError:
+        response.status_code = 400
+        return {"code": "invalid_logout_token"}
+    token = form.get("logout_token", [None])[0]
+    if not token:
+        response.status_code = 400
+        return {"code": "invalid_logout_token"}
+    runtime = request.app.state.runtime
+    async with runtime.connection() as conn:
+        result = await backchannel_service.handle_logout(
+            conn,
+            token=token,
+            keys=runtime.keys,
+            settings=runtime.oidc_settings,
+            audience=runtime.backchannel_audience,
+            realtime=runtime.centrifugo,
+        )
+    if not result.accepted:
+        response.status_code = 400
+        return {"code": "invalid_logout_token"}
+    return {"accepted": True, "revoked": result.revoked}
+
 # --- вход -------------------------------------------------------------------
 
 # Имя и путь cookie. Путь узкий: cookie отправляется только на точки обмена,
@@ -94,6 +130,10 @@ class AuthorizationCode(BaseModel):
     code_verifier: str = Field(min_length=1)
     redirect_uri: str = Field(min_length=1)
     device_id: uuid.UUID | None = None
+
+
+class CreateDirectConversation(BaseModel):
+    participant_id: uuid.UUID
 
 
 def _origin_allowed(request: Request) -> bool:
@@ -653,6 +693,40 @@ async def me(request: Request, response: Response) -> dict[str, object]:
         "email": user.email,
         "email_verified": user.email_verified,
         "capabilities": sorted(c.value for c in capabilities_of(user)),
+    }
+
+
+@app.post("/conversations")
+async def create_direct_conversation(
+    body: CreateDirectConversation, request: Request, response: Response
+) -> dict[str, object]:
+    """Создаёт диалог от имени субъекта bearer-токена."""
+    runtime = request.app.state.runtime
+    async with runtime.connection() as conn:
+        auth = await _current(request, conn)
+        if not auth.ok or auth.user is None:
+            return _auth_failure(auth.rejection, response)
+        result = await conversation_service.create_direct(
+            conn,
+            actor=auth.user,
+            participant_id=UserId(body.participant_id),
+        )
+
+    if not result.ok or result.conversation is None:
+        problem = to_problem(result.rejection)
+        response.status_code = problem.status
+        return {"code": problem.code, "title": problem.title}
+
+    response.status_code = 201 if result.created else 200
+    conversation = result.conversation
+    return {
+        "conversation_id": str(conversation.conversation_id),
+        "type": conversation.type.value,
+        "participants": [
+            {"user_id": str(user.user_id), "display_name": user.display_name}
+            for user in result.participants
+        ],
+        "created_at": conversation.created_at,
     }
 
 
