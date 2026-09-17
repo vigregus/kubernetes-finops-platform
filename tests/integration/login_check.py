@@ -30,7 +30,7 @@ KEYCLOAK = os.getenv(
     "KEYCLOAK_URL", "http://messenger-idp-service.keycloak.svc.cluster.local:8080"
 )
 REALM = os.getenv("KEYCLOAK_REALM", "messenger")
-OIDC_CLIENT_ID = os.getenv("INTEGRATION_OIDC_CLIENT_ID", "messenger-web")
+OIDC_CLIENT_ID = os.getenv("INTEGRATION_OIDC_CLIENT_ID") or "messenger-web"
 API = os.getenv("API_URL", "http://api.messenger.svc.cluster.local")
 ORIGIN = os.getenv("WEB_ORIGIN", "https://app.finops.local")
 REDIRECT = f"{ORIGIN}/callback"
