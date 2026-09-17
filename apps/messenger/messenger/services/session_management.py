@@ -146,7 +146,7 @@ async def revoke_for_token(
                 "current": current,
             },
         )
-        await _drop_connections(
+        await drop_connections(
             realtime,
             user_id=str(auth.user.user_id),
             revoked=[revoked],
@@ -201,7 +201,7 @@ async def revoke_all_for_token(
         },
     )
     if revoked:
-        await _drop_connections(
+        await drop_connections(
             realtime,
             user_id=str(auth.user.user_id),
             revoked=revoked,
@@ -210,7 +210,7 @@ async def revoke_all_for_token(
     return RevokeAllResult(revoked=count)
 
 
-async def _drop_connections(
+async def drop_connections(
     realtime: CentrifugoClient | None,
     *,
     user_id: str,

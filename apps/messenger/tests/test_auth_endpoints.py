@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from messenger.api import main
 from messenger.api.main import app
+from messenger.services import backchannel as backchannel_service
 from messenger.services import login as login_service
 
 # Значения латиницей не для красоты: cookie и заголовки кодируются
@@ -30,6 +31,9 @@ class FakeRuntime:
 
     login = None
     keys = None
+    oidc_settings = None
+    backchannel_audience = "messenger-web"
+    centrifugo = None
 
     @asynccontextmanager
     async def connection(self):
@@ -141,3 +145,53 @@ def test_тело_запроса_проверяется_по_контракту(
     """Пустой verifier — это вход без PKCE, то есть без защиты кода."""
     r = client.post("/auth/callback", json={**ТЕЛО, "code_verifier": ""})
     assert r.status_code == 422
+
+
+def test_backchannel_logout_без_токена_отклонён(client, monkeypatch):
+    async def _не_должно_вызваться(*args, **kwargs):
+        raise AssertionError("сервис вызван без logout_token")
+
+    monkeypatch.setattr(backchannel_service, "handle_logout", _не_должно_вызваться)
+    response = client.post("/internal/oidc/backchannel-logout", data={})
+    assert response.status_code == 400
+    assert response.json() == {"code": "invalid_logout_token"}
+
+
+def test_backchannel_logout_с_невалидной_кодировкой_не_роняет_api(client):
+    response = client.post(
+        "/internal/oidc/backchannel-logout",
+        content=b"logout_token=\xff",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert response.status_code == 400
+    assert response.json() == {"code": "invalid_logout_token"}
+
+
+def test_backchannel_logout_передаёт_токен_сервису(client, monkeypatch):
+    async def _accepted(conn, **kwargs):
+        assert kwargs["token"] == "signed-logout-token"
+        assert kwargs["audience"] == "messenger-web"
+        return backchannel_service.BackchannelResult(accepted=True, revoked=2)
+
+    monkeypatch.setattr(backchannel_service, "handle_logout", _accepted)
+    response = client.post(
+        "/internal/oidc/backchannel-logout",
+        data={"logout_token": "signed-logout-token"},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"accepted": True, "revoked": 2}
+
+
+def test_backchannel_logout_с_неверной_подписью_отклонён(client, monkeypatch):
+    async def _rejected(conn, **kwargs):
+        return backchannel_service.BackchannelResult(
+            rejection=main.TokenRejection.BAD_SIGNATURE
+        )
+
+    monkeypatch.setattr(backchannel_service, "handle_logout", _rejected)
+    response = client.post(
+        "/internal/oidc/backchannel-logout",
+        data={"logout_token": "forged"},
+    )
+    assert response.status_code == 400
+    assert response.json() == {"code": "invalid_logout_token"}

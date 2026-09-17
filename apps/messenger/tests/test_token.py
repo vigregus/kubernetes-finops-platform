@@ -178,3 +178,113 @@ def test_ключ_шифрования_не_годится_для_подписи
     ]}
     отобранные = oidc.usable_keys(документ)
     assert list(отобранные) == ["подпись"]
+
+
+def test_ротация_сохраняет_старый_ключ_в_окне_перекрытия(
+    monkeypatch, settings, key
+):
+    """ROT-001: новый ``kid`` не разлогинивает токены старого ключа.
+
+    При промахе кеш перечитывает весь JWKS. В окне перекрытия документ
+    содержит оба ключа: новый нужен новым токенам, старый — уже выданным.
+    Проверяем оба направления после одного обновления, а не только число
+    ключей в JSON.
+    """
+    новый = _rsa_key()
+    старый_kid = "ключ-до-ротации"
+    новый_kid = "ключ-после-ротации"
+    cache = oidc.JwksCache(
+        settings=oidc.OidcSettings(
+            issuer=settings.issuer,
+            jwks_url=settings.jwks_url,
+            audience=settings.audience,
+            min_refresh_seconds=0,
+        )
+    )
+    cache._keys = {старый_kid: PyJWK.from_dict(_jwk(key, kid=старый_kid))}
+    cache._fetched_at = time.monotonic()
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "keys": [
+                    _jwk(key, kid=старый_kid),
+                    _jwk(новый, kid=новый_kid),
+                ]
+            }
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+        async def get(self, url):
+            assert url == settings.jwks_url
+            return Response()
+
+    monkeypatch.setattr(oidc.httpx, "AsyncClient", lambda **kwargs: Client())
+
+    новый_токен = _token(новый, kid=новый_kid)
+    старый_токен = _token(key, kid=старый_kid)
+    assert verify(новый_токен, cache, cache.settings).ok
+    assert verify(старый_токен, cache, cache.settings).ok
+
+
+def test_backchannel_logout_token_проверяется_отдельным_контрактом(
+    key, keys, settings
+):
+    now = datetime.now(UTC)
+    token = jwt.encode(
+        {
+            "iss": ISSUER,
+            "aud": "messenger-web",
+            "iat": int(now.timestamp()),
+            "jti": "logout-1",
+            "sid": "сессия-1",
+            "events": {oidc.BACKCHANNEL_LOGOUT_EVENT: {}},
+        },
+        key,
+        algorithm="RS256",
+        headers={"kid": KID},
+    )
+    check = asyncio.run(
+        oidc.verify_logout_token(
+            token,
+            keys=keys,
+            settings=settings,
+            audience="messenger-web",
+        )
+    )
+    assert check.ok and check.claims.session_state == "сессия-1"
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"events": {"другое-событие": {}}},
+        {"nonce": "logout-token-never-has-nonce"},
+    ],
+)
+def test_не_logout_event_не_может_отозвать_сессию(key, keys, settings, extra):
+    now = datetime.now(UTC)
+    payload = {
+        "iss": ISSUER,
+        "aud": "messenger-web",
+        "iat": int(now.timestamp()),
+        "jti": "logout-invalid",
+        "sid": "сессия-1",
+        "events": {oidc.BACKCHANNEL_LOGOUT_EVENT: {}},
+        **extra,
+    }
+    token = jwt.encode(payload, key, algorithm="RS256", headers={"kid": KID})
+    check = asyncio.run(
+        oidc.verify_logout_token(
+            token, keys=keys, settings=settings, audience="messenger-web"
+        )
+    )
+    assert check.rejection is TokenRejection.MALFORMED

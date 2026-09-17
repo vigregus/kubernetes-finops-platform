@@ -162,6 +162,9 @@ class Runtime:
     admin: keycloak.AdminClient | None = None
     limiter: ratelimit.RateLimiter | None = None
     centrifugo: centrifugo.CentrifugoClient | None = None
+    backchannel_audience: str = field(
+        default_factory=lambda: os.getenv("OIDC_BACKCHANNEL_AUDIENCE", "messenger-web")
+    )
 
     def __post_init__(self) -> None:
         if self.keys is None:

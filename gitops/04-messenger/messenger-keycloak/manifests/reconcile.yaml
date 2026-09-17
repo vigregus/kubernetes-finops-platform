@@ -154,6 +154,26 @@ spec:
                 "$KEYCLOAK/admin/realms/$REALM"
               rm -f /tmp/realm.json /tmp/realm-patched.json
 
+              # Браузерная сессия принадлежит messenger-web, поэтому именно
+              # этот клиент получает Back-Channel Logout. Без повторяемой
+              # сверки настройка осталась бы только в одноразовом импорте.
+              WEB_CLIENT=$(curl -sf -H "$AUTH" \
+                "$KEYCLOAK/admin/realms/$REALM/clients?clientId=messenger-web" | jq -r '.[0].id')
+              [ -n "$WEB_CLIENT" ] && [ "$WEB_CLIENT" != "null" ] || {
+                echo "клиента messenger-web нет в реалме $REALM" >&2; exit 1; }
+              curl -sf -H "$AUTH" \
+                "$KEYCLOAK/admin/realms/$REALM/clients/$WEB_CLIENT" > /tmp/web-client.json
+              jq '.frontchannelLogout = false
+                  | .attributes["backchannel.logout.url"] =
+                      "http://api.messenger.svc.cluster.local/internal/oidc/backchannel-logout"
+                  | .attributes["backchannel.logout.session.required"] = "true"' \
+                /tmp/web-client.json > /tmp/web-client-patched.json
+              curl -sf -X PUT -H "$AUTH" -H 'Content-Type: application/json' \
+                --data-binary @/tmp/web-client-patched.json \
+                "$KEYCLOAK/admin/realms/$REALM/clients/$WEB_CLIENT"
+              rm -f /tmp/web-client.json /tmp/web-client-patched.json
+              echo "messenger-web: back-channel logout настроен"
+
               CLIENT=$(curl -sf -H "$AUTH" \
                 "$KEYCLOAK/admin/realms/$REALM/clients?clientId=messenger-api" | jq -r '.[0].id')
               [ -n "$CLIENT" ] && [ "$CLIENT" != "null" ] || {

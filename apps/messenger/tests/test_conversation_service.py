@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from messenger.domain.authorization import Decision
 from messenger.domain.conversation import (
     Conversation,
     ConversationType,
@@ -68,10 +69,10 @@ def _conversation() -> Conversation:
 
 
 def test_неподтверждённый_не_может_начать_беседу(monkeypatch):
-    async def _не_вызывать(*args, **kwargs):
-        raise AssertionError("репозиторий вызван до проверки возможности")
+    async def _deny(*args, **kwargs):
+        return Decision.deny(Reason.EMAIL_UNVERIFIED)
 
-    monkeypatch.setattr(service.users, "fetch_user", _не_вызывать)
+    monkeypatch.setattr(service.authorization, "authorize", _deny)
     result = asyncio.run(
         service.create_direct(
             Connection(), actor=_user(ACTOR_ID, verified=False), participant_id=OTHER_ID
@@ -81,10 +82,10 @@ def test_неподтверждённый_не_может_начать_бесе�
 
 
 def test_беседа_с_собой_отклоняется_до_базы(monkeypatch):
-    async def _не_вызывать(*args, **kwargs):
-        raise AssertionError("репозиторий вызван для беседы с собой")
+    async def _deny(*args, **kwargs):
+        return Decision.deny(Reason.SELF_CONVERSATION)
 
-    monkeypatch.setattr(service.users, "fetch_user", _не_вызывать)
+    monkeypatch.setattr(service.authorization, "authorize", _deny)
     result = asyncio.run(
         service.create_direct(Connection(), actor=_user(ACTOR_ID), participant_id=ACTOR_ID)
     )
@@ -93,10 +94,10 @@ def test_беседа_с_собой_отклоняется_до_базы(monkeyp
 
 @pytest.mark.parametrize("participant", [None, _user(OTHER_ID, deleted=True)])
 def test_отсутствующий_или_удалённый_участник_скрыт(monkeypatch, participant):
-    async def _fetch(*args, **kwargs):
-        return participant
+    async def _deny(*args, **kwargs):
+        return Decision.deny(Reason.USER_NOT_FOUND)
 
-    monkeypatch.setattr(service.users, "fetch_user", _fetch)
+    monkeypatch.setattr(service.authorization, "authorize", _deny)
     result = asyncio.run(
         service.create_direct(Connection(), actor=_user(ACTOR_ID), participant_id=OTHER_ID)
     )
@@ -104,15 +105,10 @@ def test_отсутствующий_или_удалённый_участник_�
 
 
 def test_блокировка_в_любую_сторону_запрещает_создание(monkeypatch):
-    async def _fetch(*args, **kwargs):
-        return _user(OTHER_ID)
+    async def _deny(*args, **kwargs):
+        return Decision.deny(Reason.BLOCKED)
 
-    async def _blocked(*args, **kwargs):
-        assert {kwargs["first"], kwargs["second"]} == {ACTOR_ID, OTHER_ID}
-        return True
-
-    monkeypatch.setattr(service.users, "fetch_user", _fetch)
-    monkeypatch.setattr(service.conversations, "creation_blocked_between", _blocked)
+    monkeypatch.setattr(service.authorization, "authorize", _deny)
     result = asyncio.run(
         service.create_direct(Connection(), actor=_user(ACTOR_ID), participant_id=OTHER_ID)
     )
@@ -124,11 +120,8 @@ def test_первый_запрос_атомарно_создаёт_беседу_
     expected = _conversation()
     members: list[UserId] = []
 
-    async def _fetch(*args, **kwargs):
-        return _user(OTHER_ID)
-
-    async def _not_blocked(*args, **kwargs):
-        return False
+    async def _allow(*args, **kwargs):
+        return Decision.allow(target_user=_user(OTHER_ID))
 
     async def _ensure(*args, **kwargs):
         assert kwargs["direct_key"] == direct_key(ACTOR_ID, OTHER_ID)
@@ -137,8 +130,7 @@ def test_первый_запрос_атомарно_создаёт_беседу_
     async def _add(*args, **kwargs):
         members.append(kwargs["user_id"])
 
-    monkeypatch.setattr(service.users, "fetch_user", _fetch)
-    monkeypatch.setattr(service.conversations, "creation_blocked_between", _not_blocked)
+    monkeypatch.setattr(service.authorization, "authorize", _allow)
     monkeypatch.setattr(service.conversations, "ensure_direct_conversation", _ensure)
     monkeypatch.setattr(service.conversations, "add_member", _add)
 
@@ -153,11 +145,8 @@ def test_первый_запрос_атомарно_создаёт_беседу_
 def test_последовательный_повтор_возвращает_существующую(monkeypatch):
     expected = _conversation()
 
-    async def _fetch(*args, **kwargs):
-        return _user(OTHER_ID)
-
-    async def _not_blocked(*args, **kwargs):
-        return False
+    async def _allow(*args, **kwargs):
+        return Decision.allow(target_user=_user(OTHER_ID))
 
     async def _ensure(*args, **kwargs):
         return EnsureConversationResult(conversation=expected, created=False)
@@ -165,8 +154,7 @@ def test_последовательный_повтор_возвращает_су
     async def _не_добавлять(*args, **kwargs):
         raise AssertionError("повтор попытался создать членство заново")
 
-    monkeypatch.setattr(service.users, "fetch_user", _fetch)
-    monkeypatch.setattr(service.conversations, "creation_blocked_between", _not_blocked)
+    monkeypatch.setattr(service.authorization, "authorize", _allow)
     monkeypatch.setattr(service.conversations, "ensure_direct_conversation", _ensure)
     monkeypatch.setattr(service.conversations, "add_member", _не_добавлять)
 

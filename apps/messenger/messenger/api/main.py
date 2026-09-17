@@ -14,6 +14,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from urllib.parse import parse_qs
 
 from fastapi import FastAPI, Response
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
@@ -24,6 +25,7 @@ from messenger.domain.errors import to_problem
 from messenger.domain.identity import TokenRejection
 from messenger.domain.ids import DeviceId, SessionId, UserId
 from messenger.domain.user import capabilities_of
+from messenger.services import backchannel as backchannel_service
 from messenger.services import conversations as conversation_service
 from messenger.services import identity as identity_service
 from messenger.services import login as login_service
@@ -72,6 +74,38 @@ app = FastAPI(title="Messenger API", docs_url=None, redoc_url=None, lifespan=lif
 app.state.runtime = runtime_service.Runtime(
     settings=runtime_service.pool_settings_from_env(), application_name=SERVICE
 )
+
+
+@app.post("/internal/oidc/backchannel-logout")
+async def oidc_backchannel_logout(request: Request, response: Response) -> dict[str, object]:
+    """Принимает подписанный logout-token от Keycloak.
+
+    Точка внутренняя, но доверие строится не на сети: подпись, издатель,
+    аудитория и тип события проверяются так же строго, как у access-токена.
+    """
+    try:
+        form = parse_qs((await request.body()).decode("utf-8", errors="strict"))
+    except UnicodeDecodeError:
+        response.status_code = 400
+        return {"code": "invalid_logout_token"}
+    token = form.get("logout_token", [None])[0]
+    if not token:
+        response.status_code = 400
+        return {"code": "invalid_logout_token"}
+    runtime = request.app.state.runtime
+    async with runtime.connection() as conn:
+        result = await backchannel_service.handle_logout(
+            conn,
+            token=token,
+            keys=runtime.keys,
+            settings=runtime.oidc_settings,
+            audience=runtime.backchannel_audience,
+            realtime=runtime.centrifugo,
+        )
+    if not result.accepted:
+        response.status_code = 400
+        return {"code": "invalid_logout_token"}
+    return {"accepted": True, "revoked": result.revoked}
 
 # --- вход -------------------------------------------------------------------
 

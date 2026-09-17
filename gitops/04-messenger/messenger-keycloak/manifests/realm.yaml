@@ -123,6 +123,8 @@ spec:
         attributes:
           pkce.code.challenge.method: S256
           post.logout.redirect.uris: https://app.finops.local/*
+          backchannel.logout.url: http://api.messenger.svc.cluster.local/internal/oidc/backchannel-logout
+          backchannel.logout.session.required: "true"
         protocolMappers:
           # Без этого в токене нет `aud` ресурсного сервера, и API
           # не может отличить токен, выданный для него, от токена,

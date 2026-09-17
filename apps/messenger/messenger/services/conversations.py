@@ -10,11 +10,13 @@ from dataclasses import dataclass, field
 
 import asyncpg
 
+from messenger.domain.authorization import Action, ResourceRef, Subject
 from messenger.domain.conversation import Conversation
 from messenger.domain.errors import Reason
 from messenger.domain.ids import ConversationId, UserId, direct_key
-from messenger.domain.user import Capability, User, can
-from messenger.repositories import conversations, users
+from messenger.domain.user import User
+from messenger.repositories import conversations
+from messenger.services import authorization
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,20 +40,16 @@ async def create_direct(
     из проверенного токена. Поэтому тело запроса не может создать беседу
     от имени другого пользователя.
     """
-    if not can(actor, Capability.START_CONVERSATION):
-        return CreateDirectResult(rejection=Reason.EMAIL_UNVERIFIED)
-    if actor.user_id == participant_id:
-        return CreateDirectResult(rejection=Reason.SELF_CONVERSATION)
-
     async with conn.transaction():
-        participant = await users.fetch_user(conn, user_id=participant_id)
-        if participant is None or participant.is_deleted:
-            return CreateDirectResult(rejection=Reason.USER_NOT_FOUND)
-
-        if await conversations.creation_blocked_between(
-            conn, first=actor.user_id, second=participant.user_id
-        ):
-            return CreateDirectResult(rejection=Reason.BLOCKED)
+        decision = await authorization.authorize(
+            conn,
+            subject=Subject(actor),
+            resource=ResourceRef.user(participant_id),
+            action=Action.CREATE_CONVERSATION,
+        )
+        if not decision.allowed or decision.target_user is None:
+            return CreateDirectResult(rejection=decision.reason or Reason.INTERNAL)
+        participant = decision.target_user
 
         key = direct_key(actor.user_id, participant.user_id)
         ensured = await conversations.ensure_direct_conversation(
