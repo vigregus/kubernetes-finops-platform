@@ -66,11 +66,13 @@ class Publisher:
             enable_idempotence=True,
             acks="all",
             request_timeout_ms=self.settings.request_timeout_ms,
-            # Порядок внутри партиции важнее пропускной способности:
-            # содержимое, обогнавшее факт своего появления, потребитель
-            # увидит как сообщение из ниоткуда.
-            max_in_flight_requests_per_connection=1,
         )
+        # Порядка ради здесь нет `max_in_flight_requests_per_connection`:
+        # aiokafka такого параметра не принимает - проверено, процесс
+        # падал на TypeError при старте. Порядок внутри партиции держит
+        # сам идемпотентный режим: он нумерует записи и брокер отвергает
+        # пришедшие не по порядку. Дополнительно его держит отправитель -
+        # он останавливает пачку на первой же неудаче.
         try:
             await producer.start()
         except (KafkaError, OSError) as exc:
