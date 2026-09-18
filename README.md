@@ -60,6 +60,31 @@ Expected outcomes for AWS v2:
 
 ## Scope Overview
 
+### Messenger implementation status
+
+The repository also contains the messenger vertical slice described in
+[`docs/messenger/`](docs/messenger/README.md). Its executable roadmap is tracked
+in [`IMPLEMENTATION-PLAN.md`](IMPLEMENTATION-PLAN.md); that file is the source of
+truth for gate completion.
+
+Current verified state:
+
+- G0 (local platform) and G1 (identity, sessions, authorization and direct
+  conversations) are complete;
+- G2-000 is complete: message facts and content use separate Kafka topics,
+  SCRAM identities and least-privilege ACLs;
+- G2-001 is complete: the immutable `Message` / `MessagePayload` domain model
+  and its invariants are covered by unit tests;
+- G2-002 is complete: a message and its fact/content outbox records are written
+  atomically, retries reuse the original `message_id` and sequence, and a live
+  failure-injection test proves rollback of the message, outbox and sequence;
+- the HTTP message endpoint, outbox relay and Kafka consumers are not complete,
+  so the end-to-end G2 delivery gate remains open.
+
+The deployed local API image contains G2-002, while `make local-test` verifies
+contracts, layer rules, unit tests, migrations, authenticated Kafka ACLs and the
+live Postgres/Keycloak/Centrifugo integration suite.
+
 ### Local v1
 
 Local v1 is intentionally constrained to one local `minikube` cluster with three namespaces representing `dev`, `stage`, and `prod`.
