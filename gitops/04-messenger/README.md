@@ -7,7 +7,7 @@
 | --- | --- | --- |
 | `messenger-postgres` | `Cluster messenger-db` + `Database` + `Pooler` PgBouncer | CNPG |
 | `messenger-redis` | `Redis messenger-redis`, БД 0/1/2 под три роли | ot-container-kit |
-| `messenger-kafka-topics` | три `KafkaTopic` на `messenger-kafka` | Strimzi |
+| `messenger-kafka-topics` | четыре `KafkaTopic` и отдельные KafkaUser с ACL | Strimzi |
 | `messenger-secrets` | учётные данные MinIO и Centrifugo | джоб-хук |
 | `messenger-minio` | `Tenant messenger-objects`, два бакета | MinIO |
 | `messenger-keycloak` | `Cluster keycloak-db` + `Keycloak messenger-idp` | CNPG, Keycloak |

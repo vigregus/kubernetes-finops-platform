@@ -32,7 +32,7 @@ MESSENGER_APPS  := messenger-secrets messenger-postgres messenger-redis \
 PYTHON ?= python3.12
 PYTHON_VERSION = (3, 12)
 
-.PHONY: help bootstrap local-up local-test local-down contracts layers sql venv lint unit migrate smoke integration status
+.PHONY: help bootstrap local-up local-test local-down contracts kafka-security layers sql venv lint unit migrate smoke integration status
 
 help:
 	@grep -E '^[a-z-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -111,11 +111,15 @@ local-up: ## Поднять мессенджер (сам вызовет bootstra
 	done
 	@echo "мессенджер поднят"
 
-local-test: contracts layers sql lint unit migrate smoke integration ## Контракты, слои, SQL, линтер, юнит, миграции, связность, интеграция
+local-test: contracts kafka-security layers sql lint unit migrate smoke integration ## Контракты, безопасность Kafka, слои, SQL, линтер, юнит, миграции, связность, интеграция
 
 contracts: ## Схемы связны и обратно совместимы
 	@echo "· контракты"
 	@python3 packages/contracts/validate.py $${CONTRACT_BASE:-}
+
+kafka-security: ## SEC-010: потребитель непрочитанного не читает содержимое
+	@echo "· безопасность Kafka"
+	@python3 scripts/check-kafka-security.py
 
 layers: ## Зависимости между слоями идут только вниз
 	@echo "· слои"

@@ -45,6 +45,13 @@ spec:
         port: 9092
         type: internal
         tls: false
+        authentication:
+          type: scram-sha-512
+    # ACL включаются до появления первого потребителя. Иначе разделённые
+    # топики защищают только от случайного чтения: скомпрометированный
+    # consumer-unread всё равно смог бы подключиться к топику с текстом.
+    authorization:
+      type: simple
     config:
       # RF=1 и minISR=1 - следствие одного брокера, а не выбор. Профиль
       # прода (RF=3, minISR=2, acks=all, unclean.leader.election=false)

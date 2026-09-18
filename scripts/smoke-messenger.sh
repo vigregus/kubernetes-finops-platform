@@ -38,13 +38,70 @@ for db in 0:realtime 1:app-cache 2:security; do
         redis-cli -n "$n" set "smoke:$role" ok EX 60
 done
 
-# --- Kafka: запись в основной топик ----------------------------------------
-check "Kafka принимает запись в messenger.events.v1" \
-    kubectl run "kafka-$POD" -n kafka --rm -i --restart=Never --quiet \
-    --image=quay.io/strimzi/kafka:latest-kafka-4.3.1 --command -- \
-    sh -c "echo 'smoke:{}' | /opt/kafka/bin/kafka-console-producer.sh \
+# --- Kafka: SCRAM и наименьшие права --------------------------------------
+kafka_client() { # pod, KafkaUser, команда...
+    local pod="$1" user="$2" overrides
+    shift 2
+    overrides="$(printf '%s' '{"spec":{"containers":[{"name":"'"$pod"'","env":[{"name":"KAFKA_USER","value":"'"$user"'"},{"name":"KAFKA_PASSWORD","valueFrom":{"secretKeyRef":{"name":"'"$user"'","key":"password"}}}]}]}}')"
+    kubectl run "$pod" -n kafka --rm -i --restart=Never --quiet \
+        --image=quay.io/strimzi/kafka:latest-kafka-4.3.1 \
+        --overrides="$overrides" --command -- sh -c '
+            umask 077
+            printf "%s\n" \
+              "security.protocol=SASL_PLAINTEXT" \
+              "sasl.mechanism=SCRAM-SHA-512" \
+              "sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username=\"$KAFKA_USER\" password=\"$KAFKA_PASSWORD\";" \
+              > /tmp/client.properties
+            exec "$@"
+        ' sh "$@"
+}
+
+kafka_write() { # KafkaUser, topic, value
+    local user="$1" topic="$2" value="$3" pod="kafka-$POD-${4:-write}"
+    printf 'smoke:%s\n' "$value" | kafka_client "$pod" "$user" \
+        /opt/kafka/bin/kafka-console-producer.sh \
         --bootstrap-server messenger-kafka-kafka-bootstrap:9092 \
-        --topic messenger.events.v1 --property parse.key=true --property key.separator=:"
+        --producer.config /tmp/client.properties \
+        --topic "$topic" --property parse.key=true --property key.separator=:
+}
+
+kafka_read_one() { # KafkaUser, topic, group, suffix
+    local user="$1" topic="$2" group="$3" suffix="$4"
+    kafka_client "kafka-$POD-$suffix" "$user" \
+        /opt/kafka/bin/kafka-console-consumer.sh \
+        --bootstrap-server messenger-kafka-kafka-bootstrap:9092 \
+        --consumer.config /tmp/client.properties \
+        --topic "$topic" --group "$group" --from-beginning \
+        --max-messages 1 --timeout-ms 10000 >/dev/null
+}
+
+kafka_unread_cannot_read_content() {
+    local out
+    if out="$(kafka_client "kafka-$POD-denied" messenger-unread \
+        /opt/kafka/bin/kafka-console-consumer.sh \
+        --bootstrap-server messenger-kafka-kafka-bootstrap:9092 \
+        --consumer.config /tmp/client.properties \
+        --topic messenger.content.v1 --group messenger-unread \
+        --max-messages 1 --timeout-ms 5000 2>&1)"; then
+        echo "чтение content неожиданно разрешено" >&2
+        return 1
+    fi
+    grep -Eq 'TopicAuthorizationException|Not authorized to access topics' <<<"$out"
+}
+
+check "Kafka принимает запись только с SCRAM" \
+    kafka_write messenger-smoke messenger.events.v1 '{"kind":"connectivity"}' connectivity
+
+# SEC-010: факт и содержимое физически разделены, а ACL не позволяет
+# потребителю непрочитанного повысить себе доступ выбором другого топика.
+check "consumer-unread читает поток фактов" \
+    kafka_read_one messenger-unread messenger.events.v1 messenger-unread unread
+check "outbox пишет поток содержимого" \
+    kafka_write messenger-outbox messenger.content.v1 '{"text":"acl-proof"}' content-write
+check "consumer-realtime получил доступ к содержимому" \
+    kafka_read_one messenger-realtime messenger.content.v1 messenger-realtime content-read
+check "SEC-010: consumer-unread не читает содержимое" \
+    kafka_unread_cannot_read_content
 
 # --- Объектное хранилище: список бакетов от корневой учётной записи ---------
 # Учётные данные читаются здесь и передаются через stdin, а не аргументом
