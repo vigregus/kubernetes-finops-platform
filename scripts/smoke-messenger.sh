@@ -71,6 +71,12 @@ print(json.dumps({"spec": {"containers": [{
     ],
     "command": ["sh", "-c"],
     "args": [setup, "sh", *command],
+    # Без этого `kubectl run -i` не подключает stdin: overrides заменяет
+    # контейнер целиком, и `stdin: true`, который kubectl проставил бы сам,
+    # исчезает вместе с остальным. Продюсер тогда читает сразу EOF,
+    # не отправляет ничего - и завершается нулём.
+    "stdin": True,
+    "stdinOnce": True,
 }]}}))
 PY
 )"
@@ -121,15 +127,48 @@ kafka_unread_cannot_read_content() {
     return 0
 }
 
-check "Kafka принимает запись только с SCRAM" \
-    kafka_write messenger-smoke messenger.events.v1 '{"kind":"connectivity"}' connectivity
+kafka_offsets_sum() { # KafkaUser, topic, suffix
+    kafka_client "kafka-$POD-$3" "$1" \
+        /opt/kafka/bin/kafka-get-offsets.sh \
+        --bootstrap-server messenger-kafka-kafka-bootstrap:9092 \
+        --command-config /tmp/client.properties \
+        --topic "$2" 2>/dev/null \
+        | awk -F: '/^[a-z]/ {s+=$3} END {print s+0}'
+}
+
+# Код возврата продюсера ничего не доказывает: `kafka-console-producer`
+# завершается нулём и когда не ушла ни одна запись. Проверено измерением -
+# проверка была зелёной, а сумма смещений топика не менялась. Поэтому
+# записью считается только сдвинувшийся конец лога.
+kafka_write_lands() { # KafkaUser, topic, value, suffix, [кто читает смещения]
+    local user="$1" topic="$2" value="$3" suffix="$4" reader="${5:-$1}"
+    local before after
+    before="$(kafka_offsets_sum "$reader" "$topic" "$suffix-before")"
+    kafka_write "$user" "$topic" "$value" "$suffix" >/dev/null 2>&1 || return 1
+    after="$(kafka_offsets_sum "$reader" "$topic" "$suffix-after")"
+
+    case "$before$after" in
+        *[!0-9]*|"") echo "смещения не прочитаны: до=$before после=$after" >&2; return 1 ;;
+    esac
+    [ "$after" -gt "$before" ] || {
+        echo "конец лога не сдвинулся: до=$before после=$after" >&2
+        return 1
+    }
+}
+
+check "Kafka приняла запись — конец лога сдвинулся" \
+    kafka_write_lands messenger-smoke messenger.events.v1 '{"kind":"connectivity"}' connectivity
 
 # SEC-010: факт и содержимое физически разделены, а ACL не позволяет
 # потребителю непрочитанного повысить себе доступ выбором другого топика.
 check "consumer-unread читает поток фактов" \
     kafka_read_one messenger-unread messenger.events.v1 messenger-unread unread
+# Смещения читает realtime: у outbox право на запись, а не на чтение
+# конца лога, и подменять одно другим ради удобства проверки значило бы
+# проверять не те права, которые выданы.
 check "outbox пишет поток содержимого" \
-    kafka_write messenger-outbox messenger.content.v1 '{"text":"acl-proof"}' content-write
+    kafka_write_lands messenger-outbox messenger.content.v1 '{"text":"acl-proof"}' \
+        content-write messenger-realtime
 check "consumer-realtime получил доступ к содержимому" \
     kafka_read_one messenger-realtime messenger.content.v1 messenger-realtime content-read
 check "consumer-realtime видит offsets содержимого" \

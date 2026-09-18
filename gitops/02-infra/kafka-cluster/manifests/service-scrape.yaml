@@ -1,15 +1,21 @@
-# Strimzi's kafka-exporter deployment has no Service in front of it
-# (unlike the broker/bootstrap ones) - it's meant to be scraped from the
-# pod directly, so this has to be a VMPodScrape, not VMServiceScrape.
+# У kafka-exporter нет Service перед подом - в отличие от брокера
+# и bootstrap, - его снимают прямо с пода. Поэтому VMPodScrape,
+# а не VMServiceScrape.
+#
+# Имя в селекторе пережило переименование кластера orders-kafka ->
+# messenger-kafka и четыре дня указывало в пустоту: под экспортера работал,
+# дашборд был пуст, и в VictoriaMetrics не было ни одного ряда kafka_*.
+# Ни один статус этого не показывал - VMPodScrape был operational,
+# потому что «ни один под не подошёл» ошибкой не считается.
 apiVersion: operator.victoriametrics.com/v1beta1
 kind: VMPodScrape
 metadata:
-  name: orders-kafka-exporter
+  name: messenger-kafka-exporter
   namespace: kafka
 spec:
   selector:
     matchLabels:
-      strimzi.io/name: orders-kafka-kafka-exporter
+      strimzi.io/name: messenger-kafka-kafka-exporter
   podMetricsEndpoints:
     - port: tcp-prometheus
       path: /metrics
