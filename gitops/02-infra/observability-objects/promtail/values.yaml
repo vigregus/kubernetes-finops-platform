@@ -9,8 +9,9 @@ config:
     # apiserver, CNPG, Centrifugo.
     #
     # Наши сервисы пишут `_msg` и потому стоят первыми: их формат
-    # не должен зависеть от того, что делают соседи.
-    - url: http://vl-local-victoria-logs-single-server.observability.svc.cluster.local:9428/insert/loki/api/v1/push?_msg_field=_msg,msg,message
+    # не должен зависеть от того, что делают соседи. `output` в конце -
+    # это Falco: он называет текст события именно так.
+    - url: http://vl-local-victoria-logs-single-server.observability.svc.cluster.local:9428/insert/loki/api/v1/push?_msg_field=_msg,msg,message,output
   snippets:
     # Одноразовые поды проверок в хранилище журналов не попадают.
     #
