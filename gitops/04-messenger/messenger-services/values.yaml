@@ -106,7 +106,7 @@ services:
     terminationGracePeriodSeconds: 30
     startupProbe:
       httpGet:
-        path: /readyz
+        path: /livez
         port: http
       periodSeconds: 60
       failureThreshold: 3
