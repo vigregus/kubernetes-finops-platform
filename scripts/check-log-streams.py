@@ -63,6 +63,10 @@ EVENTS: dict[str, str] = {
     "oidc_keys_unavailable": APPLICATION,
     "admin_token": APPLICATION,
     "verify_email": APPLICATION,
+    # Исход настройки экспорта трасс. Отдельным событием, а не частью
+    # `service_start`: на вопрос «почему в Tempo пусто» ответ обязан быть
+    # в первой же строке пода, а не после чтения чарта.
+    "tracing_config": APPLICATION,
     # Конвейер сообщения.
     "outbox_cycle": APPLICATION,
     "outbox_publish": APPLICATION,

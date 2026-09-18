@@ -68,7 +68,12 @@
       }
     },
     "trace_id": {
-      "type": "string"
+      "type": "string",
+      "description": "Трассировка участка, на котором содержимое записано. Тот же, что в message.created.v1 — обе половины создаются в одной транзакции."
+    },
+    "span_id": {
+      "type": "string",
+      "description": "Участок трассы trace_id. Пара обязана совпадать с той, что у message.created.v1: расхождение означало бы, что половины записала разная работа."
     }
   },
   "additionalProperties": false,

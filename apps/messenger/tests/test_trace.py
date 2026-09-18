@@ -67,17 +67,32 @@ def test_привязка_без_трассы_заводит_свою():
 
 def test_трасса_берётся_из_заголовка_записи():
     headers = {trace.HEADER: f"00-{ТРАССА}-{УЧАСТОК}-01"}
-    assert trace.from_carrier(headers, {"trace_id": "b" * 32}) == ТРАССА
+    # Пара целиком, а не один идентификатор трассы: после перехода на три
+    # трассы связь с создателем записи держится ссылкой на конкретный
+    # участок, а не на трассу целиком.
+    assert trace.origin_from(headers, {"trace_id": "b" * 32}) == trace.Origin(
+        trace_id=ТРАССА, span_id=УЧАСТОК
+    )
 
 
 def test_тело_запасной_путь_для_записи_без_заголовка():
     # Событие, записанное отправителем прежней версии, заголовка не имеет,
     # но `trace_id` в теле у него есть — контракты его допускают с самого
     # начала. Терять на этом трассу незачем.
-    assert trace.from_carrier({}, {"trace_id": ТРАССА}) == ТРАССА
+    assert trace.origin_from({}, {"trace_id": ТРАССА}) == trace.Origin(trace_id=ТРАССА)
+    # Участка нет — это штатное состояние при выкатке, а не ошибка:
+    # подставить случайный значило бы соврать, поэтому ссылки не будет.
+    assert trace.origin_from({}, {"trace_id": ТРАССА}).span_id is None
+    assert trace.origin_from_body({"trace_id": ТРАССА, "span_id": УЧАСТОК}) == trace.Origin(
+        trace_id=ТРАССА, span_id=УЧАСТОК
+    )
 
 
 def test_без_обоих_источников_трассы_нет():
-    assert trace.from_carrier({}, {}) is None
-    assert trace.from_carrier({}, {"trace_id": ""}) is None
-    assert trace.from_carrier({}, {"trace_id": 42}) is None
+    assert trace.origin_from({}, {}) is None
+    assert trace.origin_from({}, {"trace_id": ""}) is None
+    assert trace.origin_from({}, {"trace_id": 42}) is None
+    # Пустой участок в теле — то же отсутствие связи, что и пустая трасса.
+    assert trace.origin_from({}, {"trace_id": ТРАССА, "span_id": ""}) == trace.Origin(
+        trace_id=ТРАССА
+    )

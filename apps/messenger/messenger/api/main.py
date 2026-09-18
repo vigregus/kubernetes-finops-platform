@@ -50,7 +50,7 @@ from messenger.services import runtime as runtime_service
 from messenger.services import session_management as session_service
 from messenger.services import verification as verification_service
 from messenger.telemetry import logging as logging_envelope
-from messenger.telemetry import metrics, trace
+from messenger.telemetry import metrics, trace, tracing
 from messenger.telemetry.logging import configure
 
 # Настройка - один раз на процесс; журнал - свой у модуля.
@@ -58,6 +58,11 @@ from messenger.telemetry.logging import configure
 # нельзя понять, чей это модуль.
 configure()
 log = logging.getLogger(__name__)
+
+# Стадия конвейера. По ней политика хвостовой выборки различает порог
+# задержки для веб-слоя и для доставки: у них разная норма, и общий
+# порог удерживал бы всё, что медленно по меркам одного из них.
+STAGE = "api"
 
 # Имя берётся из телеметрии, а не из `os.getenv` заново. Два чтения одной
 # переменной с разными значениями по умолчанию дают метрики с `service="api"`
@@ -77,6 +82,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     поднимается не готовым — трафика он не получит, а перезапускать
     его не за что.
     """
+    # Здесь, а не при импорте: настроенный раньше провайдер (тест,
+    # подменивший экспортёр) не должен быть затёрт. `configure`
+    # идемпотентна и второй раз ничего не делает.
+    tracing.configure()
     await app.state.runtime.start()
     # Событие старта — отдельная запись: по ней видно, когда процесс
     # действительно принял конфигурацию, а не когда kubelet создал под.
@@ -85,6 +94,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         await app.state.runtime.stop()
+        # Досылка остатка спанов. Ограничена по времени: выключение
+        # пода не должно ждать мёртвый коллектор.
+        tracing.shutdown()
 
 
 app = FastAPI(title="Messenger API", docs_url=None, redoc_url=None, lifespan=lifespan)
@@ -679,21 +691,65 @@ async def observe(request: Request, call_next):
 
     token = logging_envelope.REQUEST_ID.set(request_id)
     try:
-        # Привязка охватывает и обработку, и запись журнала обращений.
-        # Закрыть её сразу после `call_next` - ошибка, которую не видно
-        # глазами: запись об обращении пишется последней, и `trace_id`
+        # Спан охватывает и обработку, и запись журнала обращений.
+        # Закрыть его сразу после `call_next` - ошибка, которую не видно
+        # глазами: запись об обращении пишется последней, и `span_id`
         # у неё - единственной, которая обязана его нести, - окажется
-        # пустым, а сама запись останется на вид исправной.
-        with trace.bind(trace_id=incoming[0] if incoming else None) as trace_id:
-            response = await call_next(request)
+        # выдуманным, а сама запись останется на вид исправной.
+        #
+        # `anchor` помечает этот спан целью ссылки из outbox: отправитель
+        # укажет на него как на работу, породившую событие.
+        with tracing.span(
+            request.method,
+            kind=tracing.SERVER,
+            parent=incoming,
+            anchor=True,
+            attributes={"messaging.pipeline.stage": STAGE},
+        ) as span:
+            try:
+                response = await call_next(request)
+            except Exception as exc:
+                # Исключение, дошедшее сюда, обработчиком не превращено
+                # в ответ, то есть наружу уйдёт 500. Помечаем явно:
+                # хвостовая выборка решает по статусу спана, и без этой
+                # строки самый интересный отказ сохранялся бы только
+                # вероятностной политикой - то есть в пяти случаях
+                # из сотни.
+                #
+                # Имя доводится до шаблона и здесь: отказавший запрос -
+                # ровно тот, который в Tempo ищут, а односложное `POST`
+                # не отвечает, куда он шёл. Шаблон к этому моменту уже
+                # есть - исключение из обработчика приходит после
+                # разбора маршрута; для отказа до разбора остаётся
+                # заглушка `unmatched`, и она честна.
+                span.update_name(f"{request.method} {_route_template(request)}")
+                tracing.mark_failed(span, type(exc).__name__)
+                raise
 
             # Тот же идентификатор уходит клиенту: без него в поддержке
             # спрашивают «когда это было», а не «какой у вас request id».
             response.headers["X-Request-Id"] = request_id
-            # Трасса тоже: по ней виден весь путь сообщения, а не только
-            # та его часть, что случилась внутри запроса.
-            response.headers["X-Trace-Id"] = trace_id
+            # Трасса тоже: по ней видна та часть пути сообщения, что
+            # случилась внутри запроса.
+            response.headers["X-Trace-Id"] = span.trace_id
             route = _route_template(request)
+            # Имя спана задаётся в два приёма, и это не выбор стиля:
+            # шаблона маршрута на входе в посредник ещё нет - роутер
+            # кладёт его в `scope` уже внутри `call_next`. Подставить
+            # сырой путь значило бы завести кардинальность, от которой
+            # этот же файл сознательно ушёл, заведя `_route_template`.
+            span.update_name(f"{request.method} {route}")
+            span.set_attribute("http.route", route)
+            if response.status_code >= 500:
+                # Отказ сервера помечается, отказ клиента - нет. 4xx
+                # (401 от сканера портов в том числе) - законный исход,
+                # а не сбой, и политика "ошибки хранить" обязана означать
+                # настоящие ошибки. Иначе хранилище засоряется чужими
+                # отказами, а разбирать их никто не идёт.
+                #
+                # Значение - код, а не слово: для HTTP семантические
+                # конвенции предписывают именно его.
+                tracing.mark_failed(span, str(response.status_code))
             elapsed = time.perf_counter() - started
 
             REQUESTS.labels(
@@ -792,14 +848,25 @@ async def _current(request: Request, conn) -> identity_service.AuthResult:
     if token is None:
         return identity_service.AuthResult()
     runtime = request.app.state.runtime
-    return await identity_service.authenticate(
-        conn,
-        token=token,
-        keys=runtime.keys,
-        settings=runtime.oidc_settings,
-        device_id=_device_from(None, request),
-        user_agent=request.headers.get("user-agent"),
-    )
+    # Спан вокруг единственной точки разбора удостоверения: раз она одна,
+    # его получают все маршруты бесплатно. Отказ помечается результатом,
+    # но не статусом `ERROR`: 401 - законный исход, а не сбой, и политика
+    # хвостовой выборки «ошибки хранить» обязана означать настоящие
+    # ошибки, иначе каждый сканер портов засоряет хранилище.
+    with tracing.span("auth.check") as span:
+        result = await identity_service.authenticate(
+            conn,
+            token=token,
+            keys=runtime.keys,
+            settings=runtime.oidc_settings,
+            device_id=_device_from(None, request),
+            user_agent=request.headers.get("user-agent"),
+        )
+        if result.user is not None:
+            span.set_attribute("enduser.id", str(result.user.user_id))
+        span.set_attribute("messenger.auth.result", result.rejection.value
+                           if result.rejection else "ok")
+        return result
 
 
 @app.get("/me", response_model=dict[str, object])
@@ -958,6 +1025,15 @@ async def send_message(
         if not auth.ok or auth.user is None:
             return _auth_failure(auth.rejection, response)
 
+        # Пара берётся из якоря, а не из текущего спана. Сегодня текущий
+        # спан на момент вызова действительно корневой, и хватило бы его
+        # одного. Но это верно ровно до первого спана, добавленного
+        # внутри обработчика, - и тогда ссылка из outbox молча уехала бы
+        # на него.
+        link = tracing.current_link() or (
+            trace.current_trace_id(),
+            trace.current_span_id(),
+        )
         try:
             result = await message_service.send_message(
                 conn,
@@ -967,10 +1043,11 @@ async def send_message(
                 kind=kind,
                 payload=payload,
                 attachment_ids=tuple(AttachmentId(value) for value in body.attachment_ids),
-                # Трасса уезжает в outbox вместе с событием: contextvar
+                # Пара уезжает в outbox вместе с событием: contextvar
                 # не переживает ни коммит, ни Kafka, и связать запрос
                 # с доставкой можно только тем, что лежит в теле.
-                trace_id=trace.current_trace_id(),
+                trace_id=link[0],
+                span_id=link[1],
             )
         except ValueError as exc:
             # Негодное сочетание вида и содержимого: голосовое без
@@ -985,7 +1062,13 @@ async def send_message(
         return _problem_response(to_problem(result.rejection or Reason.INTERNAL), response)
 
     response.status_code = 201 if result.created else 200
-    return _message_body(result.message)
+    with tracing.span("response"):
+        body_out = _message_body(result.message)
+    # Сквозной ключ на корневом спане запроса. После перехода на три
+    # трассы поиск по `trace_id` находит только одну из трёх, поэтому
+    # найти сообщение в Tempo можно ровно по этому атрибуту.
+    tracing.set_anchor_attribute("messaging.message.id", str(result.message.message_id))
+    return body_out
 
 
 @app.post("/auth/verify-email/resend", response_model=dict[str, object])

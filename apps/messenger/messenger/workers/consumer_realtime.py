@@ -21,7 +21,7 @@ from prometheus_client import start_http_server
 
 from messenger.adapters import centrifugo, event_cache, kafka
 from messenger.services import realtime_delivery
-from messenger.telemetry import metrics, trace
+from messenger.telemetry import metrics, trace, tracing
 from messenger.telemetry.logging import configure
 
 # Настройка - один раз на процесс; журнал - свой у модуля.
@@ -31,6 +31,10 @@ configure()
 log = logging.getLogger(__name__)
 
 GROUP = "messenger-realtime"
+
+# Стадия конвейера. По ней политика хвостовой выборки различает порог
+# задержки: у доставки норма другая, чем у веб-слоя.
+STAGE = "realtime"
 
 
 def consumer_settings_from_env() -> kafka.ConsumerSettings:
@@ -81,20 +85,41 @@ async def run(stop: asyncio.Event) -> None:
         metrics.dependency_up("redis", up=True)
 
         try:
-            events = await subscriber.poll()
-            if not events:
-                continue
-            for topic, headers, body in events:
-                # Трасса берётся из заголовка, а тело - запасной путь:
-                # заголовок ставит отправитель, и он есть даже у записи,
-                # которую потребитель отбросит не разбирая. Событие,
-                # пришедшее без обоих, получает свою трассу - иначе
-                # его строки не связать даже между собой.
-                with trace.bind(trace_id=trace.from_carrier(headers, body)):
-                    await realtime_delivery.handle_event(
-                        topic=topic, body=body, cache=cache, centrifugo=client
-                    )
-            await subscriber.commit()
+            # Корень на пачку, а не на запись: так решений хвостовой
+            # выборки меньше, а `decision_wait` коллектора можно держать
+            # коротким. Вид CONSUMER - это операция `process` по таблице
+            # спецификации: потребитель обрабатывает принятую пачку.
+            with tracing.span(
+                "consumer-realtime",
+                kind=tracing.CONSUMER,
+                attributes={"messaging.pipeline.stage": STAGE},
+            ) as batch:
+                # А вот это `receive`, и спецификация назначает ей вид
+                # CLIENT, а не CONSUMER. Неочевидно настолько, что
+                # читатель, «поправивший» здесь на CONSUMER, сломает
+                # разбор связи между производителем и потребителем.
+                with tracing.span("kafka.consume", kind=tracing.CLIENT) as consume:
+                    events = await subscriber.poll()
+                    consume.set_attribute("messaging.batch.message_count", len(events))
+                if events:
+                    batch.set_attribute("messaging.batch.message_count", len(events))
+                    for topic, headers, body in events:
+                        # Контекст создателя берётся из заголовка, а тело -
+                        # запасной путь: заголовок ставит отправитель, и он
+                        # есть даже у записи, которую потребитель отбросит
+                        # не разбирая. На него ставится ссылка, а не
+                        # родительство: пачка приходит от многих отправителей,
+                        # а родитель у спана только один.
+                        #
+                        # Своя трасса начинается здесь, а не продолжается
+                        # чужая: трасса отправителя завершилась вместе
+                        # с его работой, и её длительность о работе
+                        # потребителя ничего не говорит.
+                        await realtime_delivery.handle_event(
+                            topic=topic, body=body, cache=cache, centrifugo=client,
+                            link=trace.origin_from(headers, body),
+                        )
+                    await subscriber.commit()
         except Exception as exc:  # noqa: BLE001 - цикл обязан пережить любой отказ
             log.warning(
                 "цикл потребителя прерван",
@@ -115,6 +140,7 @@ async def _sleep(stop: asyncio.Event, seconds: float) -> None:
 
 def main() -> int:
     start_http_server(int(os.getenv("METRICS_PORT", "9100")))
+    tracing.configure()
 
     async def _main() -> None:
         stop = asyncio.Event()
@@ -124,6 +150,9 @@ def main() -> int:
         await run(stop)
 
     asyncio.run(_main())
+    # Досылка остатка спанов. Ограничена по времени: выключение пода
+    # не должно ждать мёртвый коллектор.
+    tracing.shutdown()
     return 0
 
 

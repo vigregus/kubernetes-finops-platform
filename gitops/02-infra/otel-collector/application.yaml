@@ -14,6 +14,14 @@ spec:
     - repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
       targetRevision: HEAD
       ref: values
+    # Метрики самого коллектора лежат рядом с релизом в одной заявке, как
+    # у falco и cnpg-operator: без этого релиза они не значат ничего
+    # и удаляться должны вместе с ним.
+    - repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
+      targetRevision: HEAD
+      path: gitops/02-infra/otel-collector/manifests
+      directory:
+        recurse: true
     - repoURL: https://open-telemetry.github.io/opentelemetry-helm-charts
       chart: opentelemetry-collector
       targetRevision: 0.173.1

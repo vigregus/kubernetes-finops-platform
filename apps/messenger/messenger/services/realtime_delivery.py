@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from messenger.adapters import event_cache
-from messenger.telemetry import metrics
+from messenger.telemetry import metrics, trace, tracing
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +60,7 @@ async def handle_event(
     body: dict[str, Any],
     cache: event_cache.EventCache,
     centrifugo,
+    link: trace.Origin | None = None,
 ) -> DeliveryOutcome:
     """Обрабатывает одну запись из потока.
 
@@ -99,9 +100,26 @@ async def handle_event(
         )
         return DeliveryOutcome(duplicates=1)
 
-    published = await centrifugo.publish(
-        channel_for(str(conversation_id)), _client_event(fact, content)
-    )
+    # Ссылка на спан, который создал запись в Kafka, - контекст создания
+    # по спецификации. Вид CLIENT, а не PRODUCER: свой контекст мы в
+    # Centrifugo не кладём, значит его контекст не становится контекстом
+    # создания записи.
+    channel = channel_for(str(conversation_id))
+    with tracing.span(
+        "centrifugo.publish",
+        kind=tracing.CLIENT,
+        links=[(link.trace_id, link.span_id)] if link and link.span_id else (),
+        attributes={
+            "messaging.system": "centrifugo",
+            "messaging.destination.name": channel,
+            "messaging.message.id": str(message_id),
+        },
+    ) as span:
+        published = await centrifugo.publish(channel, _client_event(fact, content))
+        if not published:
+            # Без пометки политика хвостовой выборки «ошибки хранить»
+            # не увидит ровно тот случай, ради которого заведена.
+            tracing.mark_failed(span, "publish_rejected")
     if not published:
         metrics.realtime_delivery("failed")
         log.warning(

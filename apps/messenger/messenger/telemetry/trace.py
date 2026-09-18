@@ -1,28 +1,29 @@
-"""Контекст трассировки: один идентификатор на весь путь сообщения.
+"""Контекст трассировки: формат W3C и хранилище текущего контекста.
 
-Зачем это здесь, а не в OpenTelemetry. Экспортёр трасс - отдельная работа
-(гейт G2), а `trace_id` в журнале нужен раньше: без него расследование
-«сообщение не пришло» состоит из поиска по времени в трёх сервисах, и
-совпадение по времени - не доказательство, а догадка.
+Модуль остаётся без OpenTelemetry намеренно, хотя экспортёр с гейта G2
+уже есть. Здесь две вещи, которым SDK не нужен: разбор и сборка
+`traceparent` (W3C Trace Context - это те же 16 байт трассы и 8 байт
+участка, что кладёт в заголовок OpenTelemetry) и contextvar, из которого
+конверт журнала берёт `trace_id` и `span_id`.
 
-Формат взят чужой намеренно. `traceparent` из W3C Trace Context - это те же
-16 байт идентификатора трассы и 8 байт идентификатора участка, что кладёт
-в заголовок OpenTelemetry. Когда экспортёр появится, идентификаторы, уже
-лежащие в журналах и в outbox, окажутся теми же самыми, и связывать
-записанное задним числом не придётся.
+Формат был взят чужим до появления экспортёра, и это окупилось: ни один
+идентификатор, уже лежащий в журналах и в outbox, менять не пришлось.
+Идентификаторы теперь рождает спан (`telemetry.tracing`), а не `bind`;
+`bind` остаётся низкоуровневым способом положить пару в конверт и
+синтезирует её, только когда спанов нет вовсе - запуск без коллектора.
 
 Асинхронная граница проходится через тело события, а не через процесс:
 между API и потребителем лежит коммит в Postgres и запись в Kafka, и
-никакой contextvar это не переживает. Поэтому `trace_id` кладётся
-в полезную нагрузку outbox (он есть в контрактах `message.created.v1`
-и `message.content.v1`), а потребитель поднимает его обратно.
+никакой contextvar это не переживает. Поэтому пара кладётся
+в полезную нагрузку outbox (контракты `message.created.v1`
+и `message.content.v1`), а потребитель поднимает её обратно.
 """
 from __future__ import annotations
 
 import contextlib
 import secrets
 from collections.abc import Iterator, Mapping
-from typing import Any
+from typing import Any, NamedTuple
 
 from messenger.telemetry.logging import SPAN_ID, TRACE_ID
 
@@ -98,8 +99,29 @@ def bind(*, trace_id: str | None = None, span_id: str | None = None) -> Iterator
         SPAN_ID.reset(span_token)
 
 
-def from_carrier(headers: Mapping[str, str], body: Mapping[str, Any]) -> str | None:
-    """Трасса из заголовков записи, иначе из её тела, иначе `None`.
+class Origin(NamedTuple):
+    """Откуда пришла запись: трасса и участок её создателя.
+
+    Именно пара, а не один `trace_id`. После перехода на три трассы
+    (см. документацию, часть 4) трасса отправителя - своя, и связь
+    с трассой запроса, который эту запись породил, держится ссылкой
+    на конкретный спан. Без участка ссылку построить нечем.
+
+    `span_id` необязателен не для удобства: событие, записанное
+    отправителем прежней версии, участка не несёт - поле появилось
+    вместе с этой работой. Это штатное состояние при выкатке, а не
+    ошибка, и обрабатывается оно отказом от ссылки, а не подстановкой
+    случайного идентификатора.
+    """
+
+    trace_id: str
+    span_id: str | None = None
+
+
+def origin_from(
+    headers: Mapping[str, str], body: Mapping[str, Any]
+) -> Origin | None:
+    """Контекст создателя записи: из заголовка, иначе из тела.
 
     Два источника, потому что их два и на самом деле: заголовок нужен
     тому, кто тело не разбирает (дедупликация), а тело - тому, чья
@@ -109,11 +131,31 @@ def from_carrier(headers: Mapping[str, str], body: Mapping[str, Any]) -> str | N
     """
     parsed = parse(headers.get(HEADER))
     if parsed is not None:
-        return parsed[0]
+        return Origin(trace_id=parsed[0], span_id=parsed[1])
     from_body = body.get("trace_id")
-    return from_body if isinstance(from_body, str) and from_body else None
+    if not isinstance(from_body, str) or not from_body:
+        return None
+    span_id = body.get("span_id")
+    return Origin(
+        trace_id=from_body,
+        span_id=span_id if isinstance(span_id, str) and span_id else None,
+    )
+
+
+def origin_from_body(body: Mapping[str, Any]) -> Origin | None:
+    """Контекст создателя, когда заголовков нет вовсе.
+
+    Так приходит запись из outbox: заголовки Kafka ставит отправитель,
+    а до него их нет ни у кого - только тело события.
+    """
+    return origin_from({}, body)
 
 
 def current_trace_id() -> str | None:
     """Идентификатор трассы текущей задачи, если он есть."""
     return TRACE_ID.get()
+
+
+def current_span_id() -> str | None:
+    """Идентификатор участка текущей задачи. Пара к `current_trace_id`."""
+    return SPAN_ID.get()

@@ -75,8 +75,13 @@ spec:
             {{- end }}
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: {{ $.Values.telemetry.otlpEndpoint | quote }}
-            - name: OTEL_TRACES_SAMPLER_ARG
-              value: {{ $.Values.telemetry.traceSampleRatio | quote }}
+            # Доля выборки задана не здесь, а хвостовой политикой коллектора:
+            # головная выборка решает до того, как ошибка случилась, и потому
+            # не может знать, что трассу надо сохранить. Ключа с долей рядом
+            # намеренно нет — иначе в нём однажды выставили бы 0.05, решив,
+            # что управляют выборкой, а терялись бы ошибки.
+            - name: OTEL_TRACES_SAMPLER
+              value: {{ $.Values.telemetry.tracesSampler | quote }}
             # Пароль приходит из секрета, который создал оператор CNPG.
             # В values его нет и не будет.
             - name: DATABASE_HOST

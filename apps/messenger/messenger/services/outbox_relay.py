@@ -28,9 +28,14 @@ import asyncpg
 from messenger.adapters import kafka
 from messenger.domain.outbox import OutboxRecord, PublishOutcome, backoff_for
 from messenger.repositories import outbox
-from messenger.telemetry import metrics, trace
+from messenger.telemetry import metrics, trace, tracing
 
 log = logging.getLogger(__name__)
+
+# Стадия конвейера. По ней политика хвостовой выборки различает порог
+# задержки: у отправителя и у веб-слоя разная норма, и общий порог
+# удерживал бы всё, что медленно по меркам одного из них.
+STAGE = "relay"
 
 # Отсрочка для записи, которую повтор не исправит: тип события неизвестен
 # коду. Час, а не пять минут: она не мешает остальным (очередь берётся
@@ -64,57 +69,66 @@ async def publish_batch(
     так цикл можно вызвать из теста в чужой транзакции и откатить всё,
     что он сделал.
     """
-    records = await outbox.claim_batch(
-        conn,
-        owner=settings.owner,
-        limit=settings.batch_size,
-        lease_seconds=settings.lease_seconds,
-    )
-    if not records:
-        return PublishOutcome()
+    # Корень на пачку, а не на запись. Так решений хвостовой выборки
+    # меньше, а `decision_wait` коллектора можно держать коротким: трасса
+    # живёт секунды, а не минуты. У отправителя вид INTERNAL: он не
+    # принимает и не отправляет сообщение в смысле спецификации, а
+    # разбирает свою очередь.
+    with tracing.span(
+        "outbox-relay", attributes={"messaging.pipeline.stage": STAGE}
+    ) as batch_span:
+        with tracing.span("outbox.claim"):
+            records = await outbox.claim_batch(
+                conn,
+                owner=settings.owner,
+                limit=settings.batch_size,
+                lease_seconds=settings.lease_seconds,
+            )
+        if not records:
+            return PublishOutcome()
+        batch_span.set_attribute("messenger.outbox.claimed", len(records))
 
-    published: list[int] = []
-    failed = 0
-    unroutable = 0
+        published: list[int] = []
+        failed = 0
+        unroutable = 0
 
-    for record in records:
-        # Трасса поднимается из тела события и держится на всё время
-        # обработки записи: contextvar не переживает ни коммит, ни Kafka,
-        # поэтому связать строки отправителя с запросом, который эту
-        # запись породил, можно только тем, что лежит в теле.
-        with trace.bind(trace_id=record.payload.get("trace_id")) as trace_id:
+        for record in records:
+            # Контекст создателя берётся из тела события: contextvar не
+            # переживает ни коммит, ни Kafka. На него ставится ссылка -
+            # родителем он быть не может, отправитель работает после
+            # того, как запрос API уже ответил клиенту.
             outcome = await _publish_one(
                 conn,
                 record=record,
-                trace_id=trace_id,
+                origin=trace.origin_from_body(record.payload),
                 publisher=publisher,
                 settings=settings,
             )
 
-        if outcome is _Outcome.UNROUTABLE:
-            unroutable += 1
-            continue
-        if outcome is _Outcome.FAILED:
-            failed += 1
-            # Дальше по пачке не идём: порядок внутри беседы важнее
-            # пропускной способности, а следующая запись может быть
-            # содержимым того же сообщения.
-            break
-        published.append(record.id)
+            if outcome is _Outcome.UNROUTABLE:
+                unroutable += 1
+                continue
+            if outcome is _Outcome.FAILED:
+                failed += 1
+                # Дальше по пачке не идём: порядок внутри беседы важнее
+                # пропускной способности, а следующая запись может быть
+                # содержимым того же сообщения.
+                break
+            published.append(record.id)
 
-    marked = await outbox.mark_published(conn, ids=published, owner=settings.owner)
-    if marked != len(published):
-        # Отметились не все: чью-то аренду успел перехватить другой
-        # отправитель. Это не поломка, но именно так выглядит дубль
-        # в Kafka, и знать об этом надо.
-        metrics.outbox_event("lease_lost", "")
-        log.warning(
-            "отметить удалось не все опубликованные записи",
-            extra={"event": "outbox_lease_lost", "result": "failed",
-                   "published": len(published), "marked": marked},
-        )
-    metrics.outbox_published(marked)
-    return PublishOutcome(published=marked, failed=failed, unroutable=unroutable)
+        marked = await outbox.mark_published(conn, ids=published, owner=settings.owner)
+        if marked != len(published):
+            # Отметились не все: чью-то аренду успел перехватить другой
+            # отправитель. Это не поломка, но именно так выглядит дубль
+            # в Kafka, и знать об этом надо.
+            metrics.outbox_event("lease_lost", "")
+            log.warning(
+                "отметить удалось не все опубликованные записи",
+                extra={"event": "outbox_lease_lost", "result": "failed",
+                       "published": len(published), "marked": marked},
+            )
+        metrics.outbox_published(marked)
+        return PublishOutcome(published=marked, failed=failed, unroutable=unroutable)
 
 
 class _Outcome(Enum):
@@ -129,25 +143,27 @@ async def _publish_one(
     conn: asyncpg.Connection,
     *,
     record: OutboxRecord,
-    trace_id: str,
+    origin: trace.Origin | None,
     publisher: kafka.Publisher,
     settings: RelaySettings,
 ) -> _Outcome:
     """Маршрут, публикация, разметка неудачи — для одной записи.
 
-    Вынесено из цикла не ради длины: привязка трассы — менеджер контекста,
-    а `break` и `continue` из-под него читаются как выход из привязки,
+    Вынесено из цикла не ради длины: спан — менеджер контекста,
+    а `break` и `continue` из-под него читаются как выход из спана,
     хотя выходят из цикла. Возвращённый исход такой двусмысленности
     не оставляет.
     """
     topic = record.topic
+    message_id = record.payload.get("message_id")
     if topic is None:
         metrics.outbox_event("unroutable", record.event_type)
         log.error(
             "неизвестный тип события в outbox",
             extra={"event": "outbox_unroutable", "result": "failed",
                    "error_code": "unknown_event_type",
-                   "event_id": str(record.event_id)},
+                   "event_id": str(record.event_id),
+                   "message_id": message_id},
         )
         await outbox.record_failure(
             conn,
@@ -158,42 +174,70 @@ async def _publish_one(
         )
         return _Outcome.UNROUTABLE
 
-    try:
-        await publisher.publish(
-            topic=topic,
-            key=record.partition_key,
-            value=record.payload,
-            # Заголовки, чтобы потребитель отсеивал повтор, не
-            # разбирая тело: дедупликация обязана быть дешевле
-            # обработки, иначе шторм повторов стоит как шторм работы.
-            #
-            # `traceparent` здесь по той же причине: потребителю,
-            # который отбросил повтор, тело разбирать незачем, а
-            # написать в журнал, к какой трассе относится отброшенное,
-            # всё равно надо.
-            headers={
-                "event_id": str(record.event_id),
-                "event_type": record.event_type,
-                "event_version": str(record.event_version),
-                trace.HEADER: trace.header_for(trace_id, trace.new_span_id()),
-            },
-        )
-    except Exception as exc:  # noqa: BLE001 - причина уходит в базу и метку
-        metrics.outbox_event("failed", record.event_type)
-        log.warning(
-            "событие не опубликовано",
-            extra={"event": "outbox_publish", "result": "failed",
-                   "error_code": type(exc).__name__,
-                   "event_id": str(record.event_id), "dependency": "kafka"},
-        )
-        await outbox.record_failure(
-            conn,
-            record_id=record.id,
-            owner=settings.owner,
-            error=f"{type(exc).__name__}: {exc}",
-            retry_after=backoff_for(record.attempts + 1),
-        )
-        return _Outcome.FAILED
+    # Ссылка на контекст создания записи, а не родительство. Родителем
+    # спан запроса быть не может: к этому моменту процесс API уже
+    # ответил клиенту, и трасса отправителя приклеилась бы к давно
+    # завершённой чужой, потеряв собственный смысл длительности.
+    #
+    # Записи от отправителя прежней версии участка не несут вовсе -
+    # поле появилось вместе с этой работой. Подставить случайный
+    # значило бы соврать; вместо ссылки остаётся то, что есть.
+    links = [(origin.trace_id, origin.span_id)] if origin and origin.span_id else []
+    attributes = {
+        "messaging.system": "kafka",
+        "messaging.destination.name": topic,
+    }
+    if message_id:
+        attributes["messaging.message.id"] = str(message_id)
+
+    with tracing.span(
+        "kafka.produce", kind=tracing.PRODUCER, links=links, attributes=attributes
+    ) as span:
+        if origin is not None and not origin.span_id:
+            span.set_attribute("messenger.source_trace_id", origin.trace_id)
+        try:
+            await publisher.publish(
+                topic=topic,
+                key=record.partition_key,
+                value=record.payload,
+                # Заголовки, чтобы потребитель отсеивал повтор, не
+                # разбирая тело: дедупликация обязана быть дешевле
+                # обработки, иначе шторм повторов стоит как шторм работы.
+                #
+                # `traceparent` здесь по той же причине: потребителю,
+                # который отбросил повтор, тело разбирать незачем, а
+                # написать в журнал, к какой трассе относится отброшенное,
+                # всё равно надо.
+                #
+                # Контекст берётся у самого спана, а не собирается из
+                # идентификаторов заново: потребитель поставит ссылку
+                # на него, и она обязана указывать на существующий спан,
+                # а не в пустоту.
+                headers={
+                    "event_id": str(record.event_id),
+                    "event_type": record.event_type,
+                    "event_version": str(record.event_version),
+                    trace.HEADER: tracing.traceparent(span),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - причина уходит в базу и метку
+            metrics.outbox_event("failed", record.event_type)
+            tracing.mark_failed(span, type(exc).__name__)
+            log.warning(
+                "событие не опубликовано",
+                extra={"event": "outbox_publish", "result": "failed",
+                       "error_code": type(exc).__name__,
+                       "event_id": str(record.event_id),
+                       "message_id": message_id, "dependency": "kafka"},
+            )
+            await outbox.record_failure(
+                conn,
+                record_id=record.id,
+                owner=settings.owner,
+                error=f"{type(exc).__name__}: {exc}",
+                retry_after=backoff_for(record.attempts + 1),
+            )
+            return _Outcome.FAILED
 
     return _Outcome.PUBLISHED
 

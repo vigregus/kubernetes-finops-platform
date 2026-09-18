@@ -24,7 +24,7 @@ from prometheus_client import start_http_server
 from messenger.adapters import kafka
 from messenger.repositories import postgres
 from messenger.services import outbox_relay, runtime
-from messenger.telemetry import metrics
+from messenger.telemetry import metrics, tracing
 from messenger.telemetry.logging import configure
 
 # Настройка - один раз на процесс; журнал - свой у модуля.
@@ -130,6 +130,7 @@ async def _sleep(stop: asyncio.Event, seconds: float) -> None:
 
 def main() -> int:
     start_http_server(int(os.getenv("METRICS_PORT", "9100")))
+    tracing.configure()
 
     async def _main() -> None:
         stop = asyncio.Event()
@@ -139,6 +140,9 @@ def main() -> int:
         await run(stop)
 
     asyncio.run(_main())
+    # Досылка остатка спанов. Ограничена по времени: выключение пода
+    # не должно ждать мёртвый коллектор.
+    tracing.shutdown()
     return 0
 
 

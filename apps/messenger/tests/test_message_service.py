@@ -157,7 +157,7 @@ def test_новое_сообщение_и_два_события_создаютс
     monkeypatch.setattr(service.outbox, "insert_event", _event)
 
     conn = Connection()
-    result = _send(conn, trace_id="trace-1")
+    result = _send(conn, trace_id="a" * 32, span_id="b" * 16)
     assert result.ok and result.created and result.message == expected
     assert conn.tx.entered and conn.tx.exited_with is None
     assert [event["event_type"] for event in events] == [
@@ -168,10 +168,13 @@ def test_новое_сообщение_и_два_события_создаютс
     assert events[0]["payload"]["recipient_ids"] == [str(RECIPIENT)]
     assert "payload" not in events[0]["payload"]
     assert events[1]["payload"]["payload"]["text"] == "привет"
-    # Трасса уезжает в обе половины: потребитель непрочитанного получает
-    # только факт, и без неё его строки не связать с тем же сообщением.
-    assert events[0]["payload"]["trace_id"] == "trace-1"
-    assert events[1]["payload"]["trace_id"] == "trace-1"
+    # Контекст создателя уезжает в обе половины: потребитель непрочитанного
+    # получает только факт, и без него его строки не связать с тем же
+    # сообщением. Участок нужен наравне с трассой — отправитель ставит
+    # ссылку на конкретный спан, а не на трассу целиком.
+    for event in events:
+        assert event["payload"]["trace_id"] == "a" * 32
+        assert event["payload"]["span_id"] == "b" * 16
 
 
 def test_ошибка_второго_outbox_выходит_через_границу_транзакции(monkeypatch):

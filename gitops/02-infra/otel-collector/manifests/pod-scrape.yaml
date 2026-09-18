@@ -1,0 +1,45 @@
+# Метрики самого коллектора. До появления хвостовой выборки они были
+# любопытны, теперь обязательны: процессор держит состояние в памяти,
+# и без этих чисел не отличить «выборка работает» от «выборка молча
+# выбросила половину спанов трассы».
+#
+# Что именно здесь видно:
+#
+#   otelcol_processor_tail_sampling_count_traces_sampled - решения по
+#     политикам, с меткой `policy`. По ней видно, какая из четырёх
+#     сработала: если `sample-rest` держит всё, а `errors` молчит, значит
+#     спаны не помечаются ошибкой, и хранилище наполняется шумом;
+#   otelcol_processor_tail_sampling_sampling_trace_dropped_too_early -
+#     трассы, вытесненные из буфера до решения. Растущее значение
+#     означает, что потолок `num_traces` стал мал, и часть трасс теряется
+#     не по решению политики, а по нехватке места;
+#   otelcol_processor_tail_sampling_sampling_trace_removal_age - сколько
+#     трасса лежит в буфере. Сравнение младшего процентиля с
+#     `decision_wait` (5s) и есть проверка того, что ожидание выбрано
+#     не наугад;
+#   otelcol_receiver_refused_spans - отброшенные на входе, то есть
+#     сработавший `memory_limiter`. Это ответ на вопрос «куда делись
+#     трассы», заданный в момент, когда память уже кончилась.
+#
+# Порт числом, а не именем: 8888 задан в values.yaml как порт опроса,
+# и имя контейнерного порта у чарта своё - число от него не зависит.
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMPodScrape
+metadata:
+  name: otel-collector
+  namespace: observability
+  labels:
+    finops.internal/product: platform
+    finops.internal/team: platform-engineering
+    finops.internal/environment: local
+    finops.internal/component: observability
+    finops.internal/cost-center: platform-infra
+    finops.internal/owner: platform-team
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: opentelemetry-collector
+  podMetricsEndpoints:
+    - port: 8888
+      path: /metrics
+      interval: 15s
