@@ -24,7 +24,7 @@ image:
   #
   # В stage и проде образ проходит через реестр, digest настоящий,
   # и это значение остаётся false — чарт откажется собраться без digest.
-  allowMutableTag: true
+  allowMutableTag: false
 
 telemetry:
   otlpEndpoint: http://tempo-local.observability.svc.cluster.local:4317
@@ -124,7 +124,8 @@ services:
       failureThreshold: 3
     http:
       port: 8080
-    image: {}
+    image:
+      digest: sha256:100248e22aaa6ab6aa9b9ba3a9aefff61312cff0d594c3d5af88c7776de69875
     resources:
       requests: {cpu: 50m, memory: 128Mi}
       limits: {cpu: "1", memory: 512Mi}
@@ -153,7 +154,6 @@ services:
     # Метрики есть, входящих запросов нет - поэтому порт только для них.
     metricsPort: 9100
     command: ["python", "-m", "messenger.workers.outbox_relay"]
-    image: {}
     # Без http: у него нет входящих запросов, поэтому нет ни службы,
     # ни проб готовности. Живость проверяется иначе - по возрасту
     # самой старой необработанной записи, а это метрика, не проба.
@@ -162,7 +162,8 @@ services:
     priorityClass: messenger-critical
     preStopSeconds: 0
     terminationGracePeriodSeconds: 60
-    image: {}
+    image:
+      digest: sha256:100248e22aaa6ab6aa9b9ba3a9aefff61312cff0d594c3d5af88c7776de69875
     resources:
       requests: {cpu: 50m, memory: 128Mi}
       limits: {cpu: "1", memory: 512Mi}
@@ -182,7 +183,8 @@ services:
     # Дольше, чем у API: потребитель обязан успеть дообработать пачку
     # и зафиксировать смещение, иначе после перезапуска будет повтор.
     terminationGracePeriodSeconds: 60
-    image: {}
+    image:
+      digest: sha256:100248e22aaa6ab6aa9b9ba3a9aefff61312cff0d594c3d5af88c7776de69875
     resources:
       requests: {cpu: 50m, memory: 128Mi}
       limits: {cpu: "1", memory: 512Mi}
