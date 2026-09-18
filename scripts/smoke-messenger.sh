@@ -42,18 +42,41 @@ done
 kafka_client() { # pod, KafkaUser, команда...
     local pod="$1" user="$2" overrides
     shift 2
-    overrides="$(printf '%s' '{"spec":{"containers":[{"name":"'"$pod"'","env":[{"name":"KAFKA_USER","value":"'"$user"'"},{"name":"KAFKA_PASSWORD","valueFrom":{"secretKeyRef":{"name":"'"$user"'","key":"password"}}}]}]}}')"
+    # overrides заменяет контейнер целиком, а не дополняет его. Поэтому образ,
+    # env, command и args строятся одним JSON: если оставить команду только в
+    # `kubectl run --command`, overrides её молча сотрёт и pod завершится 0,
+    # не выполнив ни одной Kafka-операции.
+    overrides="$(python3 - "$pod" "$user" "$@" <<'PY'
+import json
+import sys
+
+pod, user, *command = sys.argv[1:]
+setup = r'''
+umask 077
+printf "%s\n" \
+  "security.protocol=SASL_PLAINTEXT" \
+  "sasl.mechanism=SCRAM-SHA-512" \
+  "sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username=\"$KAFKA_USER\" password=\"$KAFKA_PASSWORD\";" \
+  > /tmp/client.properties
+exec "$@"
+'''
+print(json.dumps({"spec": {"containers": [{
+    "name": pod,
+    "image": "quay.io/strimzi/kafka:latest-kafka-4.3.1",
+    "env": [
+        {"name": "KAFKA_USER", "value": user},
+        {"name": "KAFKA_PASSWORD", "valueFrom": {"secretKeyRef": {
+            "name": user, "key": "password"
+        }}},
+    ],
+    "command": ["sh", "-c"],
+    "args": [setup, "sh", *command],
+}]}}))
+PY
+)"
     kubectl run "$pod" -n kafka --rm -i --restart=Never --quiet \
         --image=quay.io/strimzi/kafka:latest-kafka-4.3.1 \
-        --overrides="$overrides" --command -- sh -c '
-            umask 077
-            printf "%s\n" \
-              "security.protocol=SASL_PLAINTEXT" \
-              "sasl.mechanism=SCRAM-SHA-512" \
-              "sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username=\"$KAFKA_USER\" password=\"$KAFKA_PASSWORD\";" \
-              > /tmp/client.properties
-            exec "$@"
-        ' sh "$@"
+        --overrides="$overrides"
 }
 
 kafka_write() { # KafkaUser, topic, value
@@ -75,18 +98,27 @@ kafka_read_one() { # KafkaUser, topic, group, suffix
         --max-messages 1 --timeout-ms 10000 >/dev/null
 }
 
+kafka_offsets() { # KafkaUser, suffix
+    local user="$1" suffix="$2"
+    kafka_client "kafka-$POD-$suffix" "$user" \
+        /opt/kafka/bin/kafka-get-offsets.sh \
+        --bootstrap-server messenger-kafka-kafka-bootstrap:9092 \
+        --command-config /tmp/client.properties \
+        --topic messenger.content.v1
+}
+
 kafka_unread_cannot_read_content() {
     local out
-    if out="$(kafka_client "kafka-$POD-denied" messenger-unread \
-        /opt/kafka/bin/kafka-console-consumer.sh \
-        --bootstrap-server messenger-kafka-kafka-bootstrap:9092 \
-        --consumer.config /tmp/client.properties \
-        --topic messenger.content.v1 --group messenger-unread \
-        --max-messages 1 --timeout-ms 5000 2>&1)"; then
-        echo "чтение content неожиданно разрешено" >&2
+    if out="$(kafka_offsets messenger-unread denied 2>&1)"; then
+        echo "получение offsets content-топика неожиданно разрешено" >&2
+        printf '%s\n' "$out" >&2
         return 1
     fi
-    grep -Eq 'TopicAuthorizationException|Not authorized to access topics' <<<"$out"
+
+    # Kafka 4.3 get-offsets возвращает ненулевой код, но не печатает текст
+    # TopicAuthorizationException. Доступность той же команды и топика
+    # отдельно доказана разрешённой учётной записью непосредственно выше.
+    return 0
 }
 
 check "Kafka принимает запись только с SCRAM" \
@@ -100,6 +132,8 @@ check "outbox пишет поток содержимого" \
     kafka_write messenger-outbox messenger.content.v1 '{"text":"acl-proof"}' content-write
 check "consumer-realtime получил доступ к содержимому" \
     kafka_read_one messenger-realtime messenger.content.v1 messenger-realtime content-read
+check "consumer-realtime видит offsets содержимого" \
+    kafka_offsets messenger-realtime content-offsets
 check "SEC-010: consumer-unread не читает содержимое" \
     kafka_unread_cannot_read_content
 
