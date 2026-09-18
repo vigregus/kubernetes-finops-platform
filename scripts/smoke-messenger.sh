@@ -80,7 +80,10 @@ print(json.dumps({"spec": {"containers": [{
 }]}}))
 PY
 )"
+    # Метка снимает вывод со сбора журналов: проверка печатает для
+    # человека, а не для хранилища.
     kubectl run "$pod" -n kafka --rm -i --restart=Never --quiet \
+        --labels="finops.internal/component=test" \
         --image=quay.io/strimzi/kafka:latest-kafka-4.3.1 \
         --overrides="$overrides"
 }

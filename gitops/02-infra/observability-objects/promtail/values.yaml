@@ -2,6 +2,27 @@ config:
   clients:
     - url: http://vl-local-victoria-logs-single-server.observability.svc.cluster.local:9428/insert/loki/api/v1/push
   snippets:
+    # Одноразовые поды проверок в хранилище журналов не попадают.
+    #
+    # Две причины, и вторая хуже первой. Первая: вывод проверок - текст
+    # для человека, с цветовыми кодами терминала, и в хранилище он лежит
+    # как `\u001b[32m✓\u001b[0m`, то есть как данные, которых никто
+    # не искал. Сервисы пишут строгий конверт JSON, и смешивать их
+    # с этим значит потерять единый формат, ради которого конверт заведён.
+    #
+    # Вторая: имя такого пода содержит отметку времени, поэтому каждый
+    # прогон заводит **новый поток**. Измерено на живом хранилище: из 56
+    # значений метки `app` в namespace messenger за сутки 44 были
+    # одноразовыми подами проверок. Это та же болезнь, что высокая
+    # кардинальность в метриках, только в журналах: поиск по `app`
+    # перестаёт быть полезным.
+    #
+    # Отбор по метке, а не по имени: имя - соглашение, которое однажды
+    # изменят, а метку скрипт ставит намеренно.
+    extraRelabelConfigs:
+      - source_labels: [__meta_kubernetes_pod_label_finops_internal_component]
+        regex: test
+        action: drop
     # this cluster's kubelet runs the docker (cri-dockerd) runtime, whose
     # log files are JSON lines, not the CRI plaintext format the chart
     # defaults to - without this override every log line lands in _msg
