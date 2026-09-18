@@ -182,24 +182,24 @@ spec:
           # продолжает принимать трафик, пока kubelet его не убьёт.
           readinessProbe:
             httpGet:
-              path: /readyz
-              port: http
-            periodSeconds: 5
-            failureThreshold: 3
+              path: {{ $svc.readinessProbe.httpGet.path }}
+              port: {{ $svc.readinessProbe.httpGet.port }}
+            periodSeconds: {{ $svc.readinessProbe.periodSeconds }}
+            failureThreshold: {{ $svc.readinessProbe.failureThreshold }}
           livenessProbe:
             httpGet:
-              path: /livez
-              port: http
-            periodSeconds: 10
-            failureThreshold: 6
+              path: {{ $svc.livenessProbe.httpGet.path }}
+              port: {{ $svc.livenessProbe.httpGet.port }}
+            periodSeconds: {{ $svc.livenessProbe.periodSeconds }}
+            failureThreshold: {{ $svc.livenessProbe.failureThreshold }}
           startupProbe:
             httpGet:
-              path: /livez
-              port: http
-            periodSeconds: 3
+              path: {{ $svc.startupProbe.httpGet.path }}
+              port: {{ $svc.startupProbe.httpGet.port }}
+            periodSeconds: {{ $svc.startupProbe.periodSeconds }}
             # 90 секунд на старт. Отдельная проба нужна, чтобы медленный
             # запуск не выглядел как зависание и не перезапускался по кругу.
-            failureThreshold: 30
+            failureThreshold: {{ $svc.startupProbe.failureThreshold }}
           lifecycle:
             preStop:
               exec:

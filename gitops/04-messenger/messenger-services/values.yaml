@@ -104,6 +104,24 @@ services:
     priorityClass: messenger-critical
     preStopSeconds: 5
     terminationGracePeriodSeconds: 30
+    startupProbe:
+      httpGet:
+        path: /readyz
+        port: http
+      periodSeconds: 60
+      failureThreshold: 3
+    livenessProbe:
+      httpGet:
+        path: /livez
+        port: http
+      periodSeconds: 60
+      failureThreshold: 6
+    readinessProbe:
+      httpGet:
+        path: /readyz
+        port: http
+      periodSeconds: 60
+      failureThreshold: 3
     http:
       port: 8080
     image: {}
