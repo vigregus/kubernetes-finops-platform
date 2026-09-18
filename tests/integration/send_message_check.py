@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import secrets
 import sys
 import uuid
@@ -30,6 +31,11 @@ from messenger.repositories.postgres import create_pool
 failures: list[str] = []
 
 ТОПИКИ = ("messenger.events.v1", "messenger.content.v1")
+
+# Оставить учётные записи и напечатать токен: тогда тем же беседой
+# и токеном можно продолжить руками. По умолчанию выключено - проверка
+# не должна оставлять следов в настоящей базе.
+KEEP_ACCOUNTS = os.getenv("KEEP_ACCOUNTS", "") not in ("", "0", "false")
 # Отправитель опрашивает очередь дважды в секунду; запас на переподключение.
 DEADLINE_SECONDS = 20
 
@@ -223,7 +229,23 @@ async def run() -> None:
             check("содержимое ушло отдельным потоком",
                   стало["messenger.content.v1"] - было["messenger.content.v1"] == 2,
                   f"было {было['messenger.content.v1']}, стало {стало['messenger.content.v1']}")
+            if KEEP_ACCOUNTS:
+                print("\n  --- оставлено для ручной работы ---")
+                print(f"  беседа:   {беседа}")
+                print(f"  вход A:   {accounts[0][0]} / {accounts[0][1]}")
+                print(f"  токен A:  {автор}")
+                print("  пример:")
+                print(
+                    f'    curl -sS -X POST "$API/conversations/{беседа}/messages" \\\n'
+                    f'      -H "Authorization: Bearer $TOKEN" -H "Origin: {ORIGIN}" \\\n'
+                    "      -H 'Content-Type: application/json' \\\n"
+                    '      -d \'{"client_message_id":"\'"$(uuidgen | tr A-Z a-z)"\'",'
+                    '"type":"text","payload":{"text":"привет"}}\''
+                )
         finally:
+            if KEEP_ACCOUNTS:
+                await pool.close()
+                return
             # Уборка при любом исходе: проверка не оставляет следов
             # в настоящей базе и в реалме.
             for external_id in external_ids:

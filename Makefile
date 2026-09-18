@@ -166,6 +166,8 @@ smoke: ## Связность: каждое хранилище отвечает �
 	@scripts/smoke-messenger.sh
 
 send-message: ## Отправить сообщение через живой API и проследить путь до Kafka
+	@# KEEP_ACCOUNTS=1 оставит учётные записи и напечатает токен с беседой -
+	@# тогда тем же токеном можно продолжить руками.
 	@echo "· отправка сообщения"
 	@INTEGRATION_ONLY=send_message_check.py scripts/integration-messenger.sh
 

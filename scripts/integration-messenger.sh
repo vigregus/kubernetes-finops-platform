@@ -107,6 +107,7 @@ kubectl -n "$NS" run "$POD" --restart=Never \
         {"name":"KAFKA_PASSWORD","valueFrom":{"secretKeyRef":{"name":"messenger-outbox","key":"password"}}},
         {"name":"CENTRIFUGO_CLIENT_URL","value":"$CENTRIFUGO_ENDPOINT"},
         {"name":"INTEGRATION_ONLY","value":"${INTEGRATION_ONLY:-}"},
+        {"name":"KEEP_ACCOUNTS","value":"${KEEP_ACCOUNTS:-}"},
         {"name":"BACKCHANNEL_TEST_URL","value":"${BACKCHANNEL_TEST_URL:-}"},
         {"name":"INTEGRATION_OIDC_CLIENT_ID","value":"${INTEGRATION_OIDC_CLIENT_ID:-}"},
         {"name":"KEYCLOAK_ADMIN","valueFrom":{"secretKeyRef":{"name":"keycloak-admin","key":"username"}}},
