@@ -14,6 +14,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Literal
 from urllib.parse import parse_qs
 
 from fastapi import FastAPI, Response
@@ -21,14 +22,27 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, ge
 from pydantic import BaseModel, Field
 from starlette.requests import Request
 
-from messenger.domain.errors import to_problem
+from messenger.domain.errors import Reason, to_problem
 from messenger.domain.identity import TokenRejection
-from messenger.domain.ids import DeviceId, SessionId, UserId
+from messenger.domain.ids import (
+    AttachmentId,
+    ClientMessageId,
+    ConversationId,
+    DeviceId,
+    SessionId,
+    UserId,
+)
+from messenger.domain.message import (
+    MessageKind,
+    MessagePayload,
+    validate_message_payload,
+)
 from messenger.domain.user import capabilities_of
 from messenger.services import backchannel as backchannel_service
 from messenger.services import conversations as conversation_service
 from messenger.services import identity as identity_service
 from messenger.services import login as login_service
+from messenger.services import messages as message_service
 from messenger.services import realtime as realtime_service
 from messenger.services import runtime as runtime_service
 from messenger.services import session_management as session_service
@@ -728,6 +742,127 @@ async def create_direct_conversation(
         ],
         "created_at": conversation.created_at,
     }
+
+
+class SendMessagePayload(BaseModel):
+    """Содержимое. Поля разные у разных видов — проверяет это домен."""
+
+    text: str | None = None
+    duration_ms: int | None = None
+
+
+class SendMessage(BaseModel):
+    """Тело `POST /conversations/{id}/messages`. Имена — из контракта."""
+
+    # Генерируется клиентом и переиспользуется при повторе: именно он
+    # делает отправку идемпотентной. Сервер такой идентификатор выдать
+    # не может — повтор приходит как раз тогда, когда ответ сервера
+    # до клиента не дошёл.
+    client_message_id: uuid.UUID
+    type: Literal["text", "image", "file", "voice"]
+    payload: SendMessagePayload
+    attachment_ids: list[uuid.UUID] = Field(default_factory=list)
+
+
+def _message_body(message) -> dict[str, object]:
+    """Сообщение в форме контракта.
+
+    Содержимое удалённого не отдаётся: надгробие сохраняет номер
+    и место в истории, но не текст.
+    """
+    payload: dict[str, object] = {}
+    if message.deleted_at is None:
+        if message.payload.text is not None:
+            payload["text"] = message.payload.text
+        if message.payload.duration_ms is not None:
+            payload["duration_ms"] = message.payload.duration_ms
+    return {
+        "message_id": str(message.message_id),
+        "conversation_id": str(message.conversation_id),
+        "seq": int(message.conversation_seq),
+        "sender_id": str(message.sender_id),
+        "client_message_id": str(message.client_message_id),
+        "type": message.kind.value,
+        "payload": payload,
+        "created_at": message.created_at,
+        "edited_at": message.edited_at,
+        "deleted_at": message.deleted_at,
+    }
+
+
+@app.post("/conversations/{conversation_id}/messages")
+async def send_message(
+    conversation_id: uuid.UUID,
+    body: SendMessage,
+    request: Request,
+    response: Response,
+) -> dict[str, object]:
+    """Принимает сообщение. Идемпотентно по `client_message_id`.
+
+    Повтор возвращает то же сообщение с тем же `message_id` и `seq`
+    и кодом `200`, а не создаёт второе. Различить их клиенту нужно:
+    `201` означает «принято сейчас», `200` — «было принято раньше,
+    и твой первый запрос всё-таки дошёл».
+
+    В Kafka отсюда не ходят. Сообщение и оба события outbox ложатся
+    одним коммитом, а отправкой занимается отдельная нагрузка — иначе
+    сетевой вызов держал бы блокировку строки беседы столько же,
+    сколько длится таймаут брокера.
+    """
+    try:
+        kind = MessageKind(body.type)
+        payload = MessagePayload(
+            text=body.payload.text, duration_ms=body.payload.duration_ms
+        )
+        # Та же доменная проверка, что и в сервисе, но раньше: негодный
+        # запрос не должен занимать соединение с базой и тем более ждать
+        # блокировку строки беседы. Правило одно — вызывается дважды,
+        # а не переписывается здесь своими словами.
+        validate_message_payload(kind, payload)
+    except ValueError as exc:
+        # Предел длины описан в контракте отдельным кодом: клиенту важно
+        # отличить «слишком длинно» от «поле не то», потому что в первом
+        # случае повтор бессмыслен без правки текста.
+        if "длиннее" in str(exc):
+            problem = to_problem(Reason.PAYLOAD_TOO_LARGE)
+            response.status_code = problem.status
+            return {"code": problem.code, "title": problem.title}
+        response.status_code = 422
+        return {"code": "invalid_payload", "title": str(exc)}
+
+    runtime = request.app.state.runtime
+    async with runtime.connection() as conn:
+        auth = await _current(request, conn)
+        if not auth.ok or auth.user is None:
+            return _auth_failure(auth.rejection, response)
+
+        try:
+            result = await message_service.send_message(
+                conn,
+                sender_id=auth.user.user_id,
+                conversation_id=ConversationId(conversation_id),
+                client_message_id=ClientMessageId(body.client_message_id),
+                kind=kind,
+                payload=payload,
+                attachment_ids=tuple(AttachmentId(value) for value in body.attachment_ids),
+            )
+        except ValueError as exc:
+            # Негодное сочетание вида и содержимого: голосовое без
+            # длительности, текстовое без текста. Домен отвергает это
+            # до обращения к базе, и ответ обязан быть 4xx, а не 500.
+            response.status_code = 422
+            return {"code": "invalid_payload", "title": str(exc)}
+
+    if not result.ok or result.message is None:
+        # Отсутствие членства наружу выглядит как отсутствие беседы:
+        # `403` подтвердил бы, что она существует, и перебором
+        # выяснялось бы, кто с кем переписывается.
+        problem = to_problem(result.rejection or Reason.INTERNAL)
+        response.status_code = problem.status
+        return {"code": problem.code, "title": problem.title}
+
+    response.status_code = 201 if result.created else 200
+    return _message_body(result.message)
 
 
 @app.post("/auth/verify-email/resend")

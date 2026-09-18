@@ -11,7 +11,7 @@ image:
   # и разные теги у них означали бы, что «выкатили версию» больше
   # ничего не значит. Тег обновляет scripts/build-messenger.sh.
   repository: ghcr.io/vigregus/messenger-api
-  tag: "local-3ba46d83a1de"
+  tag: "local-5e75c052e1c1"
   pullPolicy: IfNotPresent
   # Локально образ адресуется тегом, и это не послабление, а следствие.
   # `repo@sha256:…` — ссылка на манифест в реестре; у образа, собранного
