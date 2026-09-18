@@ -22,6 +22,7 @@ from messenger.domain.ids import DeviceId
 from messenger.domain.session import Device, Session, session_id_from_external
 from messenger.domain.user import User
 from messenger.repositories import sessions, users
+from messenger.telemetry import logging as logging_envelope
 from messenger.telemetry import metrics
 
 # Сколько наша строка считает вход действующим, если из него не приходило
@@ -80,6 +81,7 @@ async def authenticate(
             "токен не принят",
             extra={
                 "event": "token_rejected",
+                "log_stream": logging_envelope.STREAM_SECURITY,
                 "result": "failed",
                 # Причина — в журнал и в метку метрики, но не в ответ:
                 # разница между «подпись неверна» и «ключ неизвестен»
@@ -107,7 +109,8 @@ async def authenticate(
         metrics.user_created()
         log.info(
             "заведена учётная запись",
-            extra={"event": "user_created", "result": "success"},
+            extra={"event": "user_created", "result": "success",
+                   "log_stream": logging_envelope.STREAM_SECURITY},
         )
 
     user = result.user
@@ -130,6 +133,7 @@ async def authenticate(
             "вход отозван",
             extra={
                 "event": "session_revoked_access",
+                "log_stream": logging_envelope.STREAM_SECURITY,
                 "result": "failed",
                 "error_code": TokenRejection.SESSION_REVOKED.value,
             },
@@ -177,7 +181,8 @@ async def _device_for(
             return device
         log.info(
             "идентификатор устройства занят другим пользователем",
-            extra={"event": "device_id_rejected", "result": "failed"},
+            extra={"event": "device_id_rejected", "result": "failed",
+                   "log_stream": logging_envelope.STREAM_SECURITY},
         )
 
     fresh = await sessions.ensure_device(

@@ -21,13 +21,14 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import timedelta
+from enum import Enum
 
 import asyncpg
 
 from messenger.adapters import kafka
-from messenger.domain.outbox import PublishOutcome, backoff_for
+from messenger.domain.outbox import OutboxRecord, PublishOutcome, backoff_for
 from messenger.repositories import outbox
-from messenger.telemetry import metrics
+from messenger.telemetry import metrics, trace
 
 log = logging.getLogger(__name__)
 
@@ -77,61 +78,29 @@ async def publish_batch(
     unroutable = 0
 
     for record in records:
-        topic = record.topic
-        if topic is None:
-            unroutable += 1
-            metrics.outbox_event("unroutable", record.event_type)
-            log.error(
-                "неизвестный тип события в outbox",
-                extra={"event": "outbox_unroutable", "result": "failed",
-                       "error_code": "unknown_event_type",
-                       "event_id": str(record.event_id)},
-            )
-            await outbox.record_failure(
+        # Трасса поднимается из тела события и держится на всё время
+        # обработки записи: contextvar не переживает ни коммит, ни Kafka,
+        # поэтому связать строки отправителя с запросом, который эту
+        # запись породил, можно только тем, что лежит в теле.
+        with trace.bind(trace_id=record.payload.get("trace_id")) as trace_id:
+            outcome = await _publish_one(
                 conn,
-                record_id=record.id,
-                owner=settings.owner,
-                error=f"неизвестный тип события: {record.event_type}",
-                retry_after=timedelta(seconds=UNROUTABLE_BACKOFF_SECONDS),
+                record=record,
+                trace_id=trace_id,
+                publisher=publisher,
+                settings=settings,
             )
-            continue
 
-        try:
-            await publisher.publish(
-                topic=topic,
-                key=record.partition_key,
-                value=record.payload,
-                # Заголовки, чтобы потребитель отсеивал повтор, не
-                # разбирая тело: дедупликация обязана быть дешевле
-                # обработки, иначе шторм повторов стоит как шторм работы.
-                headers={
-                    "event_id": str(record.event_id),
-                    "event_type": record.event_type,
-                    "event_version": str(record.event_version),
-                },
-            )
-        except Exception as exc:  # noqa: BLE001 - причина уходит в базу и метку
+        if outcome is _Outcome.UNROUTABLE:
+            unroutable += 1
+            continue
+        if outcome is _Outcome.FAILED:
             failed += 1
-            metrics.outbox_event("failed", record.event_type)
-            log.warning(
-                "событие не опубликовано",
-                extra={"event": "outbox_publish", "result": "failed",
-                       "error_code": type(exc).__name__,
-                       "event_id": str(record.event_id), "dependency": "kafka"},
-            )
-            await outbox.record_failure(
-                conn,
-                record_id=record.id,
-                owner=settings.owner,
-                error=f"{type(exc).__name__}: {exc}",
-                retry_after=backoff_for(record.attempts + 1),
-            )
             # Дальше по пачке не идём: порядок внутри беседы важнее
             # пропускной способности, а следующая запись может быть
             # содержимым того же сообщения.
             break
-        else:
-            published.append(record.id)
+        published.append(record.id)
 
     marked = await outbox.mark_published(conn, ids=published, owner=settings.owner)
     if marked != len(published):
@@ -146,6 +115,87 @@ async def publish_batch(
         )
     metrics.outbox_published(marked)
     return PublishOutcome(published=marked, failed=failed, unroutable=unroutable)
+
+
+class _Outcome(Enum):
+    """Исход одной записи. Ради него `_publish_one` и вынесена отдельно."""
+
+    PUBLISHED = "published"
+    FAILED = "failed"
+    UNROUTABLE = "unroutable"
+
+
+async def _publish_one(
+    conn: asyncpg.Connection,
+    *,
+    record: OutboxRecord,
+    trace_id: str,
+    publisher: kafka.Publisher,
+    settings: RelaySettings,
+) -> _Outcome:
+    """Маршрут, публикация, разметка неудачи — для одной записи.
+
+    Вынесено из цикла не ради длины: привязка трассы — менеджер контекста,
+    а `break` и `continue` из-под него читаются как выход из привязки,
+    хотя выходят из цикла. Возвращённый исход такой двусмысленности
+    не оставляет.
+    """
+    topic = record.topic
+    if topic is None:
+        metrics.outbox_event("unroutable", record.event_type)
+        log.error(
+            "неизвестный тип события в outbox",
+            extra={"event": "outbox_unroutable", "result": "failed",
+                   "error_code": "unknown_event_type",
+                   "event_id": str(record.event_id)},
+        )
+        await outbox.record_failure(
+            conn,
+            record_id=record.id,
+            owner=settings.owner,
+            error=f"неизвестный тип события: {record.event_type}",
+            retry_after=timedelta(seconds=UNROUTABLE_BACKOFF_SECONDS),
+        )
+        return _Outcome.UNROUTABLE
+
+    try:
+        await publisher.publish(
+            topic=topic,
+            key=record.partition_key,
+            value=record.payload,
+            # Заголовки, чтобы потребитель отсеивал повтор, не
+            # разбирая тело: дедупликация обязана быть дешевле
+            # обработки, иначе шторм повторов стоит как шторм работы.
+            #
+            # `traceparent` здесь по той же причине: потребителю,
+            # который отбросил повтор, тело разбирать незачем, а
+            # написать в журнал, к какой трассе относится отброшенное,
+            # всё равно надо.
+            headers={
+                "event_id": str(record.event_id),
+                "event_type": record.event_type,
+                "event_version": str(record.event_version),
+                trace.HEADER: trace.header_for(trace_id, trace.new_span_id()),
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 - причина уходит в базу и метку
+        metrics.outbox_event("failed", record.event_type)
+        log.warning(
+            "событие не опубликовано",
+            extra={"event": "outbox_publish", "result": "failed",
+                   "error_code": type(exc).__name__,
+                   "event_id": str(record.event_id), "dependency": "kafka"},
+        )
+        await outbox.record_failure(
+            conn,
+            record_id=record.id,
+            owner=settings.owner,
+            error=f"{type(exc).__name__}: {exc}",
+            retry_after=backoff_for(record.attempts + 1),
+        )
+        return _Outcome.FAILED
+
+    return _Outcome.PUBLISHED
 
 
 async def report_queue(conn: asyncpg.Connection) -> None:

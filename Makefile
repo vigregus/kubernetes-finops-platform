@@ -111,7 +111,7 @@ local-up: ## Поднять мессенджер (сам вызовет bootstra
 	done
 	@echo "мессенджер поднят"
 
-local-test: contracts kafka-security layers sql lint unit migrate smoke integration ## Контракты, безопасность Kafka, слои, SQL, линтер, юнит, миграции, связность, интеграция
+local-test: contracts kafka-security layers log-streams sql lint unit migrate smoke integration ## Контракты, безопасность Kafka, слои, журналы, SQL, линтер, юнит, миграции, связность, интеграция
 
 contracts: ## Схемы связны и обратно совместимы
 	@echo "· контракты"
@@ -124,6 +124,10 @@ kafka-security: ## SEC-010: потребитель непрочитанного 
 layers: ## Зависимости между слоями идут только вниз
 	@echo "· слои"
 	@python3 scripts/check-layers.py
+
+log-streams: ## У каждой записи журнала есть событие из каталога и свой поток
+	@echo "· журналы"
+	@python3 scripts/check-log-streams.py
 
 sql: ## Миграции не содержат операторов, запрещённых ADR 0006
 	@echo "· миграции"

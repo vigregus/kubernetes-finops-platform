@@ -15,6 +15,7 @@ from dataclasses import dataclass
 
 from messenger.adapters import keycloak, ratelimit
 from messenger.domain.user import User
+from messenger.telemetry import logging as logging_envelope
 from messenger.telemetry import metrics
 
 log = logging.getLogger(__name__)
@@ -57,6 +58,7 @@ async def send_initial_verification(
         "первое письмо о подтверждении обработано",
         extra={
             "event": "verify_email_initial",
+            "log_stream": logging_envelope.STREAM_SECURITY,
             "result": "success" if sent else "failed",
         },
     )
@@ -96,6 +98,7 @@ async def resend_verification(
             "повторная отправка отклонена лимитом",
             extra={
                 "event": "verify_email_limited",
+                "log_stream": logging_envelope.STREAM_SECURITY,
                 "result": "failed",
                 "error_code": "rate_limited",
                 "degraded": decision.degraded,
@@ -114,6 +117,7 @@ async def resend_verification(
     metrics.verification_email("sent")
     log.info(
         "письмо о подтверждении отправлено повторно",
-        extra={"event": "verify_email_sent", "result": "success"},
+        extra={"event": "verify_email_sent", "result": "success",
+               "log_stream": logging_envelope.STREAM_SECURITY},
     )
     return ResendResult(sent=True, retry_after_seconds=RESEND_WINDOW_SECONDS)

@@ -82,4 +82,45 @@ def test_журнал_обращений_в_общем_конверте(client, 
     for field in ("timestamp", "service", "environment", "version", "event", "trace_id"):
         assert field in record, f"нет поля конверта {field}"
     assert record["event"] == "http_request"
-    assert record["stream"] == "access"
+    assert record["log_stream"] == "access"
+
+
+def test_трасса_начинается_здесь_если_её_не_прислали(client, capsys):
+    """Запись обращения и ответ несут одну и ту же трассу.
+
+    Без этого поддержка получает от человека номер, которого нет ни
+    в одном журнале, — а искать по времени в трёх сервисах значит
+    находить совпадения, а не причину.
+    """
+    configure()
+    r = client.get("/livez")
+    trace_id = r.headers["X-Trace-Id"]
+    assert len(trace_id) == 32
+
+    записи = [
+        json.loads(line)
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith("{")
+    ]
+    наши = [x for x in записи if x.get("event") == "http_request"]
+    assert наши[-1]["trace_id"] == trace_id
+
+
+def test_чужая_трасса_продолжается_а_не_начинается_заново(client, capsys):
+    """Запрос к нам может быть продолжением чужого.
+
+    Разрывать цепочку на своей границе значит превращать сквозную
+    трассу в две несвязанные половины ровно там, где интереснее всего.
+    """
+    configure()
+    чужая = "4bf92f3577b34da6a3ce929d0e0e4736"
+    r = client.get("/livez", headers={"traceparent": f"00-{чужая}-00f067aa0ba902b7-01"})
+    assert r.headers["X-Trace-Id"] == чужая
+
+    записи = [
+        json.loads(line)
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith("{")
+    ]
+    наши = [x for x in записи if x.get("event") == "http_request"]
+    assert наши[-1]["trace_id"] == чужая

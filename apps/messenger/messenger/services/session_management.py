@@ -23,6 +23,7 @@ from messenger.domain.ids import DeviceId, SessionId
 from messenger.domain.session import RevocationReason, SessionView
 from messenger.repositories import sessions
 from messenger.services import identity
+from messenger.telemetry import logging as logging_envelope
 from messenger.telemetry import metrics
 
 log = logging.getLogger(__name__)
@@ -141,6 +142,7 @@ async def revoke_for_token(
             "сессия отозвана пользователем",
             extra={
                 "event": "session_revoked",
+                "log_stream": logging_envelope.STREAM_SECURITY,
                 "result": "success",
                 "reason": RevocationReason.LOGOUT_DEVICE.value,
                 "current": current,
@@ -195,6 +197,7 @@ async def revoke_all_for_token(
         "все сессии отозваны",
         extra={
             "event": "sessions_revoked_all",
+            "log_stream": logging_envelope.STREAM_SECURITY,
             "result": "success",
             "reason": RevocationReason.LOGOUT_ALL.value,
             "revoked": count,

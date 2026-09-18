@@ -69,8 +69,6 @@ spec:
             # «когда это началось» не связать с выкаткой.
             - name: SERVICE_VERSION
               value: {{ include "messenger.version" $ctx | quote }}
-            - name: LOG_FORMAT
-              value: json
             {{- with $svc.metricsPort }}
             - name: METRICS_PORT
               value: {{ . | quote }}

@@ -48,7 +48,7 @@ from messenger.services import runtime as runtime_service
 from messenger.services import session_management as session_service
 from messenger.services import verification as verification_service
 from messenger.telemetry import logging as logging_envelope
-from messenger.telemetry import metrics
+from messenger.telemetry import metrics, trace
 from messenger.telemetry.logging import configure
 
 log = configure()
@@ -584,44 +584,62 @@ async def observe(request: Request, call_next):
     # принимается, потому что запрос к нам может быть продолжением
     # чужого, и разрывать цепочку на своей границе незачем.
     request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
+
+    # Трасса продолжается, если пришла, и начинается здесь, если нет.
+    # `request_id` и `trace_id` — разные вещи, и нужны обе: первая
+    # опознаёт обращение к нам, вторая — весь путь сообщения, который
+    # после ответа клиенту продолжается в отправителе и потребителе.
+    incoming = trace.parse(request.headers.get(trace.HEADER))
+
     token = logging_envelope.REQUEST_ID.set(request_id)
     try:
-        response = await call_next(request)
+        # Привязка охватывает и обработку, и запись журнала обращений.
+        # Закрыть её сразу после `call_next` - ошибка, которую не видно
+        # глазами: запись об обращении пишется последней, и `trace_id`
+        # у неё - единственной, которая обязана его нести, - окажется
+        # пустым, а сама запись останется на вид исправной.
+        with trace.bind(trace_id=incoming[0] if incoming else None) as trace_id:
+            response = await call_next(request)
+
+            # Тот же идентификатор уходит клиенту: без него в поддержке
+            # спрашивают «когда это было», а не «какой у вас request id».
+            response.headers["X-Request-Id"] = request_id
+            # Трасса тоже: по ней виден весь путь сообщения, а не только
+            # та его часть, что случилась внутри запроса.
+            response.headers["X-Trace-Id"] = trace_id
+            route = _route_template(request)
+            elapsed = time.perf_counter() - started
+
+            REQUESTS.labels(
+                service=SERVICE,
+                route=route,
+                method=request.method,
+                status_class=f"{response.status_code // 100}xx",
+            ).inc()
+            DURATION.labels(service=SERVICE, route=route, method=request.method).observe(
+                elapsed
+            )
+
+            # Журнал обращений — отдельный поток со своим сроком хранения.
+            log.info(
+                "%s %s %s",
+                request.method,
+                route,
+                response.status_code,
+                extra={
+                    "event": "http_request",
+                    "log_stream": logging_envelope.STREAM_ACCESS,
+                    "route": route,
+                    "method": request.method,
+                    "status": response.status_code,
+                    "duration_ms": round(elapsed * 1000, 2),
+                    "request_id": request_id,
+                    "result": "success" if response.status_code < 500 else "failed",
+                },
+            )
+            return response
     finally:
         logging_envelope.REQUEST_ID.reset(token)
-
-    # Тот же идентификатор уходит клиенту: без него в поддержке
-    # спрашивают «когда это было», а не «какой у вас request id».
-    response.headers["X-Request-Id"] = request_id
-    route = _route_template(request)
-    elapsed = time.perf_counter() - started
-
-    REQUESTS.labels(
-        service=SERVICE,
-        route=route,
-        method=request.method,
-        status_class=f"{response.status_code // 100}xx",
-    ).inc()
-    DURATION.labels(service=SERVICE, route=route, method=request.method).observe(elapsed)
-
-    # Журнал обращений — отдельный поток со своим сроком хранения.
-    log.info(
-        "%s %s %s",
-        request.method,
-        route,
-        response.status_code,
-        extra={
-            "event": "http_request",
-            "stream": "access",
-            "route": route,
-            "method": request.method,
-            "status": response.status_code,
-            "duration_ms": round(elapsed * 1000, 2),
-            "request_id": request_id,
-            "result": "success" if response.status_code < 500 else "failed",
-        },
-    )
-    return response
 
 
 @app.get("/livez")
@@ -862,6 +880,10 @@ async def send_message(
                 kind=kind,
                 payload=payload,
                 attachment_ids=tuple(AttachmentId(value) for value in body.attachment_ids),
+                # Трасса уезжает в outbox вместе с событием: contextvar
+                # не переживает ни коммит, ни Kafka, и связать запрос
+                # с доставкой можно только тем, что лежит в теле.
+                trace_id=trace.current_trace_id(),
             )
         except ValueError as exc:
             # Негодное сочетание вида и содержимого: голосовое без

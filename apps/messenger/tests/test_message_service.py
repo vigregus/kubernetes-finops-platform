@@ -168,6 +168,10 @@ def test_новое_сообщение_и_два_события_создаютс
     assert events[0]["payload"]["recipient_ids"] == [str(RECIPIENT)]
     assert "payload" not in events[0]["payload"]
     assert events[1]["payload"]["payload"]["text"] == "привет"
+    # Трасса уезжает в обе половины: потребитель непрочитанного получает
+    # только факт, и без неё его строки не связать с тем же сообщением.
+    assert events[0]["payload"]["trace_id"] == "trace-1"
+    assert events[1]["payload"]["trace_id"] == "trace-1"
 
 
 def test_ошибка_второго_outbox_выходит_через_границу_транзакции(monkeypatch):

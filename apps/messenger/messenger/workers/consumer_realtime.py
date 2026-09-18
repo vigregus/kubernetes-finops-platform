@@ -20,7 +20,7 @@ from prometheus_client import start_http_server
 
 from messenger.adapters import centrifugo, event_cache, kafka
 from messenger.services import realtime_delivery
-from messenger.telemetry import metrics
+from messenger.telemetry import metrics, trace
 from messenger.telemetry.logging import configure
 
 log = configure()
@@ -79,10 +79,16 @@ async def run(stop: asyncio.Event) -> None:
             events = await subscriber.poll()
             if not events:
                 continue
-            for topic, _headers, body in events:
-                await realtime_delivery.handle_event(
-                    topic=topic, body=body, cache=cache, centrifugo=client
-                )
+            for topic, headers, body in events:
+                # Трасса берётся из заголовка, а тело - запасной путь:
+                # заголовок ставит отправитель, и он есть даже у записи,
+                # которую потребитель отбросит не разбирая. Событие,
+                # пришедшее без обоих, получает свою трассу - иначе
+                # его строки не связать даже между собой.
+                with trace.bind(trace_id=trace.from_carrier(headers, body)):
+                    await realtime_delivery.handle_event(
+                        topic=topic, body=body, cache=cache, centrifugo=client
+                    )
             await subscriber.commit()
         except Exception as exc:  # noqa: BLE001 - цикл обязан пережить любой отказ
             log.warning(

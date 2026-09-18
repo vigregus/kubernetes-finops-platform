@@ -41,8 +41,11 @@ config:
     pipelineStages:
       - docker: {}
       # CNPG's instance manager already wraps every Postgres log line
-      # (including the log_statement/log_min_duration_statement output
-      # from charts/app1/templates/postgres.yaml) as JSON on stdout - but
+      # (including the log_statement/log_min_duration_statement output,
+      # when a cluster turns those on - the retired checkout/analytics
+      # demo did; gitops/04-messenger/messenger-postgres does not, so
+      # today only the sql/trace_id half of this regex is idle) as JSON
+      # on stdout - but
       # its top-level field is "msg":"record", not "_msg", so VictoriaLogs
       # was dropping every line as "missing _msg field", and the real SQL
       # plus the trace_id SQL comment were buried unindexed inside the
@@ -50,6 +53,32 @@ config:
       # the actual SQL text (so it reads like a log, not a JSON dump) and
       # promotes trace_id/duration_ms out of that string into real fields,
       # matching how the app's own JSON logs already work.
+      # Поток записи становится меткой, а не остаётся обычным полем.
+      #
+      # Поле называется `log_stream`, потому что `stream` тут уже занят:
+      # эта метка ставится каждой строке и означает stdout или stderr.
+      # Пока приложение писало `stream`, два смысла сходились в одно поле,
+      # и у 226 из 168 617 записей `http_request` за сутки поток приложения
+      # оказывался затёрт меткой контейнера.
+      # Разница не косметическая: по метке VictoriaLogs группирует
+      # записи в потоки, и `{stream="security"}` отбирает их, не читая
+      # тела, тогда как поиск по полю разбирает каждую запись подряд.
+      # Это же и место, где однажды появится маршрутизация по сроку
+      # хранения: сейчас у хранилища он один на всё (см.
+      # docs/messenger/09-data-lifecycle.md).
+      #
+      # Отбор по конкретным нагрузкам, а не по namespace: разбор JSON
+      # у пода, который пишет обычный текст (mailpit, одноразовые джобы),
+      # - это ошибка на каждую строку в журнале самого promtail, то есть
+      # тот же мусор, только этажом ниже. Конверт пишут только эти три.
+      - match:
+          selector: '{namespace="messenger", app=~"api|outbox-relay|consumer-realtime"}'
+          stages:
+            - json:
+                expressions:
+                  log_stream: log_stream
+            - labels:
+                log_stream:
       - match:
           selector: '{app="postgresql"}'
           stages:

@@ -20,14 +20,20 @@ from messenger.services import outbox_relay
 НАСТРОЙКИ = outbox_relay.RelaySettings(owner="relay-1", batch_size=10, lease_seconds=60)
 
 
-def запись(record_id: int, event_type: str = "message.created", attempts: int = 0):
+def запись(
+    record_id: int,
+    event_type: str = "message.created",
+    attempts: int = 0,
+    trace_id: str | None = None,
+):
     return domain.OutboxRecord(
         id=record_id,
         event_id=EventId(uuid.uuid4()),
         event_type=event_type,
         event_version=1,
         partition_key="беседа-1",
-        payload={"event_type": event_type},
+        payload={"event_type": event_type,
+                 **({"trace_id": trace_id} if trace_id else {})},
         attempts=attempts,
         created_at=datetime.now(UTC),
     )
@@ -36,12 +42,14 @@ def запись(record_id: int, event_type: str = "message.created", attempts: 
 class FakePublisher:
     def __init__(self, *, fails_from: int | None = None) -> None:
         self.published: list[str] = []
+        self.headers: list[dict[str, str]] = []
         self.fails_from = fails_from
 
     async def publish(self, *, topic, key, value, headers):
         if self.fails_from is not None and len(self.published) >= self.fails_from:
             raise ConnectionError("брокер недоступен")
         self.published.append(topic)
+        self.headers.append(headers)
 
 
 @pytest.fixture
@@ -153,3 +161,40 @@ def test_потерянная_аренда_видна_в_исходе(repo_stub)
     repo_stub["mark_result"] = 1
     исход = прогон(FakePublisher())
     assert исход.published == 1
+
+
+def test_трасса_из_тела_уезжает_в_заголовок_записи(repo_stub):
+    """Асинхронная граница проходится телом события и заголовком.
+
+    Заголовок нужен потребителю, который тело не разбирает: повтор
+    отсеивается по `event_id`, но написать в журнал, к какой трассе
+    относится отброшенное, всё равно надо.
+    """
+    трасса = "4bf92f3577b34da6a3ce929d0e0e4736"
+    repo_stub["claimed"] = [запись(1, trace_id=трасса)]
+    publisher = FakePublisher()
+    прогон(publisher)
+
+    разобрано = outbox_relay.trace.parse(publisher.headers[0]["traceparent"])
+    assert разобрано is not None
+    assert разобрано[0] == трасса
+
+
+def test_запись_без_трассы_получает_свою(repo_stub):
+    """Событие, записанное до появления трассировки, не должно уезжать
+    в Kafka без контекста: тогда строки отправителя не связать даже
+    между собой."""
+    repo_stub["claimed"] = [запись(1)]
+    publisher = FakePublisher()
+    прогон(publisher)
+
+    разобрано = outbox_relay.trace.parse(publisher.headers[0]["traceparent"])
+    assert разобрано is not None and len(разобрано[0]) == 32
+
+
+def test_трасса_снимается_после_записи(repo_stub):
+    """Оставшийся contextvar приписал бы чужую трассу следующей записи —
+    худший вид ошибки в расследовании: выглядит как настоящая связь."""
+    repo_stub["claimed"] = [запись(1, trace_id="4bf92f3577b34da6a3ce929d0e0e4736")]
+    прогон(FakePublisher())
+    assert outbox_relay.trace.current_trace_id() is None

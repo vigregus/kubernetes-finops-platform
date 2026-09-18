@@ -26,6 +26,8 @@ from enum import Enum
 import redis.asyncio as aioredis
 from redis.exceptions import RedisError
 
+from messenger.telemetry import logging as logging_envelope
+
 log = logging.getLogger(__name__)
 
 
@@ -118,6 +120,12 @@ class RateLimiter:
                 "счётчик лимитов недоступен",
                 extra={
                     "event": "rate_limit_degraded",
+                    # Поток security, хотя причина - недоступный Redis.
+                    # Запись отвечает не «что сломалось», а «какое
+                    # решение о доступе принято, пока защита не работает»,
+                    # и окно без работающего ограничителя обязано
+                    # пережить недельный срок обычных журналов.
+                    "log_stream": logging_envelope.STREAM_SECURITY,
                     "result": "failed",
                     "error_code": type(exc).__name__,
                     "dependency": "redis",

@@ -23,6 +23,7 @@ from messenger.domain.ids import DeviceId
 from messenger.domain.session import Session
 from messenger.domain.user import User
 from messenger.services import identity
+from messenger.telemetry import logging as logging_envelope
 from messenger.telemetry import metrics
 
 log = logging.getLogger(__name__)
@@ -160,7 +161,8 @@ async def _finish(
         log.warning(
             "выданный токен не прошёл собственную проверку",
             extra={"event": "login_rejected", "operation": operation,
-                   "result": "failed", "error_code": reason},
+                   "result": "failed", "error_code": reason,
+                   "log_stream": logging_envelope.STREAM_SECURITY},
         )
         return LoginResult(error_class=reason)
 

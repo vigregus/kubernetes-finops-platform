@@ -19,6 +19,8 @@ from enum import Enum
 
 import httpx
 
+from messenger.telemetry import logging as logging_envelope
+
 log = logging.getLogger(__name__)
 
 
@@ -117,7 +119,12 @@ async def _post(form: dict[str, str], *, settings: TokenSettings, operation: str
         log.warning(
             "Keycloak не ответил на обмен",
             extra={
+                # Событие - исход обмена, а не состояние Keycloak.
+                # Поэтому поток тот же, что у отклонённого обмена:
+                # для субъекта это одно и то же - он не вошёл, и
+                # разбирать оба случая приходится вместе.
                 "event": "token_exchange",
+                "log_stream": logging_envelope.STREAM_SECURITY,
                 "operation": operation,
                 "result": "failed",
                 "error_code": type(exc).__name__,
@@ -153,6 +160,7 @@ async def _post(form: dict[str, str], *, settings: TokenSettings, operation: str
         "обмен отклонён",
         extra={
             "event": "token_exchange",
+            "log_stream": logging_envelope.STREAM_SECURITY,
             "operation": operation,
             "result": "failed",
             "error_code": failure.value,

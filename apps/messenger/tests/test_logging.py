@@ -122,14 +122,14 @@ def test_у_каждой_записи_есть_поток(capsys):
     log = configure()
     log.info("что-то произошло", extra={"event": "нечто"})
     запись = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
-    assert запись["stream"] == "application"
+    assert запись["log_stream"] == "application"
 
 
 def test_поток_можно_указать_явно(capsys):
     log = configure()
-    log.info("вход", extra={"event": "login", "stream": "security"})
+    log.info("вход", extra={"event": "login", "log_stream": "security"})
     запись = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
-    assert запись["stream"] == "security"
+    assert запись["log_stream"] == "security"
 
 
 def test_идентификатор_обращения_подставляется_из_контекста(capsys):

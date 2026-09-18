@@ -10,6 +10,7 @@ on:
       - 'scripts/check-layers.py'
       - 'scripts/check-migrations.py'
       - 'scripts/check-kafka-security.py'
+      - 'scripts/check-log-streams.py'
       - 'db/**'
       - 'gitops/02-infra/kafka-cluster/manifests/kafka.yaml'
       - 'gitops/04-messenger/messenger-kafka-topics/manifests/**'
@@ -63,6 +64,8 @@ jobs:
         run: python3 scripts/check-layers.py
       - name: Миграции без запрещённых операторов
         run: python3 scripts/check-migrations.py
+      - name: У каждой записи журнала есть событие и поток
+        run: python3 scripts/check-log-streams.py
       - name: Зависимости
         run: |
           pip install --quiet \
