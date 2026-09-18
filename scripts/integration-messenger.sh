@@ -26,11 +26,19 @@ trap cleanup EXIT
 
 DEFAULT_IMAGE="$(python3 - "$VALUES" <<'PY'
 import re, sys
+
+# Образ берётся из верхнеуровневого блока image: тег общий для всех
+# нагрузок, а не свой у каждой. Раньше читался блок api, и после того
+# как тег стал общим, разбор ломался на пустом месте.
 s = open(sys.argv[1], encoding="utf-8").read()
-block = re.search(r"  api:\n(?:.*\n)*?    resources:", s).group(0)
-repo = re.search(r"repository:\s*(\S+)", block).group(1)
-tag = re.search(r'tag:\s*"?([^"\n]+)"?', block).group(1)
-print(f"{repo}:{tag}")
+block = re.search(r"^image:\n(?:  .*\n)+", s, re.M)
+if not block:
+    sys.exit("не найден верхнеуровневый блок image в values")
+repo = re.search(r"^  repository:\s*(\S+)", block.group(0), re.M)
+tag = re.search(r'^  tag:\s*"?([^"\n]+)"?', block.group(0), re.M)
+if not repo or not tag:
+    sys.exit("в блоке image нет repository или tag")
+print(f"{repo.group(1)}:{tag.group(1)}")
 PY
 )"
 IMAGE="${INTEGRATION_IMAGE:-$DEFAULT_IMAGE}"
@@ -94,6 +102,9 @@ kubectl -n "$NS" run "$POD" --restart=Never \
         {"name":"OIDC_AUDIENCE","value":"messenger-api"},
         {"name":"API_URL","value":"$API_ENDPOINT"},
         {"name":"WEB_ORIGIN","value":"https://app.finops.local"},
+        {"name":"KAFKA_BOOTSTRAP","value":"messenger-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092"},
+        {"name":"KAFKA_USERNAME","value":"messenger-outbox"},
+        {"name":"KAFKA_PASSWORD","valueFrom":{"secretKeyRef":{"name":"messenger-outbox","key":"password"}}},
         {"name":"CENTRIFUGO_CLIENT_URL","value":"$CENTRIFUGO_ENDPOINT"},
         {"name":"INTEGRATION_ONLY","value":"${INTEGRATION_ONLY:-}"},
         {"name":"BACKCHANNEL_TEST_URL","value":"${BACKCHANNEL_TEST_URL:-}"},
