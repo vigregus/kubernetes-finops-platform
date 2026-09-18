@@ -233,3 +233,33 @@ async def list_active_user_conversations(
         user_id,
     )
     return [_to_conversation(row) for row in rows]
+
+
+async def list_active_conversation_ids(
+    conn: asyncpg.Connection, *, user_id: UserId, limit: int = 200
+) -> list[ConversationId]:
+    """Беседы, в которых человек состоит сейчас. Свежие сверху.
+
+    Нужны для выдачи каналов в токене Centrifugo: клиент не выбирает
+    канал сам — сервер перечисляет разрешённые явно, иначе подписка
+    на чужую беседу сводится к знанию её идентификатора.
+
+    Предел не формальность: список каналов уезжает в подписанный токен,
+    и человек с тысячей бесед получил бы токен, который не проходит
+    ни в один заголовок. Беседы сверх предела доберутся при следующей
+    выдаче — она короткая и происходит на каждое соединение.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT c.conversation_id
+          FROM conversation_members m
+          JOIN conversations c ON c.conversation_id = m.conversation_id
+         WHERE m.user_id = $1
+           AND m.left_at IS NULL
+         ORDER BY c.updated_at DESC
+         LIMIT $2
+        """,
+        user_id,
+        limit,
+    )
+    return [ConversationId(row["conversation_id"]) for row in rows]

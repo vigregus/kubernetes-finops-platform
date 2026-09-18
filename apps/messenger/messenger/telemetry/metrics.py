@@ -215,3 +215,17 @@ def outbox_published(count: int) -> None:
 def outbox_queue(*, pending: int, oldest_age_seconds: float) -> None:
     OUTBOX_PENDING.labels(service=SERVICE).set(pending)
     OUTBOX_OLDEST_AGE.labels(service=SERVICE).set(oldest_age_seconds)
+
+
+# Исходы доставки в реальном времени. `duplicate` здесь не ошибка,
+# а доказательство того, что дедупликация работает: транспорт выбран
+# at-least-once, и повторы обязаны появляться.
+REALTIME_DELIVERY = Counter(
+    "messenger_realtime_delivery_total",
+    "События, обработанные потребителем realtime",
+    ["service", "outcome"],
+)
+
+
+def realtime_delivery(outcome: str) -> None:
+    REALTIME_DELIVERY.labels(service=SERVICE, outcome=outcome).inc()

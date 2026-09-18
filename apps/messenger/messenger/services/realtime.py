@@ -11,6 +11,7 @@ from messenger.adapters import oidc
 from messenger.adapters.centrifugo import CentrifugoClient
 from messenger.domain.identity import TokenRejection
 from messenger.domain.ids import DeviceId, SessionId, UserId
+from messenger.repositories import conversations as conversation_repo
 from messenger.repositories import sessions
 from messenger.services import identity
 
@@ -72,10 +73,19 @@ async def issue_token_for_user(
         return RealtimeTokenResult(rejection=TokenRejection.KEYS_UNAVAILABLE)
 
     user_id = str(auth.user.user_id)
+    # Каналы бесед перечисляются явно и на момент выдачи. Токен короткий
+    # именно поэтому: исключённый из беседы теряет подписку при следующем
+    # соединении, а не когда-нибудь. Долгоживущий токен со списком каналов
+    # означал бы, что выход из беседы ничего не меняет до его истечения.
+    conversations = await conversation_repo.list_active_conversation_ids(
+        conn, user_id=auth.user.user_id
+    )
+    channels = [f"user:{user_id}"]
+    channels += [f"conversation:{conversation_id}" for conversation_id in conversations]
     issued, expires_at = realtime.issue_token(
         user_id,
         str(auth.session.session_id),
-        channels=[f"user:{user_id}"],
+        channels=channels,
     )
     return RealtimeTokenResult(token=issued, expires_at=expires_at)
 

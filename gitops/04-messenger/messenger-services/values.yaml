@@ -11,7 +11,7 @@ image:
   # и разные теги у них означали бы, что «выкатили версию» больше
   # ничего не значит. Тег обновляет scripts/build-messenger.sh.
   repository: ghcr.io/vigregus/messenger-api
-  tag: "local-5e75c052e1c1"
+  tag: "local-b66e4d29e056"
   pullPolicy: IfNotPresent
   # Локально образ адресуется тегом, и это не послабление, а следствие.
   # `repo@sha256:…` — ссылка на манифест в реестре; у образа, собранного
@@ -150,7 +150,12 @@ services:
       limits: {cpu: "1", memory: 512Mi}
 
   consumer-realtime:
-    enabled: false
+    enabled: true
+    # Единственная учётная запись с правом на оба потока: собрать факт
+    # и содержимое обратно может только тот, кому положены обе половины.
+    kafkaUser: messenger-realtime
+    metricsPort: 9100
+    command: ["python", "-m", "messenger.workers.consumer_realtime"]
     component: worker
     replicas: 1
     minAvailable: 1

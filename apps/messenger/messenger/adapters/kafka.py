@@ -17,7 +17,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-from aiokafka import AIOKafkaProducer
+from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 from aiokafka.errors import KafkaError
 
 log = logging.getLogger(__name__)
@@ -110,3 +110,111 @@ class Publisher:
             key=key.encode("utf-8"),
             headers=[(name, val.encode("utf-8")) for name, val in headers.items()],
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ConsumerSettings:
+    """Откуда читать и от чьего имени."""
+
+    bootstrap: str
+    username: str
+    password: str
+    group_id: str
+    topics: tuple[str, ...]
+    security_protocol: str = "SASL_PLAINTEXT"
+    sasl_mechanism: str = "SCRAM-SHA-512"
+    # Сколько ждать пачку. Короткий таймаут - не нетерпеливость: цикл
+    # обязан регулярно возвращать управление, иначе остановка пода
+    # ждёт следующего сообщения, которого может не быть часами.
+    poll_timeout_ms: int = 1000
+    max_records: int = 100
+
+
+@dataclass(slots=True)
+class Subscriber:
+    """Потребитель с ручной фиксацией смещения.
+
+    Ручной, а не автоматический: автоматическая фиксация отмечает
+    обработанным то, что только прочитано. Процесс, умерший между
+    чтением и обработкой, потерял бы событие молча - и это была бы
+    ровно та потеря, ради невозможности которой существует outbox.
+
+    Фиксация после обработки означает, что при падении событие придёт
+    второй раз. Это осознанная цена at-least-once, и переживает её
+    дедупликация, а не надежда.
+    """
+
+    settings: ConsumerSettings
+    _consumer: AIOKafkaConsumer | None = field(default=None)
+
+    async def start(self) -> bool:
+        if self._consumer is not None:
+            return True
+        consumer = AIOKafkaConsumer(
+            *self.settings.topics,
+            bootstrap_servers=self.settings.bootstrap,
+            group_id=self.settings.group_id,
+            security_protocol=self.settings.security_protocol,
+            sasl_mechanism=self.settings.sasl_mechanism,
+            sasl_plain_username=self.settings.username,
+            sasl_plain_password=self.settings.password,
+            enable_auto_commit=False,
+            # С начала: потребитель, поднятый впервые, обязан увидеть
+            # уже накопленное. `latest` означал бы, что события,
+            # пришедшие до его первого запуска, не увидит никто.
+            auto_offset_reset="earliest",
+        )
+        try:
+            await consumer.start()
+        except (KafkaError, OSError) as exc:
+            log.warning(
+                "потребитель не подключился",
+                extra={"event": "kafka_connect", "result": "failed",
+                       "error_code": type(exc).__name__, "dependency": "kafka"},
+            )
+            await consumer.stop()
+            return False
+        self._consumer = consumer
+        return True
+
+    async def stop(self) -> None:
+        if self._consumer is not None:
+            await self._consumer.stop()
+            self._consumer = None
+
+    async def poll(self) -> list[tuple[str, dict[str, str], dict[str, Any]]]:
+        """Пачка событий: топик, заголовки, тело.
+
+        Тело разбирается здесь, потому что негодный JSON - это отказ
+        транспорта, а не предметной области: сервис не должен уметь
+        отличать сообщение от мусора в логе.
+        """
+        if self._consumer is None:
+            raise ConnectionError("потребитель не подключён")
+        batches = await self._consumer.getmany(
+            timeout_ms=self.settings.poll_timeout_ms,
+            max_records=self.settings.max_records,
+        )
+        events: list[tuple[str, dict[str, str], dict[str, Any]]] = []
+        for partition, records in batches.items():
+            for record in records:
+                headers = {
+                    name: value.decode("utf-8") for name, value in (record.headers or ())
+                }
+                try:
+                    body = json.loads(record.value.decode("utf-8"))
+                except (UnicodeDecodeError, ValueError):
+                    log.error(
+                        "нечитаемая запись в потоке",
+                        extra={"event": "kafka_record", "result": "failed",
+                               "error_code": "unparsable",
+                               "topic": partition.topic, "offset": record.offset},
+                    )
+                    continue
+                events.append((partition.topic, headers, body))
+        return events
+
+    async def commit(self) -> None:
+        """Фиксирует смещение. Только после обработки всей пачки."""
+        if self._consumer is not None:
+            await self._consumer.commit()

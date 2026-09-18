@@ -10,6 +10,7 @@ from messenger.domain.identity import Claims, TokenRejection
 from messenger.domain.ids import DeviceId, SessionId, UserId
 from messenger.domain.session import Device, Session
 from messenger.domain.user import User
+from messenger.repositories import conversations as conversation_repo
 from messenger.services import identity
 from messenger.services import realtime as service
 
@@ -75,12 +76,21 @@ class FakeRealtime:
         return self.claims if token == "connect-token" else None
 
 
+def _беседы(monkeypatch, ids):
+    """Подменяет список бесед: здесь проверяется выдача токена, не SQL."""
+    async def _list(conn, *, user_id, limit=200):
+        return list(ids)
+
+    monkeypatch.setattr(conversation_repo, "list_active_conversation_ids", _list)
+
+
 def test_выдача_токена_на_личный_канал(monkeypatch):
     async def _authenticate(*args, **kwargs):
         return _auth()
 
     realtime = FakeRealtime()
     monkeypatch.setattr(identity, "authenticate", _authenticate)
+    _беседы(monkeypatch, [])
 
     result = asyncio.run(service.issue_token_for_user(
         None, token="token", keys=None, settings=None, realtime=realtime,
@@ -93,6 +103,32 @@ def test_выдача_токена_на_личный_канал(monkeypatch):
     assert realtime.issued == [
         (str(USER_ID), str(SESSION_ID), [f"user:{USER_ID}"])
     ]
+
+
+def test_в_токен_попадают_каналы_бесед(monkeypatch):
+    """Клиент не выбирает канал сам.
+
+    Сервер перечисляет разрешённые явно, иначе подписка на чужую беседу
+    сводится к знанию её идентификатора. Список берётся на момент выдачи,
+    и токен короткий именно поэтому: исключённый из беседы теряет
+    подписку при следующем соединении, а не когда-нибудь.
+    """
+    import uuid as _uuid
+
+    беседа = _uuid.uuid4()
+
+    async def _authenticate(*args, **kwargs):
+        return _auth()
+
+    realtime = FakeRealtime()
+    monkeypatch.setattr(identity, "authenticate", _authenticate)
+    _беседы(monkeypatch, [беседа])
+
+    asyncio.run(service.issue_token_for_user(
+        None, token="token", keys=None, settings=None, realtime=realtime,
+    ))
+    _, _, channels = realtime.issued[0]
+    assert channels == [f"user:{USER_ID}", f"conversation:{беседа}"]
 
 
 def test_выдача_токена_при_отказе_токена(monkeypatch):
