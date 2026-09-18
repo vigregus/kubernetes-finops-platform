@@ -1,0 +1,106 @@
+# Учётные записи разделены по обязанностям. Пароли генерирует Strimzi и хранит
+# только в Secret namespace kafka; значений секретов в Git нет.
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaUser
+metadata:
+  name: messenger-outbox
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: messenger-kafka
+    finops.internal/product: messenger
+    finops.internal/component: messaging
+spec:
+  authentication:
+    type: scram-sha-512
+  authorization:
+    type: simple
+    acls:
+      - resource: {type: topic, name: messenger.events.v1}
+        operations: [Write, Describe]
+      - resource: {type: topic, name: messenger.content.v1}
+        operations: [Write, Describe]
+      - resource: {type: cluster, name: kafka-cluster}
+        operations: [IdempotentWrite, Describe]
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaUser
+metadata:
+  name: messenger-realtime
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: messenger-kafka
+    finops.internal/product: messenger
+    finops.internal/component: messaging
+spec:
+  authentication:
+    type: scram-sha-512
+  authorization:
+    type: simple
+    acls:
+      - resource: {type: topic, name: messenger.events.v1}
+        operations: [Read, Describe]
+      - resource: {type: topic, name: messenger.content.v1}
+        operations: [Read, Describe]
+      - resource: {type: group, name: messenger-realtime}
+        operations: [Read, Describe]
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaUser
+metadata:
+  name: messenger-notifications
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: messenger-kafka
+    finops.internal/product: messenger
+    finops.internal/component: messaging
+spec:
+  authentication:
+    type: scram-sha-512
+  authorization:
+    type: simple
+    acls:
+      - resource: {type: topic, name: messenger.events.v1}
+        operations: [Read, Describe]
+      - resource: {type: topic, name: messenger.content.v1}
+        operations: [Read, Describe]
+      - resource: {type: group, name: messenger-notifications}
+        operations: [Read, Describe]
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaUser
+metadata:
+  name: messenger-unread
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: messenger-kafka
+    finops.internal/product: messenger
+    finops.internal/component: messaging
+spec:
+  authentication:
+    type: scram-sha-512
+  authorization:
+    type: simple
+    acls:
+      # SEC-010: здесь намеренно нет messenger.content.v1.
+      - resource: {type: topic, name: messenger.events.v1}
+        operations: [Read, Describe]
+      - resource: {type: group, name: messenger-unread}
+        operations: [Read, Describe]
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaUser
+metadata:
+  name: messenger-smoke
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: messenger-kafka
+    finops.internal/product: messenger
+    finops.internal/component: test
+spec:
+  authentication:
+    type: scram-sha-512
+  authorization:
+    type: simple
+    acls:
+      - resource: {type: topic, name: messenger.events.v1}
+        operations: [Write, Describe]

@@ -9,7 +9,10 @@ on:
       - 'apps/messenger/**'
       - 'scripts/check-layers.py'
       - 'scripts/check-migrations.py'
+      - 'scripts/check-kafka-security.py'
       - 'db/**'
+      - 'gitops/02-infra/kafka-cluster/manifests/kafka.yaml'
+      - 'gitops/04-messenger/messenger-kafka-topics/manifests/**'
       - '.github/workflows/contracts.yml'
   push:
     branches: [main]
@@ -44,6 +47,9 @@ jobs:
           BASE="${{ github.event.pull_request.base.sha || 'HEAD~1' }}"
           echo "база сравнения: $BASE"
           python3 packages/contracts/validate.py "$BASE"
+
+      - name: SEC-010 — содержимое доступно только нужным потребителям
+        run: python3 scripts/check-kafka-security.py
 
   code:
     name: Слои и модульные тесты
