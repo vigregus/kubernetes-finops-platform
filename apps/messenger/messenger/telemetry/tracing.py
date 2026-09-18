@@ -19,11 +19,20 @@
 не обрастает `if span is not None`, и тесты идут по тому же коду, что и
 прод.
 
-Третье: автоинструментация не подключается сознательно.
-`opentelemetry-instrumentation-fastapi` завела бы спаны, о которых
-`trace.bind()` не знает, и конверт журнала начал бы отставать от
-настоящего текущего спана - то есть инвариант из первого следствия
-пришлось бы пересматривать.
+Третье: автоинструментация подключается, но только наружу и никогда на
+входе. Драйвер базы, кеш и HTTP-клиент получают спаны от библиотек (см.
+`_instrument_libraries`): без них время внутри `postgres.transaction`
+неразложимо - сорок миллисекунд на саму вставку и сорок миллисекунд на
+ожидание блокировки выглядят одинаково. А `opentelemetry-instrumentation-
+fastapi` не подключается: спан входа у нас свой, и вторая пара на тот же
+запрос дала бы два корня на одно обращение.
+
+Четвёртое - цена третьего, и её надо знать. Спан библиотеки создаётся в
+обход `span()`, то есть текущим становится, а в contextvars не пишется.
+Пока внутри такого спана журнал не пишут, расхождение невозможно: запись
+получает идентификатор охватывающего спана, и он настоящий. Поэтому слой
+`repositories` не пишет в журнал ни строки - всё, что он делает, это
+вызовы драйвера, - а следит за этим проверка (см. `check-log-streams`).
 
 Выборка здесь всегда головная и всегда полная: решение по ошибке
 принимается, когда трасса уже завершена, а это умеет только коллектор.
@@ -202,6 +211,11 @@ def configure(*, span_exporter: SpanExporter | None = None) -> None:
         )
         _provider = provider
         _tracer = provider.get_tracer(INSTRUMENTATION, _version())
+        # Инструментация - только здесь, то есть только когда провайдер
+        # есть. Без коллектора она не нужна: спаны, которые она создаёт,
+        # всё равно некуда деть, и включать её значило бы платить за
+        # вызовы драйвера в модульных тестах, ничего не получая взамен.
+        _instrument_libraries(provider)
         log.info(
             "экспорт трасс включён",
             extra={"event": "tracing_config", "result": "success",
@@ -239,9 +253,105 @@ def shutdown() -> None:
 
 
 def reset() -> None:
-    """Снимает провайдер и якорь. Шов для тестов: без него фикстура течёт."""
+    """Снимает провайдер, инструментацию и якорь. Шов для тестов.
+
+    Инструментация снимается здесь же, а не только глушится: она держит
+    трейсер, взятый у провайдера в момент установки, и оставленная висеть
+    после подмены провайдера она писала бы спаны в выключенный - то есть
+    соседний тест не увидел бы ни одного спана драйвера и не понял бы,
+    почему.
+    """
     shutdown()
+    _uninstrument_libraries()
     _ANCHOR.set(None)
+
+
+# Признак того, что инструментация выставлена этим модулем. Своя переменная,
+# а не флаг библиотеки: `uninstrument()` у неизвестного состояния пишет
+# предупреждение, и разбирать его на каждом снятии не за чем.
+_INSTRUMENTED = False
+
+# Переменные, включающие захват заголовков у HTTP-клиента. Включать их
+# нельзя: в запросе к Keycloak едет `Authorization: Bearer`, в запрос
+# к Centrifugo - `X-API-Key`, и любой из них, попав в атрибуты спана,
+# уезжает в Tempo на весь срок хранения трасс. Захват выключен
+# умолчанием и включается только отсюда, поэтому проверка, а не
+# комментарий: ставит их файл развёртывания, а он на этот файл не
+# смотрит.
+_HEADER_CAPTURE_VARS = (
+    "OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_CLIENT_REQUEST",
+    "OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_CLIENT_RESPONSE",
+)
+
+
+def _instrument_libraries(provider: TracerProvider) -> None:
+    """Отдаёт спаны библиотекам, которые ходят наружу.
+
+    Провайдер передаётся **явно**, и это не украшение. Инструментаторы
+    берут трейсер из глобального реестра OpenTelemetry, а мы его не
+    занимаем - `configure` объясняет, почему. Без этой строки все спаны
+    драйвера ушли бы в NoOp-провайдер, то есть исчезли бы молча и
+    выглядели бы как быстрая база.
+
+    Отказ любой из библиотек трассировку не выключает: теряется разбивка
+    времени внутри спана, а не экспорт целиком, и цена ошибки здесь
+    несимметрична.
+    """
+    global _INSTRUMENTED
+
+    enabled = [name for name in _HEADER_CAPTURE_VARS if os.getenv(name)]
+    if enabled:
+        log.warning(
+            "захват заголовков HTTP включён - в спаны уедут ключи доступа",
+            extra={"event": "tracing_config", "result": "failed",
+                   "error_code": "header_capture_enabled",
+                   "variables": ", ".join(enabled)},
+        )
+
+    try:
+        from opentelemetry.instrumentation.asyncpg import AsyncPGInstrumentor
+        from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+        from opentelemetry.instrumentation.redis import RedisInstrumentor
+
+        # `capture_parameters` выключен умолчанием, и здесь он выключен
+        # явно: с ним в атрибут `db.statement.parameters` уехал бы кортеж
+        # параметров запроса, то есть текст сообщения и адрес получателя.
+        AsyncPGInstrumentor(capture_parameters=False).instrument(tracer_provider=provider)
+        # Redis сам заменяет аргументы команды на `?`: в `db.statement`
+        # попадает `SET ? ?`, а не ключ и не значение. Проверено по
+        # исходнику версии - от этого зависит, окажется ли содержимое
+        # кеша в Tempo.
+        RedisInstrumentor().instrument(tracer_provider=provider)
+        HTTPXClientInstrumentor().instrument(tracer_provider=provider)
+        _INSTRUMENTED = True
+    except Exception as exc:  # noqa: BLE001 - причина уходит в журнал
+        log.warning(
+            "инструментация библиотек не подключена",
+            extra={"event": "tracing_config", "result": "failed",
+                   "error_code": type(exc).__name__},
+        )
+
+
+def _uninstrument_libraries() -> None:
+    """Снимает инструментацию, выставленную `_instrument_libraries`."""
+    global _INSTRUMENTED
+    if not _INSTRUMENTED:
+        return
+    _INSTRUMENTED = False
+    try:
+        from opentelemetry.instrumentation.asyncpg import AsyncPGInstrumentor
+        from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+        from opentelemetry.instrumentation.redis import RedisInstrumentor
+
+        AsyncPGInstrumentor().uninstrument()
+        RedisInstrumentor().uninstrument()
+        HTTPXClientInstrumentor().uninstrument()
+    except Exception as exc:  # noqa: BLE001 - снятие не повод падать
+        log.warning(
+            "инструментация библиотек не снята",
+            extra={"event": "tracing_config", "result": "failed",
+                   "error_code": type(exc).__name__},
+        )
 
 
 @contextlib.contextmanager

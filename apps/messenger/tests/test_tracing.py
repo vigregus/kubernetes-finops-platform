@@ -26,6 +26,7 @@ import uuid
 from collections.abc import Iterator
 from contextlib import asynccontextmanager, contextmanager
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -893,3 +894,167 @@ def test_падение_экспорта_наружу_не_выходит(caplog
     # не доезжают, — тот самый, ради которого «трассировка выключена»
     # отличается от «трассировка сломана».
     assert any("export" in record.getMessage().lower() for record in caplog.records)
+
+
+# --- инструментация библиотек ---------------------------------------------------
+#
+# Спаны внутрь спана дают библиотеки: драйвер базы, кеш и HTTP-клиент.
+# Проверяется здесь не то, что библиотеки работают, — а два наших решения.
+# Первое: инструментация смотрит на **наш** провайдер. Трейсер она берёт из
+# глобального реестра OpenTelemetry, которого мы не занимаем, поэтому
+# забытый `tracer_provider=` не сломал бы ничего видимым образом: спаны
+# просто исчезли бы, а база выглядела бы быстрой. Второе: содержимое в
+# спаны не уезжает — ни текст сообщения в параметрах запроса, ни ключ
+# доступа в заголовке.
+#
+# Драйверы подменяются до установки инструментации: настоящим нужен
+# сервер, а подменяется ровно внешняя граница.
+
+СОДЕРЖИМОЕ = "канарейка-в-параметрах-запроса"
+
+
+def test_запрос_к_базе_даёт_спан_драйвера_без_параметров(monkeypatch):
+    """Время внутри спана разложимо, а содержимое — нет."""
+    import asyncpg
+
+    async def _фальшивый_fetchrow(self, query, *args, **kwargs):
+        return None
+
+    monkeypatch.setattr(asyncpg.Connection, "fetchrow", _фальшивый_fetchrow)
+
+    exporter = InMemorySpanExporter()
+    with с_провайдером(exporter):
+        # Подделка вместо настоящего соединения: оно требует сервера,
+        # а его `__del__` ругается на недостроенный объект. Метод
+        # привязывается к подделке явно — ровно так же, как это делает
+        # обращение `conn.fetchrow(...)`; иначе инструментация не увидела
+        # бы соединения и не положила бы атрибуты, которые проверяются.
+        соединение = SimpleNamespace(
+            # Поля, из которых инструментация берёт атрибуты соединения.
+            _params=SimpleNamespace(database="messenger", user="messenger"),
+            _addr=("10.0.0.1", 5432),
+        )
+        fetchrow = asyncpg.Connection.fetchrow.__get__(соединение, asyncpg.Connection)
+        asyncio.run(fetchrow("SELECT $1::text", СОДЕРЖИМОЕ))
+
+    спаны = записанные(exporter)
+    # Имя — первый токен запроса: у нас оно низкой кардинальности,
+    # а не «postgres.query» на каждый вызов.
+    assert [span.name for span in спаны] == ["SELECT"]
+
+    спан = спаны[0]
+    assert спан.kind is otel.SpanKind.CLIENT
+    assert спан.attributes["db.statement"] == "SELECT $1::text"
+    assert спан.attributes["db.name"] == "messenger"
+    # Параметры не уехали: `capture_parameters` выключен, и выключен явно.
+    # С ним в атрибут уехал бы кортеж параметров запроса, то есть текст
+    # сообщения и адрес получателя.
+    assert "db.statement.parameters" not in спан.attributes
+    assert СОДЕРЖИМОЕ not in str(dict(спан.attributes))
+
+
+def test_аргументы_команды_кеша_в_спан_не_уезжают(monkeypatch):
+    """У Redis в спан попадает `SET ? ?`, а не ключ и не значение.
+
+    Это делает сама библиотека, и проверить это надо именно здесь: на
+    другой стороне — `json` тела события, то есть содержимое сообщения,
+    а хранится трасса в Tempo неделю.
+    """
+    import redis.asyncio as aioredis
+
+    async def _фальшивый_execute(self, *args, **kwargs):
+        return None
+
+    monkeypatch.setattr(aioredis.Redis, "execute_command", _фальшивый_execute)
+
+    exporter = InMemorySpanExporter()
+    with с_провайдером(exporter):
+        клиент = aioredis.Redis.from_url("redis://127.0.0.1:6379/0")
+        asyncio.run(клиент.execute_command("SET", "pair:abc:content", СОДЕРЖИМОЕ))
+
+    спаны = записанные(exporter)
+    assert [span.name for span in спаны] == ["SET"]
+
+    спан = спаны[0]
+    assert спан.kind is otel.SpanKind.CLIENT
+    assert спан.attributes["db.statement"] == "SET ? ?"
+    assert СОДЕРЖИМОЕ not in str(dict(спан.attributes))
+
+
+def test_ключ_доступа_не_попадает_в_спан_http():
+    """Захват заголовков HTTP выключен, и это наше решение, а не умолчание.
+
+    В запросе к Keycloak едет `Authorization: Bearer`, в запрос
+    к Centrifugo — `X-API-Key`. Включается захват переменной окружения,
+    то есть ставит его файл развёртывания, а он на `tracing.py` не
+    смотрит, — поэтому здесь проверка, а не комментарий.
+
+    Поднимается настоящее соединение с петлёй, а не `MockTransport`:
+    инструментация оборачивает транспорт, и подменённый транспорт
+    остаётся без спана — то есть проверка на нём прошла бы, ничего
+    не проверив.
+    """
+    exporter = InMemorySpanExporter()
+    with с_провайдером(exporter):
+        asyncio.run(_сходить_в_петлю(ТОКЕН))
+
+    спаны = записанные(exporter)
+    assert [span.name for span in спаны] == ["GET"]
+
+    спан = спаны[0]
+    assert спан.kind is otel.SpanKind.CLIENT
+    assert спан.attributes["http.url"].startswith("http://127.0.0.1:")
+    # Ни одним атрибутом: ни заголовком, ни значением в строке запроса.
+    assert ТОКЕН not in str(dict(спан.attributes))
+
+
+async def _сходить_в_петлю(токен: str) -> None:
+    """Запрос к серверу на петле, который отвечает и закрывается.
+
+    Свой сервер, а не заглушка транспорта: спан создаётся на настоящем
+    транспорте, и без настоящего соединения проверять нечего.
+    """
+    import httpx
+
+    async def _обработчик(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        while await reader.readline() not in (b"\r\n", b"\n", b""):
+            pass
+        writer.write(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
+        )
+        await writer.drain()
+        writer.close()
+
+    сервер = await asyncio.start_server(_обработчик, "127.0.0.1", 0)
+    порт = сервер.sockets[0].getsockname()[1]
+    try:
+        async with httpx.AsyncClient() as клиент:
+            await клиент.get(
+                f"http://127.0.0.1:{порт}/realms/messenger/protocol/openid-connect/token",
+                headers={"Authorization": f"Bearer {токен}"},
+            )
+    finally:
+        сервер.close()
+        await сервер.wait_closed()
+
+
+def test_инструментация_живёт_ровно_столько_же_сколько_провайдер():
+    """Снятие обязательно, и вот почему это проверяется.
+
+    Инструментация держит трейсер, взятый у провайдера в момент
+    установки. Оставленная висеть после снятия провайдера, она писала бы
+    спаны в выключенный — то есть соседний тест не увидел бы ни одного
+    спана драйвера и не понял бы, почему.
+    """
+    import asyncpg
+    import redis.asyncio as aioredis
+
+    было_у_драйвера = asyncpg.Connection.fetchrow
+    было_у_кеша = aioredis.Redis.execute_command
+
+    with с_провайдером(InMemorySpanExporter()):
+        assert asyncpg.Connection.fetchrow is not было_у_драйвера
+        assert aioredis.Redis.execute_command is not было_у_кеша
+
+    assert asyncpg.Connection.fetchrow is было_у_драйвера
+    assert aioredis.Redis.execute_command is было_у_кеша
