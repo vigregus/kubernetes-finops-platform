@@ -1,0 +1,150 @@
+"""Атомарный приём сообщения и двух событий outbox."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import asyncpg
+
+from messenger.domain.errors import Reason
+from messenger.domain.ids import (
+    AttachmentId,
+    ClientMessageId,
+    ConversationId,
+    MessageId,
+    UserId,
+    new_event_id,
+    new_message_id,
+)
+from messenger.domain.message import (
+    Message,
+    MessageKind,
+    MessagePayload,
+    validate_message_payload,
+)
+from messenger.repositories import conversations, messages, outbox
+
+
+@dataclass(frozen=True, slots=True)
+class SendMessageResult:
+    message: Message | None = None
+    created: bool = False
+    rejection: Reason | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.message is not None and self.rejection is None
+
+
+async def send_message(
+    conn: asyncpg.Connection,
+    *,
+    sender_id: UserId,
+    conversation_id: ConversationId,
+    client_message_id: ClientMessageId,
+    kind: MessageKind,
+    payload: MessagePayload,
+    attachment_ids: tuple[AttachmentId, ...] = (),
+    reply_to_message_id: MessageId | None = None,
+    trace_id: str | None = None,
+) -> SendMessageResult:
+    """Принимает сообщение идемпотентно по клиентскому идентификатору.
+
+    Kafka здесь не вызывается: сообщение и обе записи outbox либо фиксируются
+    одним коммитом, либо целиком откатываются. Сетевой вызов выполняет relay
+    уже после освобождения транзакции и блокировки строки беседы.
+    """
+    if kind is MessageKind.SYSTEM:
+        return SendMessageResult(rejection=Reason.UNSUPPORTED_MEDIA_TYPE)
+
+    # Негодный запрос не должен ждать занятую строку беседы.
+    validate_message_payload(kind, payload)
+
+    async with conn.transaction():
+        last_seq = await messages.lock_active_conversation(
+            conn,
+            conversation_id=conversation_id,
+            sender_id=sender_id,
+        )
+        if last_seq is None:
+            return SendMessageResult(rejection=Reason.NOT_A_MEMBER)
+
+        existing = await messages.fetch_by_client_id(
+            conn,
+            conversation_id=conversation_id,
+            sender_id=sender_id,
+            client_message_id=client_message_id,
+        )
+        if existing is not None:
+            return SendMessageResult(message=existing, created=False)
+
+        sequence = await messages.allocate_sequence(
+            conn, conversation_id=conversation_id
+        )
+        message = await messages.insert_message(
+            conn,
+            message_id=new_message_id(),
+            conversation_id=conversation_id,
+            conversation_seq=sequence,
+            sender_id=sender_id,
+            client_message_id=client_message_id,
+            kind=kind,
+            payload=payload,
+            reply_to_message_id=reply_to_message_id,
+        )
+
+        members = await conversations.list_active_members(
+            conn, conversation_id=conversation_id
+        )
+        recipients = [
+            str(member.user_id) for member in members if member.user_id != sender_id
+        ]
+        common = {
+            "event_version": 1,
+            "occurred_at": message.created_at.isoformat(),
+            "message_id": str(message.message_id),
+            "conversation_id": str(message.conversation_id),
+            "type": message.kind.value,
+        }
+        fact_event_id = new_event_id()
+        content_event_id = new_event_id()
+        await outbox.insert_event(
+            conn,
+            aggregate_id=message.message_id,
+            event_id=fact_event_id,
+            event_type="message.created",
+            partition_key=str(conversation_id),
+            payload={
+                **common,
+                "event_id": str(fact_event_id),
+                "event_type": "message.created",
+                "conversation_seq": message.conversation_seq,
+                "sender_id": str(sender_id),
+                "recipient_ids": recipients,
+                "has_attachments": bool(attachment_ids),
+                "content_ref": str(message.message_id),
+                **({"trace_id": trace_id} if trace_id else {}),
+            },
+        )
+        await outbox.insert_event(
+            conn,
+            aggregate_id=message.message_id,
+            event_id=content_event_id,
+            event_type="message.content",
+            partition_key=str(conversation_id),
+            payload={
+                **common,
+                "event_id": str(content_event_id),
+                "event_type": "message.content",
+                "payload": {
+                    key: value
+                    for key, value in {
+                        "text": message.payload.text,
+                        "duration_ms": message.payload.duration_ms,
+                        "attachment_count": len(attachment_ids),
+                    }.items()
+                    if value is not None
+                },
+                **({"trace_id": trace_id} if trace_id else {}),
+            },
+        )
+        return SendMessageResult(message=message, created=True)

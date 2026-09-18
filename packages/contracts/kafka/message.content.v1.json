@@ -59,6 +59,11 @@
         "attachment_count": {
           "type": "integer",
           "minimum": 0
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Длительность голосового сообщения."
         }
       }
     },
