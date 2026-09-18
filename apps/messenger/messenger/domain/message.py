@@ -43,6 +43,17 @@ class MessagePayload:
             raise ValueError("длительность должна быть положительной")
 
 
+def validate_message_payload(kind: MessageKind, payload: MessagePayload) -> None:
+    """Проверяет сочетание вида и payload до обращения к хранилищу."""
+
+    if kind is MessageKind.TEXT and not (payload.text or "").strip():
+        raise ValueError("текстовое сообщение требует непустой текст")
+    if kind is MessageKind.VOICE and payload.duration_ms is None:
+        raise ValueError("голосовое сообщение требует длительность")
+    if kind is not MessageKind.VOICE and payload.duration_ms is not None:
+        raise ValueError("длительность разрешена только для голосового сообщения")
+
+
 @dataclass(frozen=True, slots=True)
 class Message:
     message_id: MessageId
@@ -68,13 +79,7 @@ class Message:
             raise ValueError("удалённое сообщение не должно хранить содержимое")
         if self.deleted_at is not None:
             return
-
-        if self.kind is MessageKind.TEXT and not (self.payload.text or "").strip():
-            raise ValueError("текстовое сообщение требует непустой текст")
-        if self.kind is MessageKind.VOICE and self.payload.duration_ms is None:
-            raise ValueError("голосовое сообщение требует длительность")
-        if self.kind is not MessageKind.VOICE and self.payload.duration_ms is not None:
-            raise ValueError("длительность разрешена только для голосового сообщения")
+        validate_message_payload(self.kind, self.payload)
 
     @property
     def is_deleted(self) -> bool:
