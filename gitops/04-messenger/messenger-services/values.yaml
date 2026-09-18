@@ -130,7 +130,7 @@ services:
     http:
       port: 8080
     image:
-      digest: sha256:16f48bec7bedb01ef9d7cbd75a97e782b0e82e914a4380a1cfb31ba22becaeab
+      digest: sha256:1e6162ea2c59dd3125de646925e4df70e76967cdbe1a73d5b6dee7987f068897
     resources:
       requests: {cpu: 50m, memory: 128Mi}
       limits: {cpu: "1", memory: 512Mi}
@@ -168,7 +168,7 @@ services:
     preStopSeconds: 0
     terminationGracePeriodSeconds: 60
     image:
-      digest: sha256:16f48bec7bedb01ef9d7cbd75a97e782b0e82e914a4380a1cfb31ba22becaeab
+      digest: sha256:1e6162ea2c59dd3125de646925e4df70e76967cdbe1a73d5b6dee7987f068897
     resources:
       requests: {cpu: 50m, memory: 128Mi}
       limits: {cpu: "1", memory: 512Mi}
@@ -189,7 +189,7 @@ services:
     # и зафиксировать смещение, иначе после перезапуска будет повтор.
     terminationGracePeriodSeconds: 60
     image:
-      digest: sha256:16f48bec7bedb01ef9d7cbd75a97e782b0e82e914a4380a1cfb31ba22becaeab
+      digest: sha256:1e6162ea2c59dd3125de646925e4df70e76967cdbe1a73d5b6dee7987f068897
     resources:
       requests: {cpu: 50m, memory: 128Mi}
       limits: {cpu: "1", memory: 512Mi}
