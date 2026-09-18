@@ -32,7 +32,7 @@ MESSENGER_APPS  := messenger-secrets messenger-postgres messenger-redis \
 PYTHON ?= python3.12
 PYTHON_VERSION = (3, 12)
 
-.PHONY: help bootstrap local-up local-test local-down contracts kafka-security layers sql venv lint unit migrate smoke integration status
+.PHONY: help bootstrap local-up local-test local-down contracts kafka-security layers sql venv lint unit migrate smoke integration send-message status
 
 help:
 	@grep -E '^[a-z-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -164,6 +164,10 @@ migrate: ## Применить миграции к локальной базе
 smoke: ## Связность: каждое хранилище отвечает на настоящую операцию
 	@echo "· связность"
 	@scripts/smoke-messenger.sh
+
+send-message: ## Отправить сообщение через живой API и проследить путь до Kafka
+	@echo "· отправка сообщения"
+	@INTEGRATION_ONLY=send_message_check.py scripts/integration-messenger.sh
 
 integration: ## Код против настоящей базы, тем же образом и тем же путём
 	@echo "· интеграция"
