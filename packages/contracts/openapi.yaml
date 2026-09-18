@@ -82,13 +82,20 @@ paths:
       operationId: resendVerificationEmail
       responses:
         '202': { description: Письмо отправлено }
-        '409': { description: Адрес уже подтверждён }
+        '409':
+          description: Адрес уже подтверждён
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
         '429':
           description: Слишком часто
           headers:
             Retry-After:
               schema: { type: integer }
               description: Секунды до следующей попытки.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
         '401': { $ref: '#/components/responses/Unauthorized' }
 
   /me:

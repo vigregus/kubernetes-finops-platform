@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import os
 import signal
 import uuid
@@ -26,7 +27,11 @@ from messenger.services import outbox_relay, runtime
 from messenger.telemetry import metrics
 from messenger.telemetry.logging import configure
 
-log = configure()
+# Настройка - один раз на процесс; журнал - свой у модуля.
+# Корневой журнал в поле `logger` назвался бы `root`, и по нему
+# нельзя понять, чей это модуль.
+configure()
+log = logging.getLogger(__name__)
 
 # Как часто снимать показатели очереди. Реже, чем идёт цикл: возраст
 # самой старой записи не меняется скачками, а запрос к базе на каждый

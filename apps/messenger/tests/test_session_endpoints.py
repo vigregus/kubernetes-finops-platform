@@ -45,12 +45,12 @@ def runtime():
     app.state.runtime = original
 
 
-def test_список_требует_bearer_и_не_ходит_ниже(client, monkeypatch):
+def test_список_требует_bearer_и_не_ходит_ниже(client, monkeypatch, отказ):
     async def _не_вызывать(*args, **kwargs):
         raise AssertionError("сервис вызван без удостоверения")
 
     monkeypatch.setattr(session_service, "list_for_token", _не_вызывать)
-    assert client.get("/sessions").status_code == 401
+    отказ(client.get("/sessions"), status=401, code="unauthenticated")
 
 
 def test_список_показывает_текущую_сессию(client, monkeypatch):
@@ -106,21 +106,21 @@ def test_закрытие_другого_устройства_не_снимае�
     assert "set-cookie" not in r.headers
 
 
-def test_выход_с_одного_устройства_требует_bearer(client, monkeypatch):
+def test_выход_с_одного_устройства_требует_bearer(client, monkeypatch, отказ):
     async def _не_вызывать(*args, **kwargs):
         raise AssertionError("сервис вызван без удостоверения")
 
     monkeypatch.setattr(session_service, "revoke_for_token", _не_вызывать)
-    assert client.delete(f"/sessions/{SID}").status_code == 401
+    отказ(client.delete(f"/sessions/{SID}"), status=401, code="unauthenticated")
 
 
-def test_недоступные_ключи_это_503(client, monkeypatch):
+def test_недоступные_ключи_это_503(client, monkeypatch, отказ):
     async def _list(*args, **kwargs):
         return session_service.SessionListResult(rejection=TokenRejection.KEYS_UNAVAILABLE)
 
     monkeypatch.setattr(session_service, "list_for_token", _list)
     r = client.get("/sessions", headers={"Authorization": "Bearer access-token"})
-    assert r.status_code == 503
+    отказ(r, status=503, code="upstream_unavailable")
 
 
 def test_не_uuid_не_доходит_до_сервиса(client, monkeypatch):
@@ -134,12 +134,12 @@ def test_не_uuid_не_доходит_до_сервиса(client, monkeypatch):
     assert r.status_code == 422
 
 
-def test_выход_везде_требует_bearer(client, monkeypatch):
+def test_выход_везде_требует_bearer(client, monkeypatch, отказ):
     async def _не_вызывать(*args, **kwargs):
         raise AssertionError("сервис вызван без удостоверения")
 
     monkeypatch.setattr(session_service, "revoke_all_for_token", _не_вызывать)
-    assert client.delete("/sessions").status_code == 401
+    отказ(client.delete("/sessions"), status=401, code="unauthenticated")
 
 
 def test_выход_везде_снимает_cookie_и_отдаёт_204(client, monkeypatch):
@@ -154,21 +154,21 @@ def test_выход_везде_снимает_cookie_и_отдаёт_204(client,
     assert f"Path={main.REFRESH_COOKIE_PATH}" in r.headers["set-cookie"]
 
 
-def test_выход_везде_при_недоступных_ключах_503(client, monkeypatch):
+def test_выход_везде_при_недоступных_ключах_503(client, monkeypatch, отказ):
     async def _revoke_all(*args, **kwargs):
         return session_service.RevokeAllResult(rejection=TokenRejection.KEYS_UNAVAILABLE)
 
     monkeypatch.setattr(session_service, "revoke_all_for_token", _revoke_all)
     r = client.delete("/sessions", headers={"Authorization": "Bearer access-token"})
-    assert r.status_code == 503
+    отказ(r, status=503, code="upstream_unavailable")
 
 
-def test_realtime_токен_требует_bearer(client, monkeypatch):
+def test_realtime_токен_требует_bearer(client, monkeypatch, отказ):
     async def _не_вызывать(*args, **kwargs):
         raise AssertionError("сервис вызван без удостоверения")
 
     monkeypatch.setattr(realtime_service, "issue_token_for_user", _не_вызывать)
-    assert client.post("/realtime/token").status_code == 401
+    отказ(client.post("/realtime/token"), status=401, code="unauthenticated")
 
 
 def test_realtime_токен_возвращает_token_и_срок(client, monkeypatch):
@@ -193,7 +193,7 @@ def test_realtime_токен_возвращает_token_и_срок(client, monk
     assert "client_id" not in body
 
 
-def test_realtime_токен_при_недоступных_ключах_503(client, monkeypatch):
+def test_realtime_токен_при_недоступных_ключах_503(client, monkeypatch, отказ):
     async def _issue(*args, **kwargs):
         return realtime_service.RealtimeTokenResult(
             rejection=TokenRejection.KEYS_UNAVAILABLE
@@ -203,15 +203,19 @@ def test_realtime_токен_при_недоступных_ключах_503(clie
     r = client.post(
         "/realtime/token", headers={"Authorization": "Bearer access-token"}
     )
-    assert r.status_code == 503
+    отказ(r, status=503, code="upstream_unavailable")
 
 
-def test_привязка_соединения_требует_bearer(client, monkeypatch):
+def test_привязка_соединения_требует_bearer(client, monkeypatch, отказ):
     async def _не_вызывать(*args, **kwargs):
         raise AssertionError("сервис вызван без удостоверения")
 
     monkeypatch.setattr(realtime_service, "register_connection", _не_вызывать)
-    assert client.post("/realtime/connections", json={"client_id": "c1"}).status_code == 401
+    отказ(
+        client.post("/realtime/connections", json={"client_id": "c1"}),
+        status=401,
+        code="unauthenticated",
+    )
 
 
 def test_привязка_соединения_передаёт_client_id_и_отдаёт_204(client, monkeypatch):
@@ -242,7 +246,7 @@ def test_привязка_соединения_с_пустым_client_id_это_
     assert r.status_code == 422
 
 
-def test_привязка_соединения_при_недоступных_ключах_503(client, monkeypatch):
+def test_привязка_соединения_при_недоступных_ключах_503(client, monkeypatch, отказ):
     async def _register(*args, **kwargs):
         return realtime_service.RegisterConnectionResult(
             rejection=TokenRejection.KEYS_UNAVAILABLE
@@ -254,7 +258,7 @@ def test_привязка_соединения_при_недоступных_к�
         json={"client_id": "c1"},
         headers={"Authorization": "Bearer access-token"},
     )
-    assert r.status_code == 503
+    отказ(r, status=503, code="upstream_unavailable")
 
 
 def test_connect_proxy_возвращает_user_каналы_и_meta(client, monkeypatch):

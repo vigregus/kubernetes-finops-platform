@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import os
 import signal
 
@@ -23,7 +24,11 @@ from messenger.services import realtime_delivery
 from messenger.telemetry import metrics, trace
 from messenger.telemetry.logging import configure
 
-log = configure()
+# Настройка - один раз на процесс; журнал - свой у модуля.
+# Корневой журнал в поле `logger` назвался бы `root`, и по нему
+# нельзя понять, чей это модуль.
+configure()
+log = logging.getLogger(__name__)
 
 GROUP = "messenger-realtime"
 

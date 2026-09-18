@@ -122,15 +122,17 @@ def test_повтор_возвращает_200(client, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("reason", "status"),
+    ("reason", "status", "code"),
     [
-        (Reason.BLOCKED, 403),
-        (Reason.EMAIL_UNVERIFIED, 403),
-        (Reason.SELF_CONVERSATION, 403),
-        (Reason.USER_NOT_FOUND, 404),
+        (Reason.BLOCKED, 403, "forbidden"),
+        (Reason.EMAIL_UNVERIFIED, 403, "forbidden"),
+        (Reason.SELF_CONVERSATION, 403, "forbidden"),
+        (Reason.USER_NOT_FOUND, 404, "resource_not_found"),
     ],
 )
-def test_ожидаемые_отказы_переводятся_в_контракт(client, monkeypatch, reason, status):
+def test_ожидаемые_отказы_переводятся_в_контракт(
+    client, monkeypatch, reason, status, code, отказ
+):
     authenticated(monkeypatch)
 
     async def _create(*args, **kwargs):
@@ -142,19 +144,19 @@ def test_ожидаемые_отказы_переводятся_в_контра�
         json={"participant_id": str(OTHER_ID)},
         headers={"Authorization": "Bearer token"},
     )
-    assert response.status_code == status
+    отказ(response, status=status, code=code)
 
 
-def test_без_токена_сервис_не_вызывается(client, monkeypatch):
+def test_без_токена_сервис_не_вызывается(client, monkeypatch, отказ):
     async def _не_вызывать(*args, **kwargs):
         raise AssertionError("создание началось без удостоверения")
 
     monkeypatch.setattr(service, "create_direct", _не_вызывать)
     response = client.post("/conversations", json={"participant_id": str(OTHER_ID)})
-    assert response.status_code == 401
+    отказ(response, status=401, code="unauthenticated")
 
 
-def test_недоступные_ключи_дают_503(client, monkeypatch):
+def test_недоступные_ключи_дают_503(client, monkeypatch, отказ):
     async def _current(*args, **kwargs):
         return identity.AuthResult(rejection=TokenRejection.KEYS_UNAVAILABLE)
 
@@ -164,7 +166,7 @@ def test_недоступные_ключи_дают_503(client, monkeypatch):
         json={"participant_id": str(OTHER_ID)},
         headers={"Authorization": "Bearer token"},
     )
-    assert response.status_code == 503
+    отказ(response, status=503, code="upstream_unavailable")
 
 
 def test_не_uuid_отклоняется_до_сервиса(client, monkeypatch):

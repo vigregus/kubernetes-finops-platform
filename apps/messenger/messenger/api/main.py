@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import hmac
+import logging
 import os
 import time
 import uuid
@@ -18,11 +19,12 @@ from typing import Literal
 from urllib.parse import parse_qs
 
 from fastapi import FastAPI, Response
+from fastapi.responses import JSONResponse
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
 from pydantic import BaseModel, Field
 from starlette.requests import Request
 
-from messenger.domain.errors import Reason, to_problem
+from messenger.domain.errors import Problem, Reason, to_problem
 from messenger.domain.identity import TokenRejection
 from messenger.domain.ids import (
     AttachmentId,
@@ -51,7 +53,11 @@ from messenger.telemetry import logging as logging_envelope
 from messenger.telemetry import metrics, trace
 from messenger.telemetry.logging import configure
 
-log = configure()
+# Настройка - один раз на процесс; журнал - свой у модуля.
+# Корневой журнал в поле `logger` назвался бы `root`, и по нему
+# нельзя понять, чей это модуль.
+configure()
+log = logging.getLogger(__name__)
 
 # Имя берётся из телеметрии, а не из `os.getenv` заново. Два чтения одной
 # переменной с разными значениями по умолчанию дают метрики с `service="api"`
@@ -91,8 +97,83 @@ app.state.runtime = runtime_service.Runtime(
 )
 
 
-@app.post("/internal/oidc/backchannel-logout")
-async def oidc_backchannel_logout(request: Request, response: Response) -> dict[str, object]:
+# --- ответ об ошибке --------------------------------------------------------
+
+# RFC 9457. Тип содержимого отдельный: посредник, шлюз или клиентская
+# библиотека по нему отличает описание отказа от полезного ответа, не
+# разбирая тело и не угадывая по коду состояния.
+PROBLEM_MEDIA_TYPE = "application/problem+json"
+
+# Пространство имён кодов. URI по спецификации — опознаватель вида отказа,
+# а не обязательно страница: разыменование его не требуется. Собственное
+# пространство выбрано вместо `about:blank`, потому что `about:blank`
+# означает «вид не уточняется», и тогда единственным различителем видов
+# остаётся код состояния — а `403` у нас выдают три разные причины.
+PROBLEM_TYPE_BASE = "https://app.finops.local/errors"
+
+
+def _problem_body(problem: Problem) -> dict[str, object]:
+    """Тело отказа по RFC 9457. Единственное место, где оно собирается.
+
+    `code` остаётся рядом с `type`, хотя спецификация его не требует:
+    по нему клиент различает виды отказа, и убрать его значило бы
+    заставить разбирать хвост URI. Схема `Problem` дополнительные
+    свойства допускает, так что это не расхождение с контрактом.
+
+    `trace_id` кладётся в тело, а не только в заголовок `X-Trace-Id`:
+    в поддержку приходят со скриншотом ответа, а не с заголовками, и
+    журнал по нему ищется тем же запросом, что и по заголовку.
+    """
+    body: dict[str, object] = {
+        "type": f"{PROBLEM_TYPE_BASE}/{problem.code}",
+        "title": problem.title,
+        "status": problem.status,
+        "code": problem.code,
+    }
+    trace_id = trace.current_trace_id()
+    if trace_id is not None:
+        body["trace_id"] = trace_id
+    return body
+
+
+def _problem_response(problem: Problem, response: Response) -> Response:
+    """Готовый ответ об отказе. Единственный способ его вернуть.
+
+    Заголовки, выставленные обработчиком на внедрённом `response`,
+    переносятся сюда вручную: FastAPI сливает их с ответом только тогда,
+    когда обработчик вернул не `Response`. Без переноса пропали бы
+    `Retry-After` у `429` и снятие cookie у неудачного обновления —
+    то есть ровно то, без чего клиент повторяет вслепую.
+
+    Обработчики, возвращающие этот ответ, объявляют `response_model`
+    в декораторе явно. Вывести её из аннотации FastAPI больше не может —
+    там объединение с `Response`, — а `response_model=None` отключил бы
+    сериализацию и успешного тела тоже, и `datetime` уехал бы клиенту
+    в другом написании, чем описано в контракте.
+    """
+    problem_response = JSONResponse(
+        _problem_body(problem),
+        status_code=problem.status,
+        media_type=PROBLEM_MEDIA_TYPE,
+    )
+    problem_response.raw_headers.extend(response.raw_headers)
+    return problem_response
+
+
+# Отказы, которых нет в доменной таксономии: они случаются на границе HTTP,
+# до всякой доменной операции, и заводить ради них доменную причину значило бы
+# описывать в домене то, чего он не видит.
+FORBIDDEN_ORIGIN = Problem(403, "forbidden", "Действие недоступно")
+# Все три отказа logout-токена выглядят одинаково намеренно: чем именно плох
+# токен, отправителю знать незачем — он либо свой и исправен, либо подбирает.
+INVALID_LOGOUT_TOKEN = Problem(400, "invalid_logout_token", "Негодный logout-токен")
+ALREADY_VERIFIED = Problem(409, "already_verified", "Адрес уже подтверждён")
+
+
+@app.post("/internal/oidc/backchannel-logout", response_model=dict[str, object])
+async def oidc_backchannel_logout(
+    request: Request, response: Response
+) -> dict[str, object] | Response:
     """Принимает подписанный logout-token от Keycloak.
 
     Точка внутренняя, но доверие строится не на сети: подпись, издатель,
@@ -101,12 +182,10 @@ async def oidc_backchannel_logout(request: Request, response: Response) -> dict[
     try:
         form = parse_qs((await request.body()).decode("utf-8", errors="strict"))
     except UnicodeDecodeError:
-        response.status_code = 400
-        return {"code": "invalid_logout_token"}
+        return _problem_response(INVALID_LOGOUT_TOKEN, response)
     token = form.get("logout_token", [None])[0]
     if not token:
-        response.status_code = 400
-        return {"code": "invalid_logout_token"}
+        return _problem_response(INVALID_LOGOUT_TOKEN, response)
     runtime = request.app.state.runtime
     async with runtime.connection() as conn:
         result = await backchannel_service.handle_logout(
@@ -118,8 +197,7 @@ async def oidc_backchannel_logout(request: Request, response: Response) -> dict[
             realtime=runtime.centrifugo,
         )
     if not result.accepted:
-        response.status_code = 400
-        return {"code": "invalid_logout_token"}
+        return _problem_response(INVALID_LOGOUT_TOKEN, response)
     return {"accepted": True, "revoked": result.revoked}
 
 # --- вход -------------------------------------------------------------------
@@ -200,14 +278,26 @@ def _respond(result: login_service.LoginResult, response: Response) -> dict[str,
     }
 
 
-@app.post("/auth/callback")
+def _login_failure(upstream_failed: bool) -> Problem:
+    """Отказ входа. Недоступный Keycloak — не «неверное удостоверение».
+
+    Различие видно только по коду состояния: `503` означает «повтори
+    позже», `401` — «войди заново». Слить их в один ответ значило бы
+    отправлять человека на повторный вход в момент, когда вход всё
+    равно не работает.
+    """
+    if upstream_failed:
+        return to_problem(Reason.UPSTREAM_UNAVAILABLE)
+    return to_problem(Reason.UNAUTHENTICATED)
+
+
+@app.post("/auth/callback", response_model=dict[str, object])
 async def auth_callback(
     body: AuthorizationCode, request: Request, response: Response
-) -> dict[str, object]:
+) -> dict[str, object] | Response:
     """Обмен кода на токены. Делает сервер, а не браузер."""
     if not _origin_allowed(request):
-        response.status_code = 403
-        return {"code": "forbidden", "title": "Действие недоступно"}
+        return _problem_response(FORBIDDEN_ORIGIN, response)
 
     runtime = request.app.state.runtime
     async with runtime.connection() as conn:
@@ -223,8 +313,7 @@ async def auth_callback(
         )
 
     if not result.ok:
-        response.status_code = 503 if result.upstream_failed else 401
-        return {"code": "unauthenticated", "title": "Требуется вход"}
+        return _problem_response(_login_failure(result.upstream_failed), response)
     if result.user_created and result.user is not None and not result.user.email_verified:
         # При verifyEmail=false Keycloak выдаёт токен неподтверждённому
         # пользователю, чтобы приложение могло дать ограниченный доступ.
@@ -236,17 +325,15 @@ async def auth_callback(
     return _respond(result, response)
 
 
-@app.post("/auth/refresh")
-async def auth_refresh(request: Request, response: Response) -> dict[str, object]:
+@app.post("/auth/refresh", response_model=dict[str, object])
+async def auth_refresh(request: Request, response: Response) -> dict[str, object] | Response:
     """Новый токен доступа по cookie. Вызывается при каждой загрузке вкладки."""
     if not _origin_allowed(request):
-        response.status_code = 403
-        return {"code": "forbidden", "title": "Действие недоступно"}
+        return _problem_response(FORBIDDEN_ORIGIN, response)
 
     token = request.cookies.get(REFRESH_COOKIE)
     if not token:
-        response.status_code = 401
-        return {"code": "unauthenticated", "title": "Требуется вход"}
+        return _problem_response(to_problem(Reason.UNAUTHENTICATED), response)
 
     runtime = request.app.state.runtime
     async with runtime.connection() as conn:
@@ -263,8 +350,7 @@ async def auth_refresh(request: Request, response: Response) -> dict[str, object
         # Cookie снимается: она больше не работает, и оставлять её значит
         # обрекать вкладку на повторные отказы при каждой перезагрузке.
         response.delete_cookie(REFRESH_COOKIE, path=REFRESH_COOKIE_PATH)
-        response.status_code = 503 if result.upstream_failed else 401
-        return {"code": "unauthenticated", "title": "Требуется вход"}
+        return _problem_response(_login_failure(result.upstream_failed), response)
     return _respond(result, response)
 
 
@@ -278,17 +364,15 @@ def _bearer_token(request: Request) -> str | None:
     return token
 
 
-def _auth_failure(rejection: TokenRejection | None, response: Response) -> dict[str, str]:
+def _auth_failure(rejection: TokenRejection | None, response: Response) -> Response:
     """Одинаковый ответ для всех отказов токена; недоступные ключи — 503."""
     if rejection is TokenRejection.KEYS_UNAVAILABLE:
-        response.status_code = 503
-        return {"code": "upstream_unavailable", "title": "Временно недоступно"}
-    response.status_code = 401
-    return {"code": "unauthenticated", "title": "Требуется вход"}
+        return _problem_response(to_problem(Reason.UPSTREAM_UNAVAILABLE), response)
+    return _problem_response(to_problem(Reason.UNAUTHENTICATED), response)
 
 
-@app.get("/sessions")
-async def list_sessions(request: Request, response: Response) -> dict[str, object]:
+@app.get("/sessions", response_model=dict[str, object])
+async def list_sessions(request: Request, response: Response) -> dict[str, object] | Response:
     """Активные входы пользователя; текущий помечен явно."""
     token = _bearer_token(request)
     if token is None:
@@ -326,7 +410,7 @@ async def list_sessions(request: Request, response: Response) -> dict[str, objec
 )
 async def revoke_session(
     session_id: uuid.UUID, request: Request, response: Response
-) -> Response | dict[str, str]:
+) -> Response:
     """Закрывает один вход; чужой или уже закрытый не раскрывается."""
     token = _bearer_token(request)
     if token is None:
@@ -356,7 +440,7 @@ async def revoke_session(
 
 
 @app.delete("/sessions", status_code=204, response_model=None)
-async def revoke_all_sessions(request: Request, response: Response) -> Response | dict[str, str]:
+async def revoke_all_sessions(request: Request, response: Response) -> Response:
     """Выход на всех устройствах: отзывает каждый действующий вход.
 
     Текущая сессия тоже отзывается, поэтому cookie снимается всегда, а не
@@ -423,8 +507,10 @@ def _centrifugo_proxy_authorized(request: Request) -> bool:
     )
 
 
-@app.post("/realtime/token")
-async def issue_realtime_token(request: Request, response: Response) -> dict[str, object]:
+@app.post("/realtime/token", response_model=dict[str, object])
+async def issue_realtime_token(
+    request: Request, response: Response
+) -> dict[str, object] | Response:
     """Короткий ticket для подключения через connect-proxy.
 
     Тот же путь, что у клиента: проверенный bearer обменивается на токен
@@ -512,7 +598,7 @@ async def centrifugo_refresh_proxy(
 @app.post("/realtime/connections", status_code=204, response_model=None)
 async def register_realtime_connection(
     body: RealtimeConnection, request: Request, response: Response
-) -> Response | dict[str, str]:
+) -> Response:
     """Устаревший совместимый путь для клиентов предыдущей сборки.
 
     Новые клиенты не регистрируются после подключения: это делается
@@ -686,8 +772,6 @@ async def metrics() -> Response:
 
 # --- разбор удостоверения ----------------------------------------------------
 
-UNAUTHENTICATED = {"code": "unauthenticated", "title": "Требуется вход"}
-
 
 def _bearer(request: Request) -> str | None:
     """Токен из заголовка. Регистр схемы не фиксирован спецификацией."""
@@ -718,8 +802,8 @@ async def _current(request: Request, conn) -> identity_service.AuthResult:
     )
 
 
-@app.get("/me")
-async def me(request: Request, response: Response) -> dict[str, object]:
+@app.get("/me", response_model=dict[str, object])
+async def me(request: Request, response: Response) -> dict[str, object] | Response:
     """Кто я и что мне сейчас доступно.
 
     Возможности отдаются списком, а не выводятся клиентом из
@@ -732,8 +816,7 @@ async def me(request: Request, response: Response) -> dict[str, object]:
         auth = await _current(request, conn)
 
     if not auth.ok or auth.user is None:
-        response.status_code = 401
-        return dict(UNAUTHENTICATED)
+        return _problem_response(to_problem(Reason.UNAUTHENTICATED), response)
 
     user = auth.user
     return {
@@ -745,10 +828,10 @@ async def me(request: Request, response: Response) -> dict[str, object]:
     }
 
 
-@app.post("/conversations")
+@app.post("/conversations", response_model=dict[str, object])
 async def create_direct_conversation(
     body: CreateDirectConversation, request: Request, response: Response
-) -> dict[str, object]:
+) -> dict[str, object] | Response:
     """Создаёт диалог от имени субъекта bearer-токена."""
     runtime = request.app.state.runtime
     async with runtime.connection() as conn:
@@ -762,9 +845,7 @@ async def create_direct_conversation(
         )
 
     if not result.ok or result.conversation is None:
-        problem = to_problem(result.rejection)
-        response.status_code = problem.status
-        return {"code": problem.code, "title": problem.title}
+        return _problem_response(to_problem(result.rejection), response)
 
     response.status_code = 201 if result.created else 200
     conversation = result.conversation
@@ -825,13 +906,22 @@ def _message_body(message) -> dict[str, object]:
     }
 
 
-@app.post("/conversations/{conversation_id}/messages")
+def _invalid_payload(exc: ValueError) -> Problem:
+    """Негодное содержимое: заголовком идёт причина отказа от домена.
+
+    Текст приходит из доменной проверки и данных не содержит — он
+    описывает нарушенное правило, а не то, что прислали.
+    """
+    return Problem(422, "invalid_payload", str(exc))
+
+
+@app.post("/conversations/{conversation_id}/messages", response_model=dict[str, object])
 async def send_message(
     conversation_id: uuid.UUID,
     body: SendMessage,
     request: Request,
     response: Response,
-) -> dict[str, object]:
+) -> dict[str, object] | Response:
     """Принимает сообщение. Идемпотентно по `client_message_id`.
 
     Повтор возвращает то же сообщение с тем же `message_id` и `seq`
@@ -859,11 +949,8 @@ async def send_message(
         # отличить «слишком длинно» от «поле не то», потому что в первом
         # случае повтор бессмыслен без правки текста.
         if "длиннее" in str(exc):
-            problem = to_problem(Reason.PAYLOAD_TOO_LARGE)
-            response.status_code = problem.status
-            return {"code": problem.code, "title": problem.title}
-        response.status_code = 422
-        return {"code": "invalid_payload", "title": str(exc)}
+            return _problem_response(to_problem(Reason.PAYLOAD_TOO_LARGE), response)
+        return _problem_response(_invalid_payload(exc), response)
 
     runtime = request.app.state.runtime
     async with runtime.connection() as conn:
@@ -889,23 +976,22 @@ async def send_message(
             # Негодное сочетание вида и содержимого: голосовое без
             # длительности, текстовое без текста. Домен отвергает это
             # до обращения к базе, и ответ обязан быть 4xx, а не 500.
-            response.status_code = 422
-            return {"code": "invalid_payload", "title": str(exc)}
+            return _problem_response(_invalid_payload(exc), response)
 
     if not result.ok or result.message is None:
         # Отсутствие членства наружу выглядит как отсутствие беседы:
         # `403` подтвердил бы, что она существует, и перебором
         # выяснялось бы, кто с кем переписывается.
-        problem = to_problem(result.rejection or Reason.INTERNAL)
-        response.status_code = problem.status
-        return {"code": problem.code, "title": problem.title}
+        return _problem_response(to_problem(result.rejection or Reason.INTERNAL), response)
 
     response.status_code = 201 if result.created else 200
     return _message_body(result.message)
 
 
-@app.post("/auth/verify-email/resend")
-async def resend_verification(request: Request, response: Response) -> dict[str, object]:
+@app.post("/auth/verify-email/resend", response_model=dict[str, object])
+async def resend_verification(
+    request: Request, response: Response
+) -> dict[str, object] | Response:
     """Отправить письмо о подтверждении ещё раз.
 
     Под лимитом: точка, рассылающая письмо по указанному адресу без
@@ -917,24 +1003,20 @@ async def resend_verification(request: Request, response: Response) -> dict[str,
         auth = await _current(request, conn)
 
     if not auth.ok or auth.user is None:
-        response.status_code = 401
-        return dict(UNAUTHENTICATED)
+        return _problem_response(to_problem(Reason.UNAUTHENTICATED), response)
 
     result = await verification_service.resend_verification(
         user=auth.user, limiter=runtime.limiter, admin=runtime.admin
     )
 
     if result.already_verified:
-        response.status_code = 409
-        return {"code": "already_verified", "title": "Адрес уже подтверждён"}
+        return _problem_response(ALREADY_VERIFIED, response)
     if result.limited:
-        response.status_code = 429
         # Без Retry-After клиент повторяет вслепую и упирается снова.
         response.headers["Retry-After"] = str(result.retry_after_seconds)
-        return {"code": "rate_limited", "title": "Слишком часто"}
+        return _problem_response(to_problem(Reason.RATE_LIMITED), response)
     if result.upstream_failed:
-        response.status_code = 503
-        return {"code": "upstream_unavailable", "title": "Временно недоступно"}
+        return _problem_response(to_problem(Reason.UPSTREAM_UNAVAILABLE), response)
 
     response.status_code = 202
     return {"sent": True}

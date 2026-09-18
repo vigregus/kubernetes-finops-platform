@@ -58,9 +58,26 @@ STREAM_SYNTHETIC = "synthetic"
 
 # Журналы библиотек. Они пишут на INFO то, что интересно им, а не нам:
 # httpx печатает строку на каждый исходящий запрос, aiokafka - на каждое
-# переподключение. В общем потоке это выглядит как события приложения
-# с `event: httpx`, и по ним невозможно ни искать, ни строить оповещения.
+# переподключение. В общем потоке это шум, поэтому они говорят тише.
 NOISY_LIBRARIES = ("httpx", "httpcore", "aiokafka", "kafka", "asyncio", "urllib3")
+
+# Библиотеки, которые заводят собственные обработчики и потому пишут мимо
+# конверта. uvicorn настраивает журналы в `Config.__init__`, то есть до
+# импорта приложения, - значит, снять его обработчики можно здесь, после.
+#
+# Без этого восемь строк на каждый жизненный цикл пода («Started server
+# process», «Application startup complete», «Shutting down») уходят
+# в хранилище обычным текстом, без уровня и без события: измерено
+# в кластере - ровно восемь на каждый перезапуск api.
+ADOPTED_LIBRARIES = ("uvicorn", "uvicorn.error", "uvicorn.access")
+
+# Событие для записи, которую сделала библиотека. Своего имени из каталога
+# у неё нет и быть не может, а подставлять вместо события имя журнала -
+# значит смешать два пространства имён в одном поле: рядом с
+# `login_rejected` окажется `aiokafka.consumer.group_coordinator`, и
+# запрос `event:...` перестанет означать «наше событие». Имя журнала
+# при этом не теряется - оно уходит в поле `logger`.
+EVENT_LIBRARY = "library"
 
 # Поля, которые обязаны быть в каждой записи. Отсутствующие заполняются
 # из окружения при настройке, а не проставляются вызывающим кодом:
@@ -70,7 +87,7 @@ ENVELOPE = (
     "event", "result", "error_code",
     "trace_id", "span_id", "request_id",
     "message_id", "event_id",
-    STREAM_FIELD,
+    STREAM_FIELD, "logger",
 )
 
 # Ключи, значения которых не попадают в журнал ни при каком уровне
@@ -86,6 +103,12 @@ FORBIDDEN_KEYS = frozenset({
 })
 
 REDACTED = "[вычищено]"
+
+# Ключи, которые выбрасываются целиком. `color_message` кладёт uvicorn:
+# это та же строка, но с кодами цвета терминала. В хранилище она лежит
+# как `Started server process [\u001b[36m%d\u001b[0m]` - данные, которых
+# никто не искал, и второй экземпляр текста, который уже есть в `_msg`.
+DROPPED_KEYS = frozenset({"color_message"})
 
 # Значения, которые сами по себе выглядят как секрет, в каком бы поле
 # ни оказались. Ключ может называться как угодно — `ctx`, `extra`, `note`.
@@ -133,7 +156,10 @@ class JsonFormatter(logging.Formatter):
             **self._base,
             # `event` — машинное имя происшествия, а не текст. По нему
             # строятся запросы; свободный текст уходит в `_msg`.
-            "event": getattr(record, "event", record.name),
+            "event": getattr(record, "event", EVENT_LIBRARY),
+            # Кто написал строку. Нужен ровно тогда, когда событие -
+            # `library`: без него непонятно, чья это жалоба.
+            "logger": record.name,
             "_msg": record.getMessage(),
         }
 
@@ -162,7 +188,7 @@ class JsonFormatter(logging.Formatter):
         reserved = set(logging.LogRecord("", 0, "", 0, "", (), None).__dict__)
         reserved |= {"event", "message", "asctime", "taskName"}
         for key, value in record.__dict__.items():
-            if key in reserved or key in out:
+            if key in reserved or key in out or key in DROPPED_KEYS:
                 continue
             out[key] = scrub(value, key)
 
@@ -205,5 +231,20 @@ def configure(
     # отношения не имеет, и на INFO они заглушают собой настоящие события.
     for name in NOISY_LIBRARIES:
         logging.getLogger(name).setLevel(logging.WARNING)
+
+    # А эти пишут в обход корневого: свой обработчик, свой формат, свой
+    # поток вывода. Обработчик снимается, распространение включается -
+    # и строки уходят в том же конверте, что и всё остальное.
+    for name in ADOPTED_LIBRARIES:
+        library = logging.getLogger(name)
+        if not library.handlers:
+            # Журнал без своего обработчика уже молчит намеренно: именно
+            # так uvicorn выполняет `--no-access-log` - снимает обработчик
+            # и выключает распространение. Включив его обратно, мы вернули
+            # бы журнал обращений вторым экземпляром той записи, которую
+            # посредник уже написал сам, и в чужом потоке.
+            continue
+        library.handlers.clear()
+        library.propagate = True
 
     return root

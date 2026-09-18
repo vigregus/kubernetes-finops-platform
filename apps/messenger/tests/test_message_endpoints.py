@@ -99,12 +99,12 @@ def отвечает(monkeypatch, result):
     monkeypatch.setattr(service, "send_message", _send)
 
 
-def test_без_токена_не_принимает(client, monkeypatch):
+def test_без_токена_не_принимает(client, monkeypatch, отказ):
     async def _current(*args, **kwargs):
         return identity.AuthResult()
 
     monkeypatch.setattr(main, "_current", _current)
-    assert client.post(URL, json=ТЕЛО).status_code == 401
+    отказ(client.post(URL, json=ТЕЛО), status=401, code="unauthenticated")
 
 
 def test_принятое_сообщение_возвращает_201_и_форму_контракта(client, monkeypatch):
@@ -132,7 +132,7 @@ def test_повтор_возвращает_200_и_то_же_сообщение(c
     assert r.json()["message_id"] == str(MESSAGE_ID)
 
 
-def test_слишком_длинный_текст_отвергается_до_базы(client, monkeypatch):
+def test_слишком_длинный_текст_отвергается_до_базы(client, monkeypatch, отказ):
     """Повтор такого запроса бессмыслен без правки текста, поэтому код
     отдельный — и проверка идёт до всякого обращения к хранилищу."""
     authenticated(monkeypatch)
@@ -142,14 +142,14 @@ def test_слишком_длинный_текст_отвергается_до_б
 
     monkeypatch.setattr(service, "send_message", _не_должно_вызваться)
     r = client.post(URL, json={**ТЕЛО, "payload": {"text": "я" * 5000}})
-    assert r.status_code == 413
+    отказ(r, status=413, code="payload_too_large")
 
 
-def test_голосовое_без_длительности_не_принимается(client, monkeypatch):
+def test_голосовое_без_длительности_не_принимается(client, monkeypatch, отказ):
     authenticated(monkeypatch)
     отвечает(monkeypatch, service.SendMessageResult(message=_message()))
     r = client.post(URL, json={**ТЕЛО, "type": "voice", "payload": {}})
-    assert r.status_code == 422
+    отказ(r, status=422, code="invalid_payload")
 
 
 def test_системный_вид_не_принимается_снаружи(client, monkeypatch):
@@ -159,11 +159,10 @@ def test_системный_вид_не_принимается_снаружи(cl
     assert r.status_code == 422
 
 
-def test_чужая_беседа_неотличима_от_несуществующей(client, monkeypatch):
+def test_чужая_беседа_неотличима_от_несуществующей(client, monkeypatch, отказ):
     """`403` подтвердил бы, что беседа есть, и перебором выяснялось бы,
     кто с кем переписывается."""
     authenticated(monkeypatch)
     отвечает(monkeypatch, service.SendMessageResult(rejection=Reason.NOT_A_MEMBER))
     r = client.post(URL, json=ТЕЛО)
-    assert r.status_code == 404
-    assert r.json()["code"] == "resource_not_found"
+    отказ(r, status=404, code="resource_not_found")

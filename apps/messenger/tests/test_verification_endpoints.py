@@ -75,7 +75,7 @@ def test_повтор_письма_возвращает_202(client, monkeypatch)
     assert r.status_code == 202 and r.json() == {"sent": True}
 
 
-def test_лимит_возвращает_429_и_retry_after(client, monkeypatch):
+def test_лимит_возвращает_429_и_retry_after(client, monkeypatch, отказ):
     authenticated(monkeypatch)
 
     async def _resend(**kwargs):
@@ -83,35 +83,45 @@ def test_лимит_возвращает_429_и_retry_after(client, monkeypatch)
 
     monkeypatch.setattr(verification, "resend_verification", _resend)
     r = client.post("/auth/verify-email/resend", headers={"Authorization": "Bearer token"})
-    assert r.status_code == 429
+    отказ(r, status=429, code="rate_limited")
+    # Заголовок ставит обработчик, а тело собирает общий помощник: перенос
+    # заголовков в ответ об ошибке — то, без чего клиент повторяет вслепую.
     assert r.headers["Retry-After"] == "73"
 
 
-def test_подтверждённый_адрес_возвращает_409(client, monkeypatch):
+def test_подтверждённый_адрес_возвращает_409(client, monkeypatch, отказ):
     authenticated(monkeypatch, verified=True)
 
     async def _resend(**kwargs):
         return verification.ResendResult(already_verified=True)
 
     monkeypatch.setattr(verification, "resend_verification", _resend)
-    assert client.post(
-        "/auth/verify-email/resend", headers={"Authorization": "Bearer token"}
-    ).status_code == 409
+    отказ(
+        client.post(
+            "/auth/verify-email/resend", headers={"Authorization": "Bearer token"}
+        ),
+        status=409,
+        code="already_verified",
+    )
 
 
-def test_отказ_keycloak_возвращает_503(client, monkeypatch):
+def test_отказ_keycloak_возвращает_503(client, monkeypatch, отказ):
     authenticated(monkeypatch)
 
     async def _resend(**kwargs):
         return verification.ResendResult(upstream_failed=True)
 
     monkeypatch.setattr(verification, "resend_verification", _resend)
-    assert client.post(
-        "/auth/verify-email/resend", headers={"Authorization": "Bearer token"}
-    ).status_code == 503
+    отказ(
+        client.post(
+            "/auth/verify-email/resend", headers={"Authorization": "Bearer token"}
+        ),
+        status=503,
+        code="upstream_unavailable",
+    )
 
 
-def test_без_удостоверения_письмо_не_отправляется(client, monkeypatch):
+def test_без_удостоверения_письмо_не_отправляется(client, monkeypatch, отказ):
     async def _current(*args, **kwargs):
         return identity.AuthResult()
 
@@ -120,4 +130,4 @@ def test_без_удостоверения_письмо_не_отправляе�
 
     monkeypatch.setattr(main, "_current", _current)
     monkeypatch.setattr(verification, "resend_verification", _не_вызывать)
-    assert client.post("/auth/verify-email/resend").status_code == 401
+    отказ(client.post("/auth/verify-email/resend"), status=401, code="unauthenticated")

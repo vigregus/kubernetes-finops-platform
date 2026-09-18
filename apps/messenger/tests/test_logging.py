@@ -147,6 +147,74 @@ def test_идентификатор_обращения_подставляетс�
     assert запись["request_id"] == "запрос-1"
 
 
+def test_запись_библиотеки_не_занимает_пространство_имён_событий(capsys):
+    """У библиотеки нет имени события, и подставлять имя журнала нельзя.
+
+    Иначе рядом с `login_rejected` в том же поле оказывается
+    `aiokafka.consumer.group_coordinator`, и запрос `event:...`
+    перестаёт означать «наше событие». Так и было до этой правки:
+    в кластере нашлись записи потребителя ровно с таким `event`.
+    """
+    configure(service="consumer-realtime", environment="local", version="sha256:abc")
+    logging.getLogger("aiokafka.consumer.group_coordinator").warning("rebalancing")
+    запись = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert запись["event"] == "library"
+    assert запись["logger"] == "aiokafka.consumer.group_coordinator"
+    assert запись["log_stream"] == "application"
+
+
+def test_uvicorn_пишет_в_общем_конверте(capsys):
+    """uvicorn заводит собственный обработчик и пишет обычным текстом.
+
+    Восемь строк на каждый жизненный цикл пода — старт, остановка,
+    «Application startup complete» — уходили в хранилище без уровня
+    и без события. Обработчик снимается, и строки возвращаются
+    в конверт.
+    """
+    configure(service="api", environment="local", version="sha256:abc")
+    uvicorn_log = logging.getLogger("uvicorn.error")
+    assert uvicorn_log.handlers == []
+    assert uvicorn_log.propagate is True
+
+    uvicorn_log.info("Application startup complete.")
+    запись = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert запись["event"] == "library"
+    assert запись["logger"] == "uvicorn.error"
+    assert запись["level"] == "INFO"
+    assert запись["service"] == "api"
+
+
+def test_выключенный_журнал_обращений_не_включается_обратно(capsys):
+    """`--no-access-log` уже снял обработчик и выключил распространение.
+
+    Первая редакция усыновления включала распространение всем journal-ам
+    из списка подряд — и возвращала журнал обращений uvicorn вторым
+    экземпляром записи, которую посредник пишет сам, да ещё в чужом
+    потоке. Поймано запуском настоящего сервера, а не тестом.
+    """
+    access = logging.getLogger("uvicorn.access")
+    access.handlers = []
+    access.propagate = False
+
+    configure(service="api", environment="local", version="sha256:abc")
+
+    assert access.propagate is False, "журнал обращений uvicorn воскрес"
+
+
+def test_цветная_копия_текста_не_попадает_в_запись(capsys):
+    """uvicorn кладёт в `color_message` ту же строку с кодами терминала.
+
+    В хранилище это `\u001b[36m` посреди поля — данные, которых никто
+    не искал, и второй экземпляр текста, уже лежащего в `_msg`.
+    """
+    configure(service="api", environment="local", version="sha256:abc")
+    logging.getLogger("uvicorn.error").info(
+        "Started server process", extra={"color_message": "Started \u001b[36mprocess\u001b[0m"}
+    )
+    запись = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert "color_message" not in запись
+
+
 def test_библиотеки_не_пишут_на_info(capsys):
     """httpx печатает строку на каждый исходящий запрос, и в общем потоке
     это выглядит как событие приложения с `event: httpx`."""
