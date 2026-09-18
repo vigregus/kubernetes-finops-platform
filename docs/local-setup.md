@@ -81,13 +81,13 @@ This project assumes a local `minikube` cluster (Docker driver) for Local v1.
 
 ## Local secret handling
 
-Local v1 must not store secret values in Git.
+Local v1 must not store secret values in Git. Detailed secrets policy and ESO mappings: [docs/secrets-policy.md](secrets-policy.md).
 
 Allowed approaches:
 
-- create secrets from ignored local files,
-- create secrets directly with `kubectl`,
-- use local secret tooling that reads from ignored sources.
+- for host-based local service development, copy `apps/messenger/.env.example` to `apps/messenger/.env` and fill in credentials extracted via `kubectl get secret ...`,
+- create secrets directly in the cluster with `kubectl`,
+- let in-cluster operators and `messenger-secrets-bootstrap` generate local credentials automatically (see [docs/secrets-policy.md](secrets-policy.md)).
 
 Do not commit:
 
@@ -96,3 +96,4 @@ Do not commit:
 - cloud credentials,
 - Grafana admin passwords,
 - Terraform variable files with real secrets.
+
