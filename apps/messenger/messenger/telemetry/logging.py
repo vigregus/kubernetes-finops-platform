@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import os
@@ -19,6 +20,36 @@ import re
 import sys
 import time
 from typing import Any
+
+# Контекст записи: то, что относится к обращению целиком, а не к одной
+# строке. Класть это аргументом в каждый вызов журнала невозможно -
+# сервисный слой не знает про HTTP, - а без этого связать строки одного
+# запроса нечем.
+REQUEST_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "request_id", default=None
+)
+TRACE_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "trace_id", default=None
+)
+SPAN_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "span_id", default=None
+)
+
+# Потоки журналов из контракта телеметрии. У каждого свой срок хранения,
+# поэтому запись без потока хранить правильно нельзя: один срок на всё -
+# это либо дорогой отладочный мусор, либо потерянный аудит.
+STREAM_APPLICATION = "application"
+STREAM_ACCESS = "access"
+STREAM_AUDIT = "audit"
+STREAM_SECURITY = "security"
+STREAM_DEPLOYMENT = "deployment"
+STREAM_SYNTHETIC = "synthetic"
+
+# Журналы библиотек. Они пишут на INFO то, что интересно им, а не нам:
+# httpx печатает строку на каждый исходящий запрос, aiokafka - на каждое
+# переподключение. В общем потоке это выглядит как события приложения
+# с `event: httpx`, и по ним невозможно ни искать, ни строить оповещения.
+NOISY_LIBRARIES = ("httpx", "httpcore", "aiokafka", "kafka", "asyncio", "urllib3")
 
 # Поля, которые обязаны быть в каждой записи. Отсутствующие заполняются
 # из окружения при настройке, а не проставляются вызывающим кодом:
@@ -94,10 +125,26 @@ class JsonFormatter(logging.Formatter):
             "_msg": record.getMessage(),
         }
 
+        # Поток обязателен: по нему различаются сроки хранения.
+        # Умолчание - `application`, потому что запись, не отнесённая
+        # ни к чему, хранилась бы дольше или меньше, чем нужно.
+        out["stream"] = getattr(record, "stream", STREAM_APPLICATION)
+
         for field in ENVELOPE:
             if field in out:
                 continue
-            out[field] = getattr(record, field, None)
+            value = getattr(record, field, None)
+            # Контекст обращения подставляется сам: сервисный слой
+            # не знает ни про HTTP, ни про трассу, а связать строки
+            # одного запроса без этих полей нечем.
+            if value is None:
+                if field == "request_id":
+                    value = REQUEST_ID.get()
+                elif field == "trace_id":
+                    value = TRACE_ID.get()
+                elif field == "span_id":
+                    value = SPAN_ID.get()
+            out[field] = value
 
         # Всё, что вызывающий положил в extra, проходит вычистку.
         reserved = set(logging.LogRecord("", 0, "", 0, "", (), None).__dict__)
@@ -140,4 +187,11 @@ def configure(
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(JsonFormatter(service, environment, version))
     root.addHandler(handler)
+
+    # Библиотеки говорят тише приложения. Формат у них тот же - они пишут
+    # через корневой журнал, - но содержание к предметной области
+    # отношения не имеет, и на INFO они заглушают собой настоящие события.
+    for name in NOISY_LIBRARIES:
+        logging.getLogger(name).setLevel(logging.WARNING)
+
     return root

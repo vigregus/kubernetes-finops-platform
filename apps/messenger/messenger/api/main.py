@@ -47,6 +47,7 @@ from messenger.services import realtime as realtime_service
 from messenger.services import runtime as runtime_service
 from messenger.services import session_management as session_service
 from messenger.services import verification as verification_service
+from messenger.telemetry import logging as logging_envelope
 from messenger.telemetry import metrics
 from messenger.telemetry.logging import configure
 
@@ -576,7 +577,22 @@ def _route_template(request: Request) -> str:
 @app.middleware("http")
 async def observe(request: Request, call_next):
     started = time.perf_counter()
-    response = await call_next(request)
+
+    # Идентификатор обращения: свой, если клиент его не прислал. Он
+    # связывает все строки одного запроса - включая те, что пишет
+    # сервисный слой, который про HTTP ничего не знает. Заголовок
+    # принимается, потому что запрос к нам может быть продолжением
+    # чужого, и разрывать цепочку на своей границе незачем.
+    request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
+    token = logging_envelope.REQUEST_ID.set(request_id)
+    try:
+        response = await call_next(request)
+    finally:
+        logging_envelope.REQUEST_ID.reset(token)
+
+    # Тот же идентификатор уходит клиенту: без него в поддержке
+    # спрашивают «когда это было», а не «какой у вас request id».
+    response.headers["X-Request-Id"] = request_id
     route = _route_template(request)
     elapsed = time.perf_counter() - started
 
@@ -601,6 +617,7 @@ async def observe(request: Request, call_next):
             "method": request.method,
             "status": response.status_code,
             "duration_ms": round(elapsed * 1000, 2),
+            "request_id": request_id,
             "result": "success" if response.status_code < 500 else "failed",
         },
     )
