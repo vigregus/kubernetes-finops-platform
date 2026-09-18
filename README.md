@@ -136,7 +136,9 @@ The repository is organized around a clear boundary:
 - `gitops/02-infra/` contains shared cluster-level components managed through GitOps.
 - `gitops/03-finops/` contains FinOps-specific platform components and values.
 - `gitops/04-business-app/` contains sample application charts and values.
-- `tests/` contains synthetic load generation and verification assets.
+- `tests/` contains synthetic load generation and verification assets;
+  the integration checks and how to run them are documented in
+  [tests/integration/README.md](tests/integration/README.md).
 - `infrastructure/` contains cloud foundation code for phases beyond local v1.
 
 The platform layer should remain narrowly scoped. Components belong here only when they provide one of the following:
