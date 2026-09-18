@@ -1,6 +1,16 @@
 config:
   clients:
-    - url: http://vl-local-victoria-logs-single-server.observability.svc.cluster.local:9428/insert/loki/api/v1/push
+    # `_msg_field` перечисляет поля, из которых берётся текст записи,
+    # в порядке предпочтения. Без него VictoriaLogs ищет только `_msg`,
+    # а JSON-журналы половины платформы кладут текст в `msg` или
+    # `message` - и вместо содержимого в хранилище оседает подсказка
+    # «missing _msg field; see ...». Измерено до правки: так терялся
+    # текст 20 тысяч записей в час - argocd-notifications, falco, etcd,
+    # apiserver, CNPG, Centrifugo.
+    #
+    # Наши сервисы пишут `_msg` и потому стоят первыми: их формат
+    # не должен зависеть от того, что делают соседи.
+    - url: http://vl-local-victoria-logs-single-server.observability.svc.cluster.local:9428/insert/loki/api/v1/push?_msg_field=_msg,msg,message
   snippets:
     # Одноразовые поды проверок в хранилище журналов не попадают.
     #
