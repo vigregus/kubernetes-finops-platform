@@ -11,8 +11,18 @@ spec:
   # (grafana.com/grafana/dashboards/7589) for danielqsj/kafka_exporter,
   # which is what Strimzi's kafkaExporter runs.
   datasources:
+    # Здесь обязан стоять *uid* источника (victoriametrics), а не его
+    # отображаемое имя (VictoriaMetrics): datasourceName подставляется
+    # в JSON буквально. С именем панели и переменные молча остаются
+    # пустыми - Grafana 11 больше не ищет источник по имени, и обращение
+    # к /api/datasources/proxy/name/... отвечает 404. То же правило
+    # записано в postgres.yaml, и этот дашборд его нарушал.
+    #
+    # Ссылки переведены в объектную форму по той же причине: строка
+    # в поле datasource - наследие старой схемы, и трактуется она как
+    # имя, а не как uid.
     - inputName: "DS_PROMETHEUS_WH211"
-      datasourceName: "VictoriaMetrics"
+      datasourceName: "victoriametrics"
   json: |
     {
       "__inputs": [
@@ -71,7 +81,7 @@ spec:
           "bars": false,
           "dashLength": 10,
           "dashes": false,
-          "datasource": "${DS_PROMETHEUS_WH211}",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS_WH211}" },
           "fill": 0,
           "gridPos": {
             "h": 10,
@@ -160,7 +170,7 @@ spec:
           "bars": false,
           "dashLength": 10,
           "dashes": false,
-          "datasource": "${DS_PROMETHEUS_WH211}",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS_WH211}" },
           "fill": 0,
           "gridPos": {
             "h": 10,
@@ -250,7 +260,7 @@ spec:
           "bars": false,
           "dashLength": 10,
           "dashes": false,
-          "datasource": "${DS_PROMETHEUS_WH211}",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS_WH211}" },
           "fill": 0,
           "gridPos": {
             "h": 10,
@@ -338,7 +348,7 @@ spec:
           "bars": false,
           "dashLength": 10,
           "dashes": false,
-          "datasource": "${DS_PROMETHEUS_WH211}",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS_WH211}" },
           "fill": 0,
           "gridPos": {
             "h": 10,
@@ -427,7 +437,7 @@ spec:
           "bars": true,
           "dashLength": 10,
           "dashes": false,
-          "datasource": "${DS_PROMETHEUS_WH211}",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS_WH211}" },
           "fill": 1,
           "gridPos": {
             "h": 7,
@@ -523,7 +533,7 @@ spec:
           {
             "allValue": null,
             "current": {},
-            "datasource": "${DS_PROMETHEUS_WH211}",
+            "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS_WH211}" },
             "hide": 0,
             "includeAll": false,
             "label": "Job",
@@ -543,7 +553,7 @@ spec:
           {
             "allValue": null,
             "current": {},
-            "datasource": "${DS_PROMETHEUS_WH211}",
+            "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS_WH211}" },
             "hide": 0,
             "includeAll": false,
             "label": "Instance",
@@ -563,7 +573,7 @@ spec:
           {
             "allValue": null,
             "current": {},
-            "datasource": "${DS_PROMETHEUS_WH211}",
+            "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS_WH211}" },
             "hide": 0,
             "includeAll": true,
             "label": "Topic",
