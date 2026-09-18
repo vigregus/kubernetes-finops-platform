@@ -25,8 +25,23 @@ spec:
   roles:
     - controller
     - broker
+  # Постоянный том, а не ephemeral. Оператор предупреждал прямым текстом:
+  # «A Kafka cluster with a single broker node and ephemeral storage will
+  # lose topic messages after any restart or rolling update», и для G2 это
+  # не предупреждение, а отмена проверки: выход гейта — «убить relay после
+  # публикации в Kafka, получатель видит сообщение ровно один раз», а на
+  # эфемерном диске любой перезапуск брокера стирает топик вместе
+  # с доказательством.
+  #
+  # Том переживает пересоздание пода и удаление кластера: deleteClaim:
+  # false — та же политика, что у `make local-down`, где данные остаются,
+  # пока не попросили WIPE=1.
   storage:
-    type: ephemeral
+    type: persistent-claim
+    # Столько же, сколько у Tempo: недельное хранение на игрушечном
+    # объёме, плюс запас на __consumer_offsets и журналы транзакций.
+    size: 5Gi
+    deleteClaim: false
 ---
 apiVersion: kafka.strimzi.io/v1
 kind: Kafka
