@@ -45,6 +45,11 @@ spec:
           {{- with $svc.command }}
           command: {{ toYaml . | nindent 12 }}
           {{- end }}
+          {{- if and (not $svc.http) $svc.metricsPort }}
+          ports:
+            - name: metrics
+              containerPort: {{ $svc.metricsPort }}
+          {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -66,6 +71,10 @@ spec:
               value: {{ include "messenger.version" $ctx | quote }}
             - name: LOG_FORMAT
               value: json
+            {{- with $svc.metricsPort }}
+            - name: METRICS_PORT
+              value: {{ . | quote }}
+            {{- end }}
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: {{ $.Values.telemetry.otlpEndpoint | quote }}
             - name: OTEL_TRACES_SAMPLER_ARG
@@ -90,6 +99,21 @@ spec:
               value: {{ $.Values.dependencies.redis.url | quote }}
             - name: KAFKA_BOOTSTRAP
               value: {{ $.Values.dependencies.kafka.bootstrap | quote }}
+            {{- with $svc.kafkaUser }}
+            # Учётные данные Kafka выдаются только тем нагрузкам, которым
+            # они нужны. Брокер требует SCRAM, у каждой роли свой
+            # пользователь и свои ACL: продюсер outbox не должен уметь
+            # читать, а потребитель непрочитанных - видеть содержимое.
+            # Секрет переносит джоб messenger-kafka-credentials: оператор
+            # Strimzi кладёт его в namespace kafka, а нагрузки живут здесь.
+            - name: KAFKA_USERNAME
+              value: {{ . | quote }}
+            - name: KAFKA_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ . }}
+                  key: password
+            {{- end }}
             # Издатель и адрес ключей — разные адреса, и это не небрежность.
             # В токене стоит внешний издатель: Keycloak строит метаданные
             # от своего hostname, каким бы путём ни пришёл запрос. Ходить
@@ -254,6 +278,29 @@ spec:
       # и `sum by (service)` начинает считать не то, что написано
       # в контракте телеметрии. Проверено запросом к VictoriaMetrics:
       # до этой строки в ответе были обе метки сразу.
+      honorLabels: true
+{{- end }}
+{{- if and (not $svc.http) $svc.metricsPort }}
+---
+# У фонового процесса нет службы, поэтому и снимать метрики надо с пода.
+# Без этого блока отправитель остаётся невидимым: пробы готовности у него
+# нет по замыслу, и единственный признак жизни - возраст самой старой
+# неотправленной записи, то есть метрика.
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMPodScrape
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Values.namespace }}
+  labels:
+    {{- include "messenger.labels" $ctx | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "messenger.selectorLabels" $ctx | nindent 6 }}
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
       honorLabels: true
 {{- end }}
 {{- if gt (int $svc.replicas) 1 }}

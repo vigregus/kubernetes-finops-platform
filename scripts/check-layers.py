@@ -21,6 +21,11 @@ PACKAGE = ROOT / "apps" / "messenger" / "messenger"
 # Что каждому слою разрешено импортировать из проекта.
 ALLOWED: dict[str, set[str]] = {
     "api": {"services", "domain", "telemetry"},
+    # Фоновые процессы - такой же вход в систему, как HTTP, и правила
+    # у них те же: разобрать окружение, вызвать сервис, отдать результат.
+    # Без этой строки каталог просто не проверялся бы: неизвестный слой
+    # проверка пропускает молча.
+    "workers": {"services", "adapters", "repositories", "domain", "telemetry"},
     "services": {"repositories", "adapters", "domain", "telemetry"},
     # Только Postgres. Всё остальное снаружи — в adapters: репозиторий
     # обязан уметь участвовать в транзакции вызывающего, адаптер не может.

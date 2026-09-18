@@ -78,23 +78,23 @@ import io, re, sys
 path, repo, tag = sys.argv[1], sys.argv[2], sys.argv[3]
 s = io.open(path, encoding="utf-8").read()
 
-block = re.search(r"(  api:\n(?:.*\n)*?)(    resources:)", s)
+# Тег один на весь набор нагрузок: API, отправитель outbox и потребители
+# собраны из одного коммита. Раньше правился только блок api, и остальные
+# молча оставались на старом образе - «выкатили версию» переставало
+# что-либо значить ровно тогда, когда нагрузок стало больше одной.
+block = re.search(r"^image:\n(?:  .*\n)+", s, re.M)
 if not block:
-    sys.exit("не найден блок сервиса api")
+    sys.exit("не найден верхнеуровневый блок image")
 
-head, tail = block.group(1), block.group(2)
-new_head = re.sub(
-    r"    image:\n(?:      .*\n)+",
-    f"    image:\n      repository: {repo}\n      tag: \"{tag}\"\n",
-    head,
-)
-# Заглушка agnhost уходит вместе с первым настоящим образом.
-new_head = re.sub(r"    command:\n(?:      - .*\n)+", "", new_head)
-new_head = re.sub(r"    # Заглушка на время каркаса.*?\n(?:    # .*\n)*", "", new_head)
+head = block.group(0)
+updated = re.sub(r"^  repository: .*$", f"  repository: {repo}", head, flags=re.M)
+updated = re.sub(r'^  tag: .*$', f'  tag: "{tag}"', updated, flags=re.M)
+if updated == head:
+    sys.exit("в блоке image нет repository/tag - нечего обновлять")
 
-s = s.replace(head + tail, new_head + tail)
+s = s.replace(head, updated, 1)
 io.open(path, "w", encoding="utf-8").write(s)
-print("· values.yaml: образ сервиса api обновлён")
+print("· values.yaml: образ обновлён для всех нагрузок")
 PY
 
 echo

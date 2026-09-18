@@ -30,11 +30,11 @@ app.kubernetes.io/part-of: messenger
 {{- define "messenger.image" -}}
 {{- $svc := .svc -}}
 {{- $root := .root -}}
-{{- $repo := $svc.image.repository | default (printf "%s/%s" $root.Values.image.registry .name) -}}
+{{- $repo := $svc.image.repository | default $root.Values.image.repository | default (printf "%s/%s" $root.Values.image.registry .name) -}}
 {{- if $svc.image.digest -}}
 {{ $repo }}@{{ $svc.image.digest }}
 {{- else if $root.Values.image.allowMutableTag -}}
-{{ $repo }}:{{ $svc.image.tag | default "latest" }}
+{{ $repo }}:{{ $svc.image.tag | default $root.Values.image.tag | default "latest" }}
 {{- else -}}
 {{ fail (printf "сервис %s: не задан image.digest. Тег подвижен и не годится для выкатки; для временной заглушки задайте image.allowMutableTag=true" .name) }}
 {{- end -}}
@@ -50,10 +50,11 @@ app.kubernetes.io/part-of: messenger
 */}}
 {{- define "messenger.version" -}}
 {{- $svc := .svc -}}
+{{- $root := .root -}}
 {{- if $svc.image.digest -}}
 {{ $svc.image.digest }}
-{{- else if $svc.image.tag -}}
-{{ $svc.image.tag }}
+{{- else if ($svc.image.tag | default $root.Values.image.tag) -}}
+{{ $svc.image.tag | default $root.Values.image.tag }}
 {{- else -}}
 unversioned
 {{- end -}}

@@ -6,6 +6,12 @@ ownership:
 
 image:
   registry: ghcr.io/vigregus
+  # Один образ на все нагрузки мессенджера и один тег на весь набор:
+  # API, отправитель outbox и потребители собраны из одного коммита,
+  # и разные теги у них означали бы, что «выкатили версию» больше
+  # ничего не значит. Тег обновляет scripts/build-messenger.sh.
+  repository: ghcr.io/vigregus/messenger-api
+  tag: "local-6b98c124a4d4"
   pullPolicy: IfNotPresent
   # Локально образ адресуется тегом, и это не послабление, а следствие.
   # `repo@sha256:…` — ссылка на манифест в реестре; у образа, собранного
@@ -100,9 +106,7 @@ services:
     terminationGracePeriodSeconds: 30
     http:
       port: 8080
-    image:
-      repository: ghcr.io/vigregus/messenger-api
-      tag: "local-886a8e9f7878"
+    image: {}
     resources:
       requests: {cpu: 50m, memory: 128Mi}
       limits: {cpu: "1", memory: 512Mi}
@@ -123,8 +127,15 @@ services:
       limits: {cpu: 500m, memory: 256Mi}
 
   outbox-relay:
-    enabled: false
+    enabled: true
     component: worker
+    # Учётная запись Kafka: только запись в оба потока и IdempotentWrite.
+    # Читать relay не умеет и не должен.
+    kafkaUser: messenger-outbox
+    # Метрики есть, входящих запросов нет - поэтому порт только для них.
+    metricsPort: 9100
+    command: ["python", "-m", "messenger.workers.outbox_relay"]
+    image: {}
     # Без http: у него нет входящих запросов, поэтому нет ни службы,
     # ни проб готовности. Живость проверяется иначе - по возрасту
     # самой старой необработанной записи, а это метрика, не проба.

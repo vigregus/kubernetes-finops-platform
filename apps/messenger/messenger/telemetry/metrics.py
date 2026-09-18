@@ -169,3 +169,49 @@ def realtime_disconnected(outcome: str, count: int = 1) -> None:
 def realtime_published(outcome: str, count: int = 1) -> None:
     if count:
         REALTIME_EVENTS.labels(service=SERVICE, outcome=outcome).inc(count)
+
+
+# --- отправитель outbox -----------------------------------------------------
+
+# Исходы публикации по типу события. Тип в метке, а не идентификатор:
+# идентификатор события убил бы хранилище кардинальностью.
+OUTBOX_EVENTS = Counter(
+    "messenger_outbox_events_total",
+    "События outbox по исходу",
+    ["service", "outcome", "event_type"],
+)
+
+OUTBOX_PUBLISHED = Counter(
+    "messenger_outbox_published_total",
+    "Записи, отмеченные опубликованными",
+    ["service"],
+)
+
+# Длина очереди и возраст самой старой записи. Оповещение строится
+# на возрасте: тысяча событий возрастом в секунду - норма, одна запись
+# возрастом в час - отказ доставки.
+OUTBOX_PENDING = Gauge(
+    "messenger_outbox_pending",
+    "Неопубликованные записи outbox",
+    ["service"],
+)
+
+OUTBOX_OLDEST_AGE = Gauge(
+    "messenger_outbox_oldest_age_seconds",
+    "Возраст самой старой неопубликованной записи",
+    ["service"],
+)
+
+
+def outbox_event(outcome: str, event_type: str) -> None:
+    OUTBOX_EVENTS.labels(service=SERVICE, outcome=outcome, event_type=event_type).inc()
+
+
+def outbox_published(count: int) -> None:
+    if count:
+        OUTBOX_PUBLISHED.labels(service=SERVICE).inc(count)
+
+
+def outbox_queue(*, pending: int, oldest_age_seconds: float) -> None:
+    OUTBOX_PENDING.labels(service=SERVICE).set(pending)
+    OUTBOX_OLDEST_AGE.labels(service=SERVICE).set(oldest_age_seconds)
