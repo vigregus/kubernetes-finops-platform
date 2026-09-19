@@ -125,36 +125,36 @@ paths:
         - $ref: '#/components/parameters/Limit'
         - name: before_activity_at
           in: query
-          description: Пагинация по ключу, а не по смещению.
+          description: |
+            Первый компонент курсора. Вместе с `before_conversation_id`
+            задаёт границу страницы: отдаются беседы, у которых пара
+            `(updated_at, conversation_id)` строго меньше заданной.
+            Пагинация по ключу, а не по смещению.
+
+            **Курсор задаётся только парой.** Один `before_activity_at`
+            без `before_conversation_id` (и наоборот) — `400` с кодом
+            `invalid_cursor`, а не более слабая граница. Отметка
+            активности не уникальна: беседы, изменённые одной
+            транзакцией, получают одинаковую, и предикат «строго старше
+            отметки» вычитает всю такую группу целиком — то есть отдаёт
+            неполный список, не сообщая об этом. Пустая страница на
+            месте отказа выглядела бы как конец списка.
           schema: { type: string, format: date-time }
         - name: before_conversation_id
           in: query
           description: |
-            Второй компонент курсора, вместе с `before_activity_at`.
-            Одного времени мало: отметка активности не уникальна — беседы,
-            изменённые одной транзакцией, получают одинаковую, — и стык
-            страниц на такой паре терял бы беседы. Без него
-            `before_activity_at` остаётся законным и означает строго
-            «старше этой отметки».
+            Второй компонент курсора, обязательный вместе с
+            `before_activity_at`. Одного времени мало: отметка активности
+            не уникальна — беседы, изменённые одной транзакцией, получают
+            одинаковую, — и стык страниц по ней терял бы беседы.
+            Одиночным этот параметр не принимается: `400 invalid_cursor`.
           schema: { type: string, format: uuid }
       responses:
         '200':
           description: Беседы, свежие первыми
           content:
             application/json:
-              schema:
-                type: object
-                required: [items]
-                properties:
-                  items:
-                    type: array
-                    items: { $ref: '#/components/schemas/Conversation' }
-                  next_before_activity_at:
-                    type: [string, 'null']
-                    format: date-time
-                  next_before_conversation_id:
-                    type: [string, 'null']
-                    format: uuid
+              schema: { $ref: '#/components/schemas/ConversationListPage' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
 
@@ -609,10 +609,13 @@ components:
         ответ на повтор.
 
         У списка бесед свои правила того же кода: `limit` вне объявленного
-        диапазона, `before_conversation_id` без `before_activity_at` (сам по
-        себе второй компонент границы не задаёт) и `before_activity_at` без
-        смещения часового пояса — по такой отметке непонятно, с какой зоной
-        её сравнивать. Все три — `400` с кодом `invalid_cursor`.
+        диапазона; курсор, заданный наполовину, — то есть
+        `before_conversation_id` без `before_activity_at` **или**
+        `before_activity_at` без `before_conversation_id` (по отдельности
+        они задают границу, про которую известно, что она теряет беседы
+        с равной отметкой активности); и `before_activity_at` без смещения
+        часового пояса — по такой отметке непонятно, с какой зоной её
+        сравнивать. Все три — `400` с кодом `invalid_cursor`.
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }
@@ -725,6 +728,40 @@ components:
         last_message: { $ref: '#/components/schemas/Message' }
         unread_count: { type: integer, minimum: 0 }
         created_at: { type: string, format: date-time }
+
+    ConversationListPage:
+      type: object
+      description: |
+        Страница списка бесед. Оба поля продолжения **обязательны** и
+        присутствуют всегда, включая `null`. Инвариант: либо оба `null`
+        (страниц больше нет), либо оба непусты (продолжение адресуемо) —
+        `null` в одном и непустое значение в другом не встречается.
+
+        Почему обязательны, а не необязательны: сервер отдаёт их всегда,
+        и `null`-в-`null` — единственный признак конца списка. Пока поля
+        были необязательными, сгенерированный клиент получал бы
+        `next_before_activity_at?: string | null` и проверял бы наличие
+        ключа там, где протокол обещает значение. Отдельного `has_more`
+        нет намеренно: он был бы вторым описанием того же правила,
+        и расхождение двух описаний обнаружилось бы только у клиента.
+      required: [items, next_before_activity_at, next_before_conversation_id]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Conversation' }
+        next_before_activity_at:
+          type: [string, 'null']
+          format: date-time
+          description: |
+            Первый компонент курсора продолжения — отметка активности
+            последней беседы страницы. `null` вместе со вторым полем
+            означает, что страница последняя.
+        next_before_conversation_id:
+          type: [string, 'null']
+          format: uuid
+          description: |
+            Второй компонент курсора продолжения. Отдаётся вместе
+            с `next_before_activity_at` или не отдаётся вовсе.
 
     UserSummary:
       type: object

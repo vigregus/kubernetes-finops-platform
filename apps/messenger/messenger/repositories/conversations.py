@@ -93,7 +93,9 @@ _SELECT = """
 # это ровно то, что проверяет LIST-001.
 _ORDER = "\n     ORDER BY c.updated_at DESC, c.conversation_id DESC"
 _WITHOUT_CURSOR = _ORDER + "\n     LIMIT $2"
-_WITH_ACTIVITY = "\n       AND c.updated_at < $2::timestamptz" + _ORDER + "\n     LIMIT $3"
+# Предикат только парный. Варианта «строго старше отметки» здесь нет
+# намеренно: он теряет беседы с равным `updated_at`, и держать заведомо
+# lossy запрос в репозитории значило бы оставлять его кому-то под рукой.
 _WITH_PAIR = (
     "\n       AND (c.updated_at, c.conversation_id) < ($2::timestamptz, $3::uuid)"
     + _ORDER
@@ -357,7 +359,7 @@ async def list_user_conversations(
     запросе нет — поэтому в сервисе над этим вызовом нет `authorize`,
     и это решение, а не пропуск.
 
-    Три варианта предиката, а не один с необязательным условием.
+    Два варианта предиката, а не один с необязательным условием.
     `($2 IS NULL OR ...)` планировщик читает как «условия нет» и снимает
     индекс целиком — тот же довод, что у `_BELOW_MAX`/`_BELOW_CURSOR`
     в `messages.py`. Число параметров от этого меняется, поэтому запрос
@@ -371,11 +373,6 @@ async def list_user_conversations(
     """
     if cursor is None:
         query, parameters = _SELECT + _WITHOUT_CURSOR, (user_id, limit + 1)
-    elif cursor.conversation_id is None:
-        query, parameters = (
-            _SELECT + _WITH_ACTIVITY,
-            (user_id, cursor.updated_at, limit + 1),
-        )
     else:
         query, parameters = (
             _SELECT + _WITH_PAIR,
