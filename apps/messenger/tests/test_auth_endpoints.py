@@ -71,7 +71,7 @@ def успех(monkeypatch):
 def _отказ(monkeypatch, *, upstream: bool):
     async def _fake(conn, **kwargs):
         return login_service.LoginResult(
-            error_class="invalid_grant", upstream_failed=upstream
+            error_code="invalid_grant", upstream_failed=upstream
         )
 
     monkeypatch.setattr(login_service, "login_with_code", _fake)

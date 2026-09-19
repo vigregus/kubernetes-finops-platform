@@ -45,8 +45,11 @@ class LoginResult:
     session: Session | None = None
     device_id: DeviceId | None = None
     user_created: bool = False
-    # Внутренняя причина: в журнал и в метку `error_class`, не в ответ.
-    error_class: str | None = None
+    # Внутренняя причина: в журнал и в метку `error_code`, не в ответ.
+    # Названо так же, как поле лога/метки, а не `error_class`: одно
+    # значение под разными именами в разных сигналах ломает поиск
+    # "скопировал из графика — вставил в VictoriaLogs".
+    error_code: str | None = None
     # Отличает «клиент не прав» от «мы не смогли»: 401 против 503.
     upstream_failed: bool = False
 
@@ -138,7 +141,7 @@ async def _finish(
         failure = exchange.failure or keycloak.ExchangeFailure.INVALID_GRANT
         metrics.login_failed(operation, failure.value)
         return LoginResult(
-            error_class=failure.value,
+            error_code=failure.value,
             upstream_failed=failure is keycloak.ExchangeFailure.UPSTREAM_UNAVAILABLE,
         )
 
@@ -164,7 +167,7 @@ async def _finish(
                    "result": "failed", "error_code": reason,
                    "log_stream": logging_envelope.STREAM_SECURITY},
         )
-        return LoginResult(error_class=reason)
+        return LoginResult(error_code=reason)
 
     metrics.login_succeeded(operation)
     return LoginResult(

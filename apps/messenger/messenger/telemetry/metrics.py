@@ -52,10 +52,16 @@ def db_pool(*, in_use: int, idle: int, max_size: int) -> None:
 # Отказы входа. Метка — внутренняя причина, а не код ответа: наружу уходит
 # один и тот же 401, и по нему не отличить ротацию ключей от сломанного
 # обновления токена у клиентов.
+#
+# Метка называется `error_code`, а не `error_class`: под тем же значением
+# это поле лежит в логах и на спанах (telemetry/logging.py, tracing.py) -
+# разное имя одного и того же понятия в разных сигналах значит, что
+# значение из легенды графика нельзя скопировать прямо в поиск по
+# VictoriaLogs, приходится помнить о переименовании.
 TOKEN_REJECTED = Counter(
     "messenger_token_rejected_total",
     "Токены, не прошедшие проверку",
-    ["service", "error_class"],
+    ["service", "error_code"],
 )
 
 # Регистрации. Считаются там же, где заводится запись, а не в обработчике
@@ -68,8 +74,8 @@ USERS_CREATED = Counter(
 )
 
 
-def token_rejected(error_class: str) -> None:
-    TOKEN_REJECTED.labels(service=SERVICE, error_class=error_class).inc()
+def token_rejected(error_code: str) -> None:
+    TOKEN_REJECTED.labels(service=SERVICE, error_code=error_code).inc()
 
 
 def user_created() -> None:
@@ -117,7 +123,7 @@ LOGINS = Counter(
 LOGIN_FAILURES = Counter(
     "messenger_login_failures_total",
     "Неудачные обмены у Keycloak",
-    ["service", "operation", "error_class"],
+    ["service", "operation", "error_code"],
 )
 
 
@@ -125,8 +131,8 @@ def login_succeeded(operation: str) -> None:
     LOGINS.labels(service=SERVICE, operation=operation).inc()
 
 
-def login_failed(operation: str, error_class: str) -> None:
-    LOGIN_FAILURES.labels(service=SERVICE, operation=operation, error_class=error_class).inc()
+def login_failed(operation: str, error_code: str) -> None:
+    LOGIN_FAILURES.labels(service=SERVICE, operation=operation, error_code=error_code).inc()
 
 
 # Письма о подтверждении адреса по исходу. Всплеск `limited` означает либо

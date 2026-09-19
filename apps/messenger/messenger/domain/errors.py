@@ -16,7 +16,7 @@ from enum import Enum
 
 
 class Reason(str, Enum):
-    """Что произошло на самом деле. Идёт в журнал и в метку `error_class`."""
+    """Что произошло на самом деле. Идёт в журнал и в метку `error_code`."""
 
     NOT_A_MEMBER = "not_a_member"
     CONVERSATION_NOT_FOUND = "conversation_not_found"
