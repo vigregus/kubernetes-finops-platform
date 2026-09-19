@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from datetime import timedelta
 from enum import Enum
@@ -77,6 +78,7 @@ async def publish_batch(
     with tracing.span(
         "outbox-relay", attributes={"messaging.pipeline.stage": STAGE}
     ) as batch_span:
+        claim_started = time.perf_counter()
         with tracing.span("outbox.claim"):
             records = await outbox.claim_batch(
                 conn,
@@ -84,6 +86,10 @@ async def publish_batch(
                 limit=settings.batch_size,
                 lease_seconds=settings.lease_seconds,
             )
+        # Пишется и на пустую пачку: это тоже обращение к базе, и его
+        # задержка — тот же сигнал, что и у заполненной, просто без работы
+        # после неё.
+        metrics.outbox_claim_duration(time.perf_counter() - claim_started)
         if not records:
             return PublishOutcome()
         batch_span.set_attribute("messenger.outbox.claimed", len(records))
@@ -195,6 +201,7 @@ async def _publish_one(
     ) as span:
         if origin is not None and not origin.span_id:
             span.set_attribute("messenger.source_trace_id", origin.trace_id)
+        publish_started = time.perf_counter()
         try:
             await publisher.publish(
                 topic=topic,
@@ -239,6 +246,13 @@ async def _publish_one(
             )
             return _Outcome.FAILED
 
+    # Только успешная публикация: у отказавшей есть свой счётчик
+    # (`outbox_events_total{outcome="failed"}`), а её длительность — это
+    # почти всегда таймаут клиента, то есть один и тот же большой выброс
+    # на каждый отказ. Смешивать его с нормальным T_kafka значило бы
+    # испортить гистограмму значением, которое ничего не говорит о
+    # типичной задержке публикации.
+    metrics.outbox_kafka_publish_duration(time.perf_counter() - publish_started)
     return _Outcome.PUBLISHED
 
 

@@ -12,7 +12,9 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from messenger.adapters import event_cache
@@ -115,6 +117,7 @@ async def handle_event(
             "messaging.message.id": str(message_id),
         },
     ) as span:
+        publish_started = time.perf_counter()
         published = await centrifugo.publish(channel, _client_event(fact, content))
         if not published:
             # Без пометки политика хвостовой выборки «ошибки хранить»
@@ -132,4 +135,26 @@ async def handle_event(
 
     await cache.forget(message_id=message_id)
     metrics.realtime_delivery("delivered")
+    metrics.realtime_publish_duration(time.perf_counter() - publish_started)
+
+    # T_delivery, приближённо: occurred_at (момент коммита, из тела
+    # события) -> эта публикация. Не t7 из документа - подтверждение
+    # браузера Б, которого без клиентской телеметрии (G3) здесь нет, -
+    # но лучшее, что можно измерить сегодня без изменения контракта
+    # событий: `occurred_at` там уже есть.
+    occurred_at = fact.get("occurred_at")
+    if isinstance(occurred_at, str):
+        try:
+            delivered_at = datetime.fromisoformat(occurred_at)
+        except ValueError:
+            delivered_at = None
+        else:
+            delta = datetime.now(delivered_at.tzinfo) - delivered_at
+            # Отрицательное значение означало бы рассинхронизацию часов
+            # между подами, а не отрицательное время - записывать его
+            # значило бы врать гистограмме о том, что доставка была
+            # мгновенной или обратной во времени.
+            if delta.total_seconds() >= 0:
+                metrics.message_delivery_duration(delta.total_seconds())
+
     return DeliveryOutcome(delivered=1)

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 
-from prometheus_client import Counter, Gauge
+from prometheus_client import Counter, Gauge, Histogram
 
 # Имя берётся из окружения один раз. Передавать его аргументом в каждый вызов
 # значит однажды передать не то — и ряд разъедется с остальными.
@@ -229,3 +229,102 @@ REALTIME_DELIVERY = Counter(
 
 def realtime_delivery(outcome: str) -> None:
     REALTIME_DELIVERY.labels(service=SERVICE, outcome=outcome).inc()
+
+
+# --- сквозной путь сообщения: T_commit / T_outbox / T_kafka / T_consumer /
+# T_realtime / T_delivery (docs/messenger/06-observability.md, часть 1) ------
+#
+# Без этих гистограмм сквозной путь нельзя разложить на стадии: было видно
+# только суммарное «p99 доставки 8с» без ответа, где именно эти секунды
+# потеряны.
+
+# Коммит сообщения. Числитель и знаменатель SLO «Запись сообщения»:
+# результат — success/failed, а не проценты, сам процент считается запросом
+# к этому ряду при разборе бюджета ошибок.
+MESSAGE_SEND_OPERATIONS = Counter(
+    "messenger_message_send_operations_total",
+    "Исходы приёма сообщения (коммит в Postgres)",
+    ["service", "result"],
+)
+MESSAGE_COMMIT_DURATION = Histogram(
+    "messenger_message_commit_duration_seconds",
+    "T_commit: длительность транзакции, вставившей сообщение и обе записи outbox",
+    ["service"],
+)
+
+
+def message_commit(duration_seconds: float, *, result: str) -> None:
+    MESSAGE_SEND_OPERATIONS.labels(service=SERVICE, result=result).inc()
+    MESSAGE_COMMIT_DURATION.labels(service=SERVICE).observe(duration_seconds)
+
+
+# T_outbox: от вставки записи (уже случилась, коммит выше) до её аренды
+# отправителем. Возраст самой старой записи (`outbox_oldest_age_seconds`)
+# уже есть и ловит затор; эта гистограмма показывает нормальное время
+# аренды одной пачки, а не аварийное значение одной записи.
+OUTBOX_CLAIM_DURATION = Histogram(
+    "messenger_outbox_claim_duration_seconds",
+    "Длительность аренды пачки outbox",
+    ["service"],
+)
+
+# T_kafka: от аренды записи до подтверждения публикации брокером.
+OUTBOX_KAFKA_PUBLISH_DURATION = Histogram(
+    "messenger_outbox_kafka_publish_duration_seconds",
+    "T_kafka: длительность публикации одной записи в Kafka",
+    ["service"],
+)
+
+
+def outbox_claim_duration(seconds: float) -> None:
+    OUTBOX_CLAIM_DURATION.labels(service=SERVICE).observe(seconds)
+
+
+def outbox_kafka_publish_duration(seconds: float) -> None:
+    OUTBOX_KAFKA_PUBLISH_DURATION.labels(service=SERVICE).observe(seconds)
+
+
+# T_consumer: от получения пачки из Kafka до фиксации смещения. Метка
+# `consumer` — потому что каталог метрик документа предполагает несколько
+# потребителей (`realtime`, позже `notifications`, `unread`), а не один.
+CONSUMER_PROCESSING_DURATION = Histogram(
+    "messenger_consumer_processing_duration_seconds",
+    "T_consumer: длительность обработки пачки потребителем",
+    ["service", "consumer"],
+)
+
+
+def consumer_processing_duration(seconds: float, *, consumer: str) -> None:
+    CONSUMER_PROCESSING_DURATION.labels(service=SERVICE, consumer=consumer).observe(
+        seconds
+    )
+
+
+# T_realtime: от сборки пары факт+содержимое до подтверждённой публикации
+# в Centrifugo.
+REALTIME_PUBLISH_DURATION = Histogram(
+    "messenger_realtime_publish_duration_seconds",
+    "T_realtime: длительность публикации события в Centrifugo",
+    ["service"],
+)
+
+
+def realtime_publish_duration(seconds: float) -> None:
+    REALTIME_PUBLISH_DURATION.labels(service=SERVICE).observe(seconds)
+
+
+# T_delivery, приближённо: от `occurred_at` (момент коммита, записанный
+# в тело события) до публикации в Centrifugo. Это не то же самое, что t7
+# в документе — подтверждение браузера Б, — потому что телеметрии браузера
+# ещё нет (G3). Приближение честно называет себя приближением через имя
+# метрики и здесь же, а не выдаёт себя за полный SLI.
+MESSAGE_DELIVERY_DURATION = Histogram(
+    "messenger_message_delivery_duration_seconds",
+    "T_delivery (приближение до готовности телеметрии браузера): "
+    "occurred_at сообщения -> подтверждённая публикация в Centrifugo",
+    ["service"],
+)
+
+
+def message_delivery_duration(seconds: float) -> None:
+    MESSAGE_DELIVERY_DURATION.labels(service=SERVICE).observe(seconds)

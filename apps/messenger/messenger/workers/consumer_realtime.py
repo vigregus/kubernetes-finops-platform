@@ -16,6 +16,7 @@ import contextlib
 import logging
 import os
 import signal
+import time
 
 from prometheus_client import start_http_server
 
@@ -103,6 +104,13 @@ async def run(stop: asyncio.Event) -> None:
                     consume.set_attribute("messaging.batch.message_count", len(events))
                 if events:
                     batch.set_attribute("messaging.batch.message_count", len(events))
+                    # T_consumer: от получения пачки до фиксации смещения.
+                    # Считается только когда есть что обрабатывать - иначе
+                    # время между пустыми опросами (оно же `poll` timeout)
+                    # смешалось бы с временем настоящей работы, и гистограмма
+                    # отвечала бы не на "долго ли обрабатывали", а на
+                    # "сколько раз в Kafka ничего не было".
+                    processing_started = time.perf_counter()
                     for topic, headers, body in events:
                         # Контекст создателя берётся из заголовка, а тело -
                         # запасной путь: заголовок ставит отправитель, и он
@@ -120,6 +128,9 @@ async def run(stop: asyncio.Event) -> None:
                             link=trace.origin_from(headers, body),
                         )
                     await subscriber.commit()
+                    metrics.consumer_processing_duration(
+                        time.perf_counter() - processing_started, consumer="realtime"
+                    )
         except Exception as exc:  # noqa: BLE001 - цикл обязан пережить любой отказ
             log.warning(
                 "цикл потребителя прерван",
