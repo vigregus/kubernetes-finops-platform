@@ -85,10 +85,34 @@ config:
       - match:
           selector: '{app="postgresql"}'
           stages:
+            # `app="postgresql"` ловит два разных процесса CNPG под одной
+            # меткой: сам Postgres (контейнер `postgres`) и пулер
+            # соединений (контейнер `pgbouncer`, messenger-db-pool-*).
+            # Их обёртки логов CNPG пишет по-разному: у Postgres вложенное
+            # поле называется `record.message`/`record.error_severity`,
+            # у pgbouncer - `record.msg`/`record.level`. Без второй пары
+            # выражений строки pgbouncer (login attempt, closing because -
+            # ровно то, чем диагностируют исчерпание пула соединений)
+            # проваливались сквозь то же самое "top-level msg = record"
+            # ("its top-level field is msg:record, not _msg" - см. выше),
+            # только на уровень ниже: `record_message` оставался пустым,
+            # и `_msg` в хранилище оседал буквально как `record`, без
+            # текста. Найдено не по коду - оба процесса собирают JSON
+            # одинаково правильно по отдельности, - а по живому запросу
+            # к VictoriaLogs, где "record" оказалось значением `_msg`
+            # у входа/выхода соединений пула.
             - json:
                 expressions:
                   record_message: record.message
+                  record_message_pgbouncer: record.msg
                   severity: record.error_severity
+                  severity_pgbouncer: record.level
+            - template:
+                source: record_message
+                template: '{{ if .record_message }}{{ .record_message }}{{ else }}{{ .record_message_pgbouncer }}{{ end }}'
+            - template:
+                source: severity
+                template: '{{ if .severity }}{{ .severity }}{{ else }}{{ .severity_pgbouncer }}{{ end }}'
             - regex:
                 source: record_message
                 # (?s) so that . matches newlines. Without it this whole
