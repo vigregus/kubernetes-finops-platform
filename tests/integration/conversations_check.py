@@ -18,6 +18,11 @@ from messenger.domain.ids import ConversationId, direct_key
 from messenger.repositories import conversations, users
 from messenger.repositories.postgres import PoolSettings, create_pool
 
+# Список бесед читается только страницами — беспагинационной выдачи у него
+# нет. Здесь нужна одна страница, заведомо покрывающая коллекцию проверки:
+# её предмет — отбор по членству, а не листание.
+PAGE = 100
+
 failures: list[str] = []
 
 
@@ -130,12 +135,13 @@ async def run() -> None:
                 str(active),
             )
 
-            own = await conversations.list_active_user_conversations(
-                conn, user_id=first.user_id
+            own = await conversations.list_user_conversations(
+                conn, user_id=first.user_id, cursor=None, limit=PAGE
             )
             check(
                 "пользователь видит только беседы со своим членством",
-                [item.conversation_id for item in own] == [direct_id],
+                [item.conversation.conversation_id for item in own.items]
+                == [direct_id],
                 str(own),
             )
 
@@ -192,12 +198,12 @@ async def run() -> None:
                 direct_id,
                 first.user_id,
             )
-            no_longer_own = await conversations.list_active_user_conversations(
-                conn, user_id=first.user_id
+            no_longer_own = await conversations.list_user_conversations(
+                conn, user_id=first.user_id, cursor=None, limit=PAGE
             )
             check(
                 "бывшее членство не показывает беседу как действующую",
-                no_longer_own == [],
+                not no_longer_own.items,
                 str(no_longer_own),
             )
         finally:

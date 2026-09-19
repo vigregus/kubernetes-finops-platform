@@ -15,6 +15,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import Literal
 from urllib.parse import parse_qs
 
@@ -24,6 +25,10 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, ge
 from pydantic import BaseModel, Field
 from starlette.requests import Request
 
+from messenger.domain.conversation_list import (
+    ActivityCursor,
+    validate_activity_cursors,
+)
 from messenger.domain.errors import Problem, Reason, to_problem
 from messenger.domain.history import DEFAULT_PAGE_SIZE, InvalidCursor, validate_cursors
 from messenger.domain.identity import TokenRejection
@@ -980,16 +985,89 @@ async def create_direct_conversation(
         return _problem_response(to_problem(result.rejection), response)
 
     response.status_code = 201 if result.created else 200
-    conversation = result.conversation
-    return {
-        "conversation_id": str(conversation.conversation_id),
-        "type": conversation.type.value,
-        "participants": [
-            {"user_id": str(user.user_id), "display_name": user.display_name}
-            for user in result.participants
-        ],
-        "created_at": conversation.created_at,
-    }
+    # Сборка общая со списком бесед: участники и поля конверта обязаны
+    # выглядеть одинаково на обоих маршрутах, а вторая сборка на месте
+    # разошлась бы с первой при первой же правке контракта.
+    return _conversation_body(result.conversation, result.participants)
+
+
+@app.get("/conversations", response_model=dict[str, object])
+async def list_conversations(
+    request: Request,
+    response: Response,
+    before_activity_at: datetime | None = None,
+    before_conversation_id: uuid.UUID | None = None,
+    limit: int = DEFAULT_PAGE_SIZE,
+) -> dict[str, object] | Response:
+    """Беседы пользователя страницами: свежие первыми.
+
+    Ключ сортировки — пара `(updated_at DESC, conversation_id DESC)`, и
+    курсор продолжения повторяет её целиком. Одной отметки мало: `now()`
+    в Postgres — время транзакции, поэтому беседы, созданные или тронутые
+    одной транзакцией, получают одинаковую отметку, и одиночный курсор
+    по ней теряет или дублирует их на стыке страниц.
+
+    Снимка списка сервер не обещает, в отличие от истории: сортировочный
+    ключ изменяемый, и беседа, в которую написали между страницами,
+    переезжает в голову и может перескочить через курсор. Обычный keyset
+    такой гарантии не даёт, а давало бы её замороженное начало списка —
+    как `sync_to_seq` у истории. Это отдельное контрактное решение,
+    и обещать его попутно нельзя.
+
+    Отказов, зависящих от данных, здесь нет: беседы задаёт сам субъект,
+    поэтому `403` и `404` на этом маршруте не встречаются, а у человека
+    без бесед ответ — пустой список.
+    """
+    # Проверка до всего остального: негодная строка запроса не должна
+    # занимать соединение с базой и, тем более, разбирать удостоверение.
+    try:
+        validate_activity_cursors(
+            before_activity_at=before_activity_at,
+            before_conversation_id=(
+                ConversationId(before_conversation_id)
+                if before_conversation_id is not None
+                else None
+            ),
+            limit=limit,
+        )
+    except ValueError as exc:
+        return _problem_response(_invalid_cursors(exc), response)
+
+    cursor = (
+        ActivityCursor(
+            updated_at=before_activity_at,
+            conversation_id=(
+                ConversationId(before_conversation_id)
+                if before_conversation_id is not None
+                else None
+            ),
+        )
+        if before_activity_at is not None
+        else None
+    )
+
+    # Одно соединение, и это решение, а не экономия. У истории их два,
+    # потому что удостоверение обязано читаться с писателя, а страница
+    # могла уйти на реплику; здесь оба чтения идут к писателю — реплика
+    # не отвечает за границу страницы, а список это сплошной порядок
+    # и стык. Режим не назван, в отличие от `list_messages`, по той же
+    # причине: у истории он выбирается по запросу (`read_mode`), а здесь
+    # выбора нет — умолчание `Runtime.connection` и есть писатель.
+    runtime = request.app.state.runtime
+    async with runtime.connection() as conn:
+        auth = await _current(request, conn)
+        if not auth.ok or auth.user is None:
+            return _auth_failure(auth.rejection, response)
+        result = await conversation_service.list_conversations(
+            conn,
+            viewer_id=auth.user.user_id,
+            cursor=cursor,
+            limit=limit,
+        )
+
+    with tracing.span("response"):
+        body_out = _conversation_list_body(result)
+    return body_out
 
 
 class SendMessagePayload(BaseModel):
@@ -1035,6 +1113,89 @@ def _message_body(message) -> dict[str, object]:
         "created_at": message.created_at,
         "edited_at": message.edited_at,
         "deleted_at": message.deleted_at,
+    }
+
+
+def _user_summary(participant) -> dict[str, object]:
+    """Участник беседы в форме контракта.
+
+    Одна сборка на оба маршрута — список бесед и создание. Разойдись они,
+    один и тот же участник выглядел бы по-разному в ответе на создание
+    и в списке, и заметил бы это клиент, а не сервер.
+
+    `last_seen_at` объявлен контрактом, но не отдаётся: в таблице `users`
+    такой колонки нет вовсе, и взять значение неоткуда. Поле
+    необязательное, поэтому его отсутствие законно.
+    """
+    return {
+        "user_id": str(participant.user_id),
+        "display_name": participant.display_name,
+    }
+
+
+def _conversation_body(
+    conversation, participants, *, last_message=None
+) -> dict[str, object]:
+    """Беседа в форме контракта — одной сборкой на оба маршрута.
+
+    Ключ `last_message` появляется **только** при наличии сообщения, и это
+    не «не дошли руки»: у беседы без сообщений ключа не существует, а не
+    «есть, но `null`». Контракт объявляет поле как `Message`, а не как
+    `[Message, null]`, и `null` был бы ответом, которого в спецификации
+    нет (`LIST-003`).
+
+    `unread_count` не отдаётся: продюсера нет, проекция непрочитанных —
+    отдельная работа (`G3-003`), а `read_states` сегодня не читает ни один
+    вызов. Поле необязательное, и его отсутствие законно. Считать его как
+    `last_seq - last_read_seq` нельзя: так считались бы и собственные
+    сообщения, и надгробия, — то есть число, не отвечающее на вопрос
+    «сколько я пропустил».
+    """
+    body: dict[str, object] = {
+        "conversation_id": str(conversation.conversation_id),
+        "type": conversation.type.value,
+        "participants": [_user_summary(user) for user in participants],
+        "created_at": conversation.created_at,
+    }
+    if last_message is not None:
+        body["last_message"] = _message_body(last_message)
+    return body
+
+
+def _conversation_list_body(
+    result: conversation_service.ConversationListResult,
+) -> dict[str, object]:
+    """Страница списка бесед в форме контракта.
+
+    Оба поля курсора присутствуют всегда, включая `null`: клиент различает
+    «продолжения нет» и «поля нет» только по наличию ключа, а `null`-в-`null`
+    здесь единственный признак конца списка. Отдельного `has_more` нет
+    намеренно — он был бы вторым описанием того же правила. И это не
+    потеря: добавить необязательное поле позже совместимо, убрать — нет.
+
+    Курсор продолжения отдаётся полной парой — одиночным его не строит
+    ни один вызывающий. Проверка второго компонента на `None` всё равно
+    оставлена: без неё `str(None)` уехал бы клиенту строкой `"None"`,
+    ровно как это вышло бы с `sender_id` стёртого автора.
+    """
+    cursor = result.next_cursor
+    return {
+        "items": [
+            _conversation_body(
+                item.conversation,
+                item.participants,
+                last_message=item.last_message,
+            )
+            for item in result.page.items
+        ],
+        "next_before_activity_at": (
+            cursor.updated_at if cursor is not None else None
+        ),
+        "next_before_conversation_id": (
+            str(cursor.conversation_id)
+            if cursor is not None and cursor.conversation_id is not None
+            else None
+        ),
     }
 
 

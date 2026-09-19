@@ -85,6 +85,22 @@ class MessagePage:
     has_more: bool = False
 
 
+def validate_limit(limit: int) -> None:
+    """Размер страницы — предел протокола, а не истории.
+
+    Отдельной функцией, а не строкой внутри `validate_cursors`: тот же
+    `Limit` стоит и на маршруте списка бесед (`GET /conversations`), и
+    вторая копия этого правила разошлась бы с первой при первой же
+    правке контракта. Копия была бы ещё и незаметной — обе остались бы
+    «правильными» на вид, а расхождение вылезло бы разницей кодов ответа
+    между двумя маршрутами.
+    """
+    if limit < 1 or limit > MAX_PAGE_SIZE:
+        raise InvalidCursor(
+            f"размер страницы должен быть от 1 до {MAX_PAGE_SIZE}, а не {limit}"
+        )
+
+
 def validate_cursors(
     *,
     before_seq: int | None,
@@ -104,10 +120,7 @@ def validate_cursors(
     за повтор запроса после обрыва связи.
     """
 
-    if limit < 1 or limit > MAX_PAGE_SIZE:
-        raise InvalidCursor(
-            f"размер страницы должен быть от 1 до {MAX_PAGE_SIZE}, а не {limit}"
-        )
+    validate_limit(limit)
     if before_seq is not None and after_seq is not None:
         raise InvalidCursor(
             "before_seq и after_seq задают разные направления — нужен один"

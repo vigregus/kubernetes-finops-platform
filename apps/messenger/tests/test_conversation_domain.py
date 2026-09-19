@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import FrozenInstanceError
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -13,6 +13,14 @@ from messenger.domain.conversation import (
     ConversationType,
     MemberRole,
 )
+from messenger.domain.conversation_list import (
+    DEFAULT_PAGE_SIZE,
+    MAX_PAGE_SIZE,
+    ActivityCursor,
+    ConversationPage,
+    validate_activity_cursors,
+)
+from messenger.domain.history import InvalidCursor
 from messenger.domain.ids import ConversationId, ConversationSeq, UserId
 
 NOW = datetime(2026, 9, 14, 12, 0, tzinfo=UTC)
@@ -78,3 +86,92 @@ def test_беседа_и_членство_неизменяемы():
         _conversation().last_seq = ConversationSeq(1)  # type: ignore[misc]
     with pytest.raises(FrozenInstanceError):
         _member().role = MemberRole.ADMIN  # type: ignore[misc]
+
+
+# --- правила списка бесед ---------------------------------------------------
+
+
+def _bounds(**overrides) -> dict:
+    base = {
+        "before_activity_at": None,
+        "before_conversation_id": None,
+        "limit": DEFAULT_PAGE_SIZE,
+    }
+    return {**base, **overrides}
+
+
+@pytest.mark.parametrize("limit", [1, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE])
+def test_размер_страницы_в_объявленном_диапазоне_законен(limit):
+    validate_activity_cursors(**_bounds(limit=limit))
+
+
+@pytest.mark.parametrize("limit", [0, -1, MAX_PAGE_SIZE + 1])
+def test_размер_страницы_вне_диапазона_отвергается(limit):
+    with pytest.raises(InvalidCursor):
+        validate_activity_cursors(**_bounds(limit=limit))
+
+
+def test_пустой_курсор_законен():
+    # Первая страница: границы нет вовсе. Отличать это от «граница
+    # не задана» нечем и не нужно — выдача начинается с головы списка.
+    validate_activity_cursors(**_bounds())
+
+
+def test_одиночная_отметка_активности_законна():
+    # Объявлена контрактом сегодня и означает строго «старше отметки».
+    # Отвергать её значило бы сузить уже обещанное поведение.
+    validate_activity_cursors(**_bounds(before_activity_at=NOW))
+
+
+def test_второй_компонент_без_первого_отвергается():
+    # Сам по себе идентификатор границы не задаёт: он не «граница
+    # по идентификатору», а половина пары, и второй половины нет.
+    with pytest.raises(InvalidCursor):
+        validate_activity_cursors(
+            **_bounds(before_conversation_id=ConversationId(uuid.uuid4()))
+        )
+
+
+def test_пара_курсора_законна():
+    validate_activity_cursors(
+        **_bounds(
+            before_activity_at=NOW,
+            before_conversation_id=ConversationId(uuid.uuid4()),
+        )
+    )
+
+
+def test_наивная_отметка_отвергается():
+    # Наивную дату `asyncpg` истолкует по местной зоне процесса, а не
+    # по UTC: ответ был бы посчитан не на тот вопрос, который задал
+    # клиент, и заметно это стало бы только на машине с другой зоной.
+    with pytest.raises(InvalidCursor):
+        validate_activity_cursors(
+            **_bounds(before_activity_at=datetime(2026, 9, 14, 12, 0))
+        )
+
+
+def test_отметка_в_любой_зоне_кроме_utc_законна():
+    # Требование — смещение, а не именно UTC: один и тот же момент
+    # в другой зоне остаётся тем же моментом.
+    validate_activity_cursors(
+        **_bounds(before_activity_at=NOW.astimezone(timezone(timedelta(hours=3))))
+    )
+
+
+def test_страница_по_умолчанию_пуста_и_без_продолжения():
+    page = ConversationPage()
+    assert page.items == () and not page.has_more
+
+
+def test_курсор_без_второго_компонента_различим():
+    # Разные варианты — разные состояния, а не «пара с пустым
+    # идентификатором»: одиночный курсор означает «строго старше
+    # отметки», и смешивать их нельзя.
+    пара = ActivityCursor(
+        updated_at=NOW, conversation_id=ConversationId(uuid.uuid4())
+    )
+    одиночный = ActivityCursor(updated_at=NOW)
+    assert пара.conversation_id is not None
+    assert одиночный.conversation_id is None
+    assert пара != одиночный
