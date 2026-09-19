@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from messenger.domain.authorization import Decision
+from messenger.domain.authorization import Action, Decision, ResourceRef
 from messenger.domain.errors import Reason, Visibility
 from messenger.domain.ids import ConversationId, ConversationSeq, UserId
 from messenger.domain.receipts import InvalidReceipt, ReadState, Receipts
@@ -161,6 +161,48 @@ def test_запись_получает_нормализованную_пару(m
     assert записанное["read_seq"] == 5
     assert записанное["user_id"] == VIEWER_ID
     assert записанное["conversation_id"] == CONVERSATION
+
+
+def test_право_запрашивается_на_чтение_и_на_свою_беседу(monkeypatch):
+    # Квитанция подтверждает **читаемое** состояние, а не изменяет беседу.
+    # Разница не косметическая: по записанной модели
+    # (docs/messenger/08-authorization.md) блокировка запрещает `write`
+    # обеим сторонам, но оставляет `read` старой истории. Спроси сервис
+    # `WRITE_CONVERSATION` — и в тот день, когда появится блокировка,
+    # заблокированный не сможет сдвинуть собственный `last_read_seq`:
+    # квитанция отвергнется, непрочитанное зависнет, а на нём стоит `G3-003`.
+    #
+    # Проверять это обязательно **здесь**: подмены в этом файле принимают
+    # `**kwargs` и не видят ни действия, ни ресурса. Поэтому неверный
+    # `Action` — и точно так же право, спрошенное про чужую беседу, —
+    # проходят мимо всех остальных проверок файла, оставаясь зелёными.
+    #
+    # `membership_cache` в вызове быть не должно: ветка кеша в
+    # `authorization._conversation` требует **обоих** условий — действия
+    # `READ` и непустого кеша, — и свежесть членства держится именно вторым.
+    # Проверка идёт соединением писателя, поэтому чтение членства из Postgres
+    # здесь не ослабляется.
+    seen: dict[str, object] = {}
+
+    async def _разрешить(conn, **kwargs):
+        seen.update(kwargs)
+        return Decision.allow()
+
+    async def _голова(conn, *, conversation_id):
+        return ConversationSeq(9)
+
+    async def _записать(conn, **kwargs):
+        return ReadState(delivered_seq=ConversationSeq(3), read_seq=ConversationSeq(3))
+
+    monkeypatch.setattr(service.authorization, "authorize", _разрешить)
+    monkeypatch.setattr(service.conversations, "fetch_last_seq", _голова)
+    monkeypatch.setattr(service.read_states, "upsert_read_state", _записать)
+
+    result = _set(Connection())
+    assert result.ok
+    assert seen["action"] is Action.READ_CONVERSATION
+    assert seen["resource"] == ResourceRef.conversation(CONVERSATION)
+    assert "membership_cache" not in seen
 
 
 def test_сервис_возвращает_состояние_из_базы_а_не_присланное(monkeypatch):
