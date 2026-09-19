@@ -34,6 +34,14 @@ TRACE_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 SPAN_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "span_id", default=None
 )
+# OWASP Logging Cheat Sheet называет source IP обязательным полем для
+# security-событий ("Where"), рядом с "Who" (user_id) и "When"
+# (timestamp) - тем же контуром, что и trace_id/span_id/request_id:
+# сервисный слой не знает про HTTP, значит заполняет не он, а обработчик
+# журнала из контекста задачи.
+CLIENT_IP: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "client_ip", default=None
+)
 
 # Потоки журналов из контракта телеметрии. У каждого свой срок хранения,
 # поэтому запись без потока хранить правильно нельзя: один срок на всё -
@@ -85,7 +93,7 @@ EVENT_LIBRARY = "library"
 ENVELOPE = (
     "timestamp", "level", "service", "environment", "version",
     "event", "result", "error_code",
-    "trace_id", "span_id", "request_id",
+    "trace_id", "span_id", "request_id", "client_ip",
     "message_id", "event_id",
     STREAM_FIELD, "logger",
 )
@@ -182,6 +190,8 @@ class JsonFormatter(logging.Formatter):
                     value = TRACE_ID.get()
                 elif field == "span_id":
                     value = SPAN_ID.get()
+                elif field == "client_ip":
+                    value = CLIENT_IP.get()
             out[field] = value
 
         # Всё, что вызывающий положил в extra, проходит вычистку.

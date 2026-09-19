@@ -689,7 +689,30 @@ async def observe(request: Request, call_next):
     # после ответа клиенту продолжается в отправителе и потребителе.
     incoming = trace.parse(request.headers.get(trace.HEADER))
 
+    # OWASP Logging Cheat Sheet называет source IP обязательным полем
+    # для security-событий ("Where", рядом с "Who"/user_id и
+    # "When"/timestamp) - его не было в конверте вовсе.
+    #
+    # Первое значение X-Forwarded-For, а не request.client.host: заголовок
+    # проверки (`request.client.host`) внутри пода — это edge-gateway
+    # (единственная точка входа снаружи, Gateway API на cilium-envoy,
+    # gitops/02-infra/edge-gateway), а не браузер. Envoy по умолчанию
+    # добавляет реальный адрес клиента в X-Forwarded-For на границе, а
+    # не ретранслирует чужой, - тот же принцип доверия, что уже описан
+    # для Keycloak (`proxy.headers: xforwarded`,
+    # gitops/04-messenger/messenger-keycloak/manifests/keycloak.yaml).
+    # Явно не проверено на живом кластере (нет внешнего запроса, которым
+    # можно было бы это подтвердить) - если Envoy сконфигурирован иначе,
+    # здесь окажется значение, которое сумеет подставить сам клиент.
+    forwarded_for = request.headers.get("x-forwarded-for")
+    client_ip = (
+        forwarded_for.split(",")[0].strip()
+        if forwarded_for
+        else (request.client.host if request.client else None)
+    )
+
     token = logging_envelope.REQUEST_ID.set(request_id)
+    client_ip_token = logging_envelope.CLIENT_IP.set(client_ip)
     try:
         # Спан охватывает и обработку, и запись журнала обращений.
         # Закрыть его сразу после `call_next` - ошибка, которую не видно
@@ -821,6 +844,7 @@ async def observe(request: Request, call_next):
             return response
     finally:
         logging_envelope.REQUEST_ID.reset(token)
+        logging_envelope.CLIENT_IP.reset(client_ip_token)
 
 
 @app.get("/livez")
