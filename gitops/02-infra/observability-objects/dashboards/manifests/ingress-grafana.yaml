@@ -1,7 +1,7 @@
 # Gives Grafana a real, stable hostname - same *.finops.local convention as
 # checkout/analytics/opencost - so alert annotations and dashboard data
-# links (see application-overview.yaml, application-slo.yaml) can carry an
-# absolute URL that works from outside a browser session already pointed at
+# links (see victoria-stack/rules/messenger-slo.yaml) can carry an absolute
+# URL that works from outside a browser session already pointed at
 # a kubectl port-forward.
 apiVersion: networking.k8s.io/v1
 kind: Ingress

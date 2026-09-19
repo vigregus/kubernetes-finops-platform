@@ -1,0 +1,102 @@
+# SLO мессенджера на реальных product-метриках, а не на generic
+# http_requests_total. Заменяет application-slo.yaml, который был
+# унаследован от списанного демо checkout/analytics и никогда не
+# пересчитывался на messenger_* метрики - зелёный HTTP-код там означал
+# "процесс ответил", а не "сообщение доставлено", ровно то смешение,
+# от которого предостерегает docs/messenger/06-observability.md
+# ("SLO принадлежат пользователю, а не Kafka").
+#
+# Сейчас измерим честно только один SLO из каталога - "Запись сообщения"
+# (messenger_message_send_operations_total/messenger_message_commit_duration_seconds,
+# см. apps/messenger/messenger/services/messages.py). SLO "Доставка онлайн"
+# из документа определён как "коммит -> подтверждение хотя бы одного
+# устройства", а подтверждения устройства в системе ещё нет - это
+# телеметрия браузера, G3 по гейтам документа. Строить burn-rate на
+# messenger_realtime_delivery_total (публикация в Centrifugo, не ack
+# браузера) значило бы выдать суррогат за настоящий SLI - тот же обман,
+# который эта замена как раз устраняет для http_requests_total. Вместо
+# этого ниже - диагностический p99-алерт на приближении T_delivery,
+# без бюджета ошибок, с этим ограничением явно в description.
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMRule
+metadata:
+  name: messenger-slo
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: victoria-metrics-k8s-stack
+spec:
+  groups:
+    - name: messenger-slo
+      interval: 20s
+      rules:
+        - alert: MessageCommitHighLatencyP99
+          expr: |
+            histogram_quantile(0.99, sum by (service, le) (rate(messenger_message_commit_duration_seconds_bucket{namespace=~"dev|stage|prod"}[5m])))
+              > 1
+          for: 5m
+          labels:
+            severity: warning
+            finops.internal/component: messenger
+          annotations:
+            summary: '{{ $labels.service }}: p99 T_commit {{ $value | printf "%.3f" }}s (>1s for 5m)'
+            description: 'Коммит сообщения (вставка + обе записи outbox одной транзакцией) держит p99 выше целевой 1с (SLO "Запись сообщения", docs/messenger/06-observability.md). membership.check внутри той же транзакции - первое, что стоит проверить: он и есть блокировка строки беседы.'
+
+        - alert: MessageDeliveryHighLatencyP99Approx
+          expr: |
+            histogram_quantile(0.99, sum by (service, le) (rate(messenger_message_delivery_duration_seconds_bucket{namespace=~"dev|stage|prod"}[5m])))
+              > 2
+          for: 5m
+          labels:
+            severity: info
+            finops.internal/component: messenger
+          annotations:
+            summary: '{{ $labels.service }}: p99 T_delivery (приближение) {{ $value | printf "%.3f" }}s (>2s for 5m)'
+            description: 'Диагностика, не SLO: значение измеряет occurred_at -> публикация в Centrifugo, а не подтверждение браузера получателя (его пока нет - G3). Реальная доставка может быть медленнее или всё ещё "успешной" по SLO, которого здесь физически нет.'
+
+    # Multi-window multi-burn-rate по SRE workbook - та же форма, что была
+    # в application-slo.yaml (окна и множители совпадают с docs/messenger/
+    # 06-observability.md, часть 5: 5м+1ч / 30м+6ч / 6ч+3д), но числитель
+    # и знаменатель теперь messenger_message_send_operations_total, а не
+    # http_requests_total чужого приложения. SLO = 99.95%, как в каталоге
+    # SLI документа для "Запись сообщения".
+    - name: messenger-slo-burn
+      interval: 30s
+      rules:
+        - alert: MessageCommitErrorBudgetBurnFast
+          # 14.4x исчерпывает 30-дневный бюджет примерно за 50 часов.
+          expr: |
+            ((1 - (sum by (service, namespace) (rate(messenger_message_send_operations_total{namespace=~"dev|stage|prod",result="success"}[1h])) / clamp_min(sum by (service, namespace) (rate(messenger_message_send_operations_total{namespace=~"dev|stage|prod"}[1h])), 0.001))) / (1 - 0.9995) > 14.4) and ((1 - (sum by (service, namespace) (rate(messenger_message_send_operations_total{namespace=~"dev|stage|prod",result="success"}[5m])) / clamp_min(sum by (service, namespace) (rate(messenger_message_send_operations_total{namespace=~"dev|stage|prod"}[5m])), 0.001))) / (1 - 0.9995) > 14.4)
+          for: 2m
+          labels:
+            severity: critical
+            finops.internal/component: messenger
+          annotations:
+            summary: '{{ $labels.service }}/{{ $labels.namespace }}: бюджет ошибок записи сообщения сгорает в 14.4x (будить)'
+            description: 'При таком темпе 30-дневный бюджет "Запись сообщения" (SLO 99.95%) кончится примерно за двое суток. messenger_message_commit_duration_seconds{result="failed"} рядом - отказ базы, а не отклонённый домен (NOT_A_MEMBER в счёт не идёт).'
+            dashboard_url: 'http://grafana.finops.local/d/messenger-slo-overview/messenger-slo-overview?orgId=1&var-namespace={{ $labels.namespace }}&from={{ ($activeAt.Add (parseDurationTime "-15m")).UnixMilli }}&to={{ ($activeAt.Add (parseDurationTime "5m")).UnixMilli }}'
+            logs_url: 'http://grafana.finops.local/explore?schemaVersion=1&panes=%7B%22e1w%22%3A%7B%22datasource%22%3A%22victorialogs%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22expr%22%3A%22%7Bnamespace%3D%5C%22{{ $labels.namespace }}%5C%22%7D%20app%3A~%5C%22{{ $labels.service }}%5C%22%20event%3A%22message_commit_failed%5C%22%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22{{ ($activeAt.Add (parseDurationTime "-15m")).UnixMilli }}%22%2C%22to%22%3A%22{{ ($activeAt.Add (parseDurationTime "5m")).UnixMilli }}%22%7D%7D%7D&orgId=1'
+            traces_url: 'http://grafana.finops.local/explore?schemaVersion=1&panes=%7B%22e1w%22%3A%7B%22datasource%22%3A%22tempo%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22queryType%22%3A%22traceql%22%2C%22query%22%3A%22%7Bresource.service.name%3D%5C%22{{ $labels.service }}%5C%22%20%26%26%20status%3Derror%7D%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22{{ ($activeAt.Add (parseDurationTime "-15m")).UnixMilli }}%22%2C%22to%22%3A%22{{ ($activeAt.Add (parseDurationTime "5m")).UnixMilli }}%22%7D%7D%7D&orgId=1'
+
+        - alert: MessageCommitErrorBudgetBurnModerate
+          # 6x исчерпывает бюджет примерно за пять суток.
+          expr: |
+            ((1 - (sum by (service, namespace) (rate(messenger_message_send_operations_total{namespace=~"dev|stage|prod",result="success"}[6h])) / clamp_min(sum by (service, namespace) (rate(messenger_message_send_operations_total{namespace=~"dev|stage|prod"}[6h])), 0.001))) / (1 - 0.9995) > 6) and ((1 - (sum by (service, namespace) (rate(messenger_message_send_operations_total{namespace=~"dev|stage|prod",result="success"}[30m])) / clamp_min(sum by (service, namespace) (rate(messenger_message_send_operations_total{namespace=~"dev|stage|prod"}[30m])), 0.001))) / (1 - 0.9995) > 6)
+          for: 5m
+          labels:
+            severity: warning
+            finops.internal/component: messenger
+          annotations:
+            summary: '{{ $labels.service }}/{{ $labels.namespace }}: бюджет ошибок записи сообщения сгорает в 6x'
+            description: 'Устойчиво в течение шести часов. Не повод будить, но при таком темпе бюджет месяца не переживёт.'
+
+        - alert: MessageCommitErrorBudgetBurnSlow
+          # 1x означает, что бюджет кончится ровно к концу окна.
+          expr: |
+            ((1 - (sum by (service, namespace) (rate(messenger_message_send_operations_total{namespace=~"dev|stage|prod",result="success"}[3d])) / clamp_min(sum by (service, namespace) (rate(messenger_message_send_operations_total{namespace=~"dev|stage|prod"}[3d])), 0.001))) / (1 - 0.9995) > 1) and ((1 - (sum by (service, namespace) (rate(messenger_message_send_operations_total{namespace=~"dev|stage|prod",result="success"}[6h])) / clamp_min(sum by (service, namespace) (rate(messenger_message_send_operations_total{namespace=~"dev|stage|prod"}[6h])), 0.001))) / (1 - 0.9995) > 1)
+          for: 30m
+          labels:
+            severity: info
+            finops.internal/component: messenger
+          annotations:
+            summary: '{{ $labels.service }}/{{ $labels.namespace }}: на темпе, который потратит весь месячный бюджет записи сообщения'
+            description: 'Медленная утечка, а не авария: при таком темпе цель выполняется впритык, без запаса. Сигнал вложиться в надёжность, а не отгружать новый риск.'
