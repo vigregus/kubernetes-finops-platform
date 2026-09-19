@@ -2,19 +2,16 @@ name: Контракты и миграции
 
 # Блокирует слияние. Смысл в одном: несовместимое изменение контракта
 # и неприменимая миграция обязаны падать здесь, а не у того, кто выкатывает.
+#
+# Фильтра по путям у pull_request намеренно нет. Он был, и вместе с
+# обязательными проверками это несовместимо: PR, не трогающий перечисленные
+# пути, не запустил бы workflow вовсе, обязательная проверка осталась бы
+# в состоянии «ожидание», и такой PR не смёржился бы никогда. Проверка,
+# которая иногда не выполняется, не может быть условием слияния. Пути
+# перечислены в push, где они ничего не ломают, — но и там от них толку
+# мало: на push сравнивать не с чем, кроме предыдущего коммита.
 on:
   pull_request:
-    paths:
-      - 'packages/contracts/**'
-      - 'apps/messenger/**'
-      - 'scripts/check-layers.py'
-      - 'scripts/check-migrations.py'
-      - 'scripts/check-kafka-security.py'
-      - 'scripts/check-log-streams.py'
-      - 'db/**'
-      - 'gitops/02-infra/kafka-cluster/manifests/kafka.yaml'
-      - 'gitops/04-messenger/messenger-kafka-topics/manifests/**'
-      - '.github/workflows/contracts.yml'
   push:
     branches: [main]
 

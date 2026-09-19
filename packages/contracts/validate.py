@@ -9,6 +9,16 @@
    можно только осознанно, а не случайно, потому что по ту сторону контракта
    уже работает чужой код.
 
+Осознанный разрыв объявляется в compat-allowlist.yaml — поимённо, с датой и
+причиной. Проверка при этом не ослабляется: разрешённой становится ровно
+названная записью пара (вид, имя), всё остальное остаётся ошибкой. Список
+закрыт и не расширяется, как GRANDFATHERED в проверке миграций.
+
+Разрешение одноразовое, и держится это не обещанием убрать запись, а отказом
+собираться, пока она лежит: запись, не совпавшая ни с одним разрывом, — это
+ошибка. Пока разрыв есть, запись совпадает с ним; как только он попал в базу
+сравнения, совпадать перестаёт, и следующий запуск требует её удалить.
+
 Сравнение идёт с версией из указанной ревизии git. Без базы для сравнения
 выполняется только первая проверка — и об этом сказано вслух, чтобы отсутствие
 второй не выглядело как её успешное прохождение.
@@ -22,6 +32,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parent
 OPENAPI = ROOT / "openapi.yaml"
+ALLOWLIST = ROOT / "compat-allowlist.yaml"
 
 
 def load(path: Path):
@@ -116,13 +127,53 @@ def schemas_of(doc):
     return {"": doc}
 
 
+ALLOWED_KINDS = ("field", "field_type", "required", "route")
+
+
+def load_allowlist(errors):
+    """Осознанные разрывы. Отсутствие файла — не ошибка: тогда разрешено ничего."""
+    if not ALLOWLIST.exists():
+        return []
+    try:
+        doc = yaml.safe_load(ALLOWLIST.read_text(encoding="utf-8")) or {}
+    except Exception as exc:  # noqa: BLE001 - причина важнее типа
+        errors.append(f"compat-allowlist.yaml: не разобран — {exc}")
+        return []
+    entries = doc.get("allowed") or []
+    if not isinstance(entries, list):
+        errors.append("compat-allowlist.yaml: «allowed» обязан быть списком")
+        return []
+
+    valid = []
+    for i, entry in enumerate(entries, start=1):
+        if not isinstance(entry, dict) or not {"path", "kind", "name"} <= set(entry):
+            errors.append(f"compat-allowlist.yaml: запись {i}: нет path/kind/name")
+            continue
+        if entry["kind"] not in ALLOWED_KINDS:
+            errors.append(
+                f"compat-allowlist.yaml: запись {i}: неизвестный вид {entry['kind']!r}, "
+                f"бывает {', '.join(ALLOWED_KINDS)}"
+            )
+            continue
+        valid.append(entry)
+    return valid
+
+
 def check_compat(base_rev, errors, notes):
+    # Находки собираются тройками (вид, имя, сообщение) и только потом делятся
+    # на разрешённые и нет. Сопоставление — по виду и имени, а не по тексту
+    # сообщения: текст можно переформулировать, а разрешение обязано остаться
+    # привязанным к самому элементу контракта.
+    allowed = {(e["path"], e["kind"], e["name"]): e for e in load_allowlist(errors)}
+    matched = set()
+
     for path in [OPENAPI, *sorted(ROOT.glob("kafka/*.json")), *sorted(ROOT.glob("websocket/*.json"))]:
         old = load_from_git(base_rev, path)
         if old is None:
             notes.append(f"{path.name}: новый файл, сравнивать не с чем")
             continue
         new = load(path)
+        findings = []
 
         old_props, new_props = {}, {}
         for name, schema in schemas_of(old).items():
@@ -132,12 +183,12 @@ def check_compat(base_rev, errors, notes):
 
         for key, old_type in old_props.items():
             if key not in new_props:
-                errors.append(f"{path.name}: поле {key} удалено")
+                findings.append(("field", key, f"поле {key} удалено"))
             elif new_props[key] != old_type:
-                errors.append(
-                    f"{path.name}: у поля {key} изменился тип "
-                    f"{old_type!r} → {new_props[key]!r}"
-                )
+                findings.append((
+                    "field_type", key,
+                    f"у поля {key} изменился тип {old_type!r} → {new_props[key]!r}",
+                ))
 
         # Новое обязательное поле ломает старого отправителя так же надёжно,
         # как удалённое — старого получателя.
@@ -147,12 +198,42 @@ def check_compat(base_rev, errors, notes):
                 continue
             added = set(schema.get("required") or []) - set(old_schema.get("required") or [])
             for field in sorted(added):
-                errors.append(f"{path.name}: поле {name}.{field} стало обязательным")
+                findings.append((
+                    "required", f"{name}.{field}",
+                    f"поле {name}.{field} стало обязательным",
+                ))
 
         if "openapi" in new:
             removed = set(old.get("paths", {})) - set(new.get("paths", {}))
             for route in sorted(removed):
-                errors.append(f"{path.name}: маршрут {route} удалён")
+                findings.append(("route", route, f"маршрут {route} удалён"))
+
+        for kind, name, message in findings:
+            key = (path.name, kind, name)
+            entry = allowed.get(key)
+            if entry is None:
+                errors.append(f"{path.name}: {message}")
+                continue
+            matched.add(key)
+            notes.append(
+                f"{path.name}: {message} — разрешено осознанно "
+                f"({entry.get('since', '?')}): {entry.get('reason', 'причина не указана')}"
+            )
+
+    # Запись, которой не нашлось разрыва, — это ошибка, а не замечание.
+    # Сопоставление идёт по (вид, имя), поэтому забытая запись однажды
+    # разрешит чужой разрыв: удалят другой маршрут с тем же именем, и
+    # проверка промолчит. Одноразовость держится не обещанием её убрать,
+    # а отказом собираться, пока она лежит. Пока запись нужна, она совпадает
+    # с находкой; когда разрыв попал в базу сравнения, совпадать перестаёт —
+    # и следующий же запуск требует её удалить.
+    for key, entry in allowed.items():
+        if key not in matched:
+            errors.append(
+                f"compat-allowlist.yaml: {entry['kind']} {entry['name']} "
+                f"({entry['path']}) не совпал ни с одним разрывом — удалить. "
+                f"Пока он лежит, он разрешит будущее удаление с тем же именем."
+            )
 
 
 def main():
