@@ -70,74 +70,86 @@ async def run(stop: asyncio.Event) -> None:
     log.info("потребитель запущен", extra={"event": "service_start", "result": "success"})
 
     while not stop.is_set():
-        if not await subscriber.start():
-            metrics.dependency_up("kafka", up=False)
-            await _sleep(stop, 2.0)
-            continue
-        metrics.dependency_up("kafka", up=True)
+        # Спан вокруг всей итерации, а не только вокруг обработки пачки:
+        # `subscriber.start()` (при переподключении) и особенно
+        # `cache.healthy()` (PING в Redis) выполняются инструментированными
+        # клиентами и создают собственные спаны независимо от того, открыт
+        # ли уже какой-то span в контексте. Без внешнего span у PING нет
+        # родителя, и он заводит СВОЮ отдельную трассу на каждую итерацию -
+        # замерено на живом Tempo: 159 таких трасс-сирот `PING` из 1000
+        # сохранённых за час, наравне со 147 настоящими `consumer-realtime`.
+        # Тот же класс проблемы, что и с asyncpg-сбросом соединения в
+        # repositories/postgres.py.
+        with tracing.span("consumer-realtime-cycle"):
+            if not await subscriber.start():
+                metrics.dependency_up("kafka", up=False)
+                await _sleep(stop, 2.0)
+                continue
+            metrics.dependency_up("kafka", up=True)
 
-        # Кеш проверяется до чтения: без него нечем ни собрать пару,
-        # ни отсеять повтор, и обработка превратилась бы в раздачу
-        # дублей. Лучше не читать вовсе - события подождут в Kafka.
-        if not await cache.healthy():
-            metrics.dependency_up("redis", up=False)
-            await _sleep(stop, 2.0)
-            continue
-        metrics.dependency_up("redis", up=True)
+            # Кеш проверяется до чтения: без него нечем ни собрать пару,
+            # ни отсеять повтор, и обработка превратилась бы в раздачу
+            # дублей. Лучше не читать вовсе - события подождут в Kafka.
+            if not await cache.healthy():
+                metrics.dependency_up("redis", up=False)
+                await _sleep(stop, 2.0)
+                continue
+            metrics.dependency_up("redis", up=True)
 
-        try:
-            # Корень на пачку, а не на запись: так решений хвостовой
-            # выборки меньше, а `decision_wait` коллектора можно держать
-            # коротким. Вид CONSUMER - это операция `process` по таблице
-            # спецификации: потребитель обрабатывает принятую пачку.
-            with tracing.span(
-                "consumer-realtime",
-                kind=tracing.CONSUMER,
-                attributes={"messaging.pipeline.stage": STAGE},
-            ) as batch:
-                # А вот это `receive`, и спецификация назначает ей вид
-                # CLIENT, а не CONSUMER. Неочевидно настолько, что
-                # читатель, «поправивший» здесь на CONSUMER, сломает
-                # разбор связи между производителем и потребителем.
-                with tracing.span("kafka.consume", kind=tracing.CLIENT) as consume:
-                    events = await subscriber.poll()
-                    consume.set_attribute("messaging.batch.message_count", len(events))
-                if events:
-                    batch.set_attribute("messaging.batch.message_count", len(events))
-                    # T_consumer: от получения пачки до фиксации смещения.
-                    # Считается только когда есть что обрабатывать - иначе
-                    # время между пустыми опросами (оно же `poll` timeout)
-                    # смешалось бы с временем настоящей работы, и гистограмма
-                    # отвечала бы не на "долго ли обрабатывали", а на
-                    # "сколько раз в Kafka ничего не было".
-                    processing_started = time.perf_counter()
-                    for topic, headers, body in events:
-                        # Контекст создателя берётся из заголовка, а тело -
-                        # запасной путь: заголовок ставит отправитель, и он
-                        # есть даже у записи, которую потребитель отбросит
-                        # не разбирая. На него ставится ссылка, а не
-                        # родительство: пачка приходит от многих отправителей,
-                        # а родитель у спана только один.
-                        #
-                        # Своя трасса начинается здесь, а не продолжается
-                        # чужая: трасса отправителя завершилась вместе
-                        # с его работой, и её длительность о работе
-                        # потребителя ничего не говорит.
-                        await realtime_delivery.handle_event(
-                            topic=topic, body=body, cache=cache, centrifugo=client,
-                            link=trace.origin_from(headers, body),
+            try:
+                # Корень пачки - дочерний относительно span'а цикла, а не
+                # трассы: так решений хвостовой выборки меньше, а
+                # `decision_wait` коллектора можно держать коротким. Вид
+                # CONSUMER - это операция `process` по таблице
+                # спецификации: потребитель обрабатывает принятую пачку.
+                with tracing.span(
+                    "consumer-realtime",
+                    kind=tracing.CONSUMER,
+                    attributes={"messaging.pipeline.stage": STAGE},
+                ) as batch:
+                    # А вот это `receive`, и спецификация назначает ей вид
+                    # CLIENT, а не CONSUMER. Неочевидно настолько, что
+                    # читатель, «поправивший» здесь на CONSUMER, сломает
+                    # разбор связи между производителем и потребителем.
+                    with tracing.span("kafka.consume", kind=tracing.CLIENT) as consume:
+                        events = await subscriber.poll()
+                        consume.set_attribute("messaging.batch.message_count", len(events))
+                    if events:
+                        batch.set_attribute("messaging.batch.message_count", len(events))
+                        # T_consumer: от получения пачки до фиксации смещения.
+                        # Считается только когда есть что обрабатывать - иначе
+                        # время между пустыми опросами (оно же `poll` timeout)
+                        # смешалось бы с временем настоящей работы, и гистограмма
+                        # отвечала бы не на "долго ли обрабатывали", а на
+                        # "сколько раз в Kafka ничего не было".
+                        processing_started = time.perf_counter()
+                        for topic, headers, body in events:
+                            # Контекст создателя берётся из заголовка, а тело -
+                            # запасной путь: заголовок ставит отправитель, и он
+                            # есть даже у записи, которую потребитель отбросит
+                            # не разбирая. На него ставится ссылка, а не
+                            # родительство: пачка приходит от многих отправителей,
+                            # а родитель у спана только один.
+                            #
+                            # Своя трасса начинается здесь, а не продолжается
+                            # чужая: трасса отправителя завершилась вместе
+                            # с его работой, и её длительность о работе
+                            # потребителя ничего не говорит.
+                            await realtime_delivery.handle_event(
+                                topic=topic, body=body, cache=cache, centrifugo=client,
+                                link=trace.origin_from(headers, body),
+                            )
+                        await subscriber.commit()
+                        metrics.consumer_processing_duration(
+                            time.perf_counter() - processing_started, consumer="realtime"
                         )
-                    await subscriber.commit()
-                    metrics.consumer_processing_duration(
-                        time.perf_counter() - processing_started, consumer="realtime"
-                    )
-        except Exception as exc:  # noqa: BLE001 - цикл обязан пережить любой отказ
-            log.warning(
-                "цикл потребителя прерван",
-                extra={"event": "realtime_cycle", "result": "failed",
-                       "error_code": type(exc).__name__},
-            )
-            await _sleep(stop, 1.0)
+            except Exception as exc:  # noqa: BLE001 - цикл обязан пережить любой отказ
+                log.warning(
+                    "цикл потребителя прерван",
+                    extra={"event": "realtime_cycle", "result": "failed",
+                           "error_code": type(exc).__name__},
+                )
+                await _sleep(stop, 1.0)
 
     await subscriber.stop()
     await cache.close()

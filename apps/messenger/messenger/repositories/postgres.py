@@ -20,6 +20,8 @@ from dataclasses import dataclass
 
 import asyncpg
 
+from messenger.telemetry import tracing
+
 
 @dataclass(frozen=True, slots=True)
 class PoolSettings:
@@ -98,9 +100,25 @@ async def connection(
     Существует, чтобы сервисный слой не знал имени драйвера: вызывающий
     получает `conn`, которое обязан передать репозиторию, и владеет
     транзакцией сам.
+
+    Спан вокруг всего блока — не про работу внутри него (её уже накрывают
+    свои спаны вызывающего), а про сам возврат соединения в пул.
+    `pool.release()` выполняет сброс сессии (`pg_advisory_unlock_all()`,
+    `CLOSE ALL`, `UNLISTEN *`, `RESET ALL`) при выходе из `pool.acquire()`,
+    и инструментация asyncpg этот запрос тоже трассирует. В воркерах
+    (outbox-relay, consumer-realtime) к этому моменту span вызывающего
+    (`tracing.span("outbox-relay", ...)`) уже закрыт - цикл его закрывает
+    раньше, чем освобождает соединение, - и запрос сброса заводил себе
+    отдельную, ничем не связанную трассу на каждый возврат в пул. Замерено
+    на живом Tempo: 348 из 1000 сохранённых трасс за час были именно такими
+    осиротевшими `SELECT`, наравне с `outbox-relay` (326) - то есть шум
+    отъедал половину 5%-бюджета хвостовой выборки у настоящей работы.
+    В API-пути это было не видно: там span запроса остаётся открытым до
+    самого ответа клиенту, то есть дольше, чем живёт соединение.
     """
-    async with pool.acquire(timeout=timeout) as conn:
-        yield conn
+    with tracing.span("postgres.connection"):
+        async with pool.acquire(timeout=timeout) as conn:
+            yield conn
 
 
 def stats(pool: asyncpg.Pool) -> PoolStats:
