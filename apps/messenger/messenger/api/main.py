@@ -22,7 +22,7 @@ from urllib.parse import parse_qs
 from fastapi import FastAPI, Response
 from fastapi.responses import JSONResponse
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.requests import Request
 
 from messenger.domain.conversation_list import (
@@ -1126,6 +1126,24 @@ class SetReceipts(BaseModel):
     раздвоили одну ошибку клиента на два кода. Это то же записанное
     решение, что и для курсоров, — проверка живёт в домене, ответ
     собирается `_invalid_receipt`.
+
+    А вот **тип** поля — правило транспорта, и оно исполняется здесь.
+    Контракт объявляет оба поля необязательными **не-null** целыми
+    (`type: integer`, без `nullable`), и необязательность в OpenAPI
+    значит «ключ можно не присылать», а не «можно прислать `null`».
+    `int | None` этого не выражает: Pydantic в обычном режиме приводит
+    `"3"` к `3`, `true`/`false` — к `1`/`0`, а явный `null` становится
+    тем же `None`, которым помечено «поля не было», — и тело
+    `{"read_seq": 3, "delivered_seq": null}` проходит валидатор «хотя бы
+    один номер», выглядя полностью законным. `false` тут опаснее всех:
+    он применяется как «прочитано ничего» и отвечает `200`, то есть
+    клиент с булевым там, где ждут номер, не узнает об этом никогда.
+    Ровно поэтому отвергается и опечатка `red_seq`; «поглотить молча» —
+    и есть дефект.
+
+    `3.0` при этом проходит намеренно: `type: integer` в JSON Schema
+    совпадает с любым числом без дробной части, и запрещать его было бы
+    самоуправством. `3.5` отвергает сам Pydantic.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -1135,6 +1153,23 @@ class SetReceipts(BaseModel):
     # области, ограниченной снизу нулём, различить их больше нечем.
     delivered_seq: int | None = None
     read_seq: int | None = None
+
+    @field_validator("delivered_seq", "read_seq", mode="before")
+    @classmethod
+    def _integer_if_present(cls, value: object) -> object:
+        """Отвергает то, что контракт не разрешает, но Pydantic привёл бы.
+
+        Вызывается только для **присутствующего** поля: у отсутствующего
+        берётся умолчание, и валидатор не зовётся. Поэтому `null` здесь
+        означает ровно «прислали `null`» — то, что контракт запрещает, —
+        а не «поля не было».
+        """
+        if value is None:
+            raise ValueError("значение не может быть null: назовите число или уберите ключ")
+        # `bool` — подкласс `int`, и без этой ветки `true` прошёл бы как `1`.
+        if isinstance(value, str | bool):
+            raise ValueError("ожидается целое число")
+        return value
 
     @model_validator(mode="after")
     def _require_a_number(self) -> SetReceipts:
