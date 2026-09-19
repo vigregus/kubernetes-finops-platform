@@ -112,6 +112,30 @@ EVENTS: dict[str, str] = {
     "verify_email_sent": "security",
 }
 
+# `security` отвечает на вопрос «кого пустили, кого нет и почему» - без
+# идентификатора субъекта запись не отвечает на «кого», только на «что».
+# Найдено не по коду - живым запросом к VictoriaLogs, где `user_created`
+# оказался текстом "заведена учётная запись" без единого поля о том, чья
+# запись. Восемь событий из двенадцати несли этот же пробел молча:
+# `user_id` был доступен в коде каждого вызова и просто не передавался.
+#
+# Два вида исключения, а не одно:
+#
+#   - субъект решения по построению неизвестен (обмен токена ещё не
+#     привязан к профилю, отказ случился до того, как личность
+#     установлена) - требовать здесь `user_id` значило бы требовать
+#     выдуманное значение;
+#   - решение принято не по учётной записи, а по другому ключу
+#     (`rate_limit_degraded` - лимитер общий, и субъект решения - это
+#     ключ лимита, а не обязательно пользователь).
+SECURITY_SUBJECT_UNKNOWN = frozenset({
+    "token_exchange", "token_rejected", "login_rejected",
+})
+SECURITY_SUBJECT_FIELD: dict[str, str] = {
+    "rate_limit_degraded": "key",
+}
+DEFAULT_SECURITY_SUBJECT_FIELD = "user_id"
+
 # Значения констант потока из `telemetry/logging.py`. Проверка читает их
 # оттуда же, откуда берёт код: список, переписанный сюда руками, однажды
 # разойдётся с тем, что на самом деле уедет в хранилище.
@@ -229,6 +253,16 @@ def main() -> int:
                     f"{where}: `{event}` уходит в `{stream or APPLICATION}`, "
                     f"а по каталогу это `{expected}` — срок хранения будет чужой"
                 )
+
+            if expected == "security" and event not in SECURITY_SUBJECT_UNKNOWN:
+                subject_field = SECURITY_SUBJECT_FIELD.get(
+                    event, DEFAULT_SECURITY_SUBJECT_FIELD
+                )
+                if subject_field not in extra:
+                    violations.append(
+                        f"{where}: `{event}` в security без `{subject_field}` — "
+                        f"«кого пустили, кого нет и почему» без «кого»"
+                    )
 
     stale = sorted(set(EVENTS) - seen)
     for event in stale:

@@ -131,7 +131,12 @@ async def publish_batch(
             log.warning(
                 "отметить удалось не все опубликованные записи",
                 extra={"event": "outbox_lease_lost", "result": "failed",
-                       "published": len(published), "marked": marked},
+                       "published": len(published), "marked": marked,
+                       # Идентификаторы записей outbox, а не message_id:
+                       # на этом шаге под рукой только они (`mark_published`
+                       # возвращает счётчик, не сами payload), но именно
+                       # по ним разбирают, какая из записей стала дублем.
+                       "outbox_record_ids": published},
             )
         metrics.outbox_published(marked)
         return PublishOutcome(published=marked, failed=failed, unroutable=unroutable)

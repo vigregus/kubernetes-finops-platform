@@ -141,6 +141,19 @@ class CentrifugoClient:
 
     async def _call(self, method: str, payload: dict) -> bool:
         """Один запрос к серверному API. Недоступность — `False`, не падение."""
+        # Только безопасное подмножество: `payload` у `publish` несёт
+        # `data` - тело события, то есть содержимое сообщения. Логировать
+        # payload целиком значило бы нарушить «Содержимое не логируется
+        # никогда» (docs/messenger/06-observability.md) ровно там, где
+        # это проверяет тест OBS-SEC-001. `channel`/`user`/`client` -
+        # голые идентификаторы, не содержимое, и без них «Centrifugo
+        # отклонил команду» не говорит, для какой беседы или чьего
+        # соединения.
+        log_context = {
+            key: value
+            for key, value in payload.items()
+            if key in ("channel", "user", "client")
+        }
         try:
             async with httpx.AsyncClient(
                 timeout=self.settings.request_timeout_seconds
@@ -160,6 +173,7 @@ class CentrifugoClient:
                             "result": "failed",
                             "dependency": "centrifugo",
                             "method": method,
+                            **log_context,
                         },
                     )
                     return False
@@ -173,6 +187,7 @@ class CentrifugoClient:
                     "error_code": type(exc).__name__,
                     "dependency": "centrifugo",
                     "method": method,
+                    **log_context,
                 },
             )
             return False

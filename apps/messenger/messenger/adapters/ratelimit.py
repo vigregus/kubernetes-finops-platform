@@ -130,6 +130,12 @@ class RateLimiter:
                     "error_code": type(exc).__name__,
                     "dependency": "redis",
                     "decision": on_failure.value,
+                    # Ключ лимита - и есть предмет решения "кому отказано,
+                    # пока защита не работает" (verify-email:<user_id>
+                    # сегодня, но лимитер общий - вызовы для входа
+                    # появятся тем же путём). Без него запись говорит
+                    # "лимиты сломаны", а не "лимиты сломаны ДЛЯ КОГО".
+                    "key": key,
                 },
             )
             return LimitDecision(

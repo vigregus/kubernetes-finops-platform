@@ -268,7 +268,8 @@ class AdminClient:
             log.warning(
                 "письмо не отправлено",
                 extra={"event": "verify_email", "result": "failed",
-                       "error_code": type(exc).__name__, "dependency": "keycloak"},
+                       "error_code": type(exc).__name__, "dependency": "keycloak",
+                       "external_user_id": external_user_id},
             )
             return False
 
@@ -276,7 +277,8 @@ class AdminClient:
             log.warning(
                 "Keycloak отказался отправлять письмо",
                 extra={"event": "verify_email", "result": "failed",
-                       "error_code": "rejected", "status": response.status_code},
+                       "error_code": "rejected", "status": response.status_code,
+                       "external_user_id": external_user_id},
             )
             return False
         return True
