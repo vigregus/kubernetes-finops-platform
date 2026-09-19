@@ -94,6 +94,29 @@ async def fetch_direct_conversation(
     return _to_conversation(row) if row else None
 
 
+async def fetch_last_seq(
+    conn: asyncpg.Connection, *, conversation_id: ConversationId
+) -> ConversationSeq | None:
+    """Последний выданный номер беседы — неподвижная точка синхронизации.
+
+    Отдельная функция, хотя номер есть и у `fetch_conversation`, потому что
+    читается она в своё время: **до** страницы догрузки, а не как её часть.
+    `last_seq` становится видимым ровно в момент коммита транзакции, которая
+    держала блокировку строки беседы, — значит `last_seq = k` наблюдаемо
+    тогда и только тогда, когда наблюдаемо и сообщение `k`. Заморозив
+    границу первой и прочитав страницу `seq <= границы` второй, мы не
+    получаем дыр. В обратном порядке между двумя чтениями помещается чужое
+    сообщение `k`: страница отдаёт `has_more=false` до `k−1`, клиент считает
+    синхронизацию завершённой — и не видит `k` ни по REST, ни по потоку.
+    Дефект этот на спокойной беседе не воспроизводится.
+    """
+    value = await conn.fetchval(
+        "SELECT last_seq FROM conversations WHERE conversation_id = $1",
+        conversation_id,
+    )
+    return ConversationSeq(value) if value is not None else None
+
+
 async def ensure_direct_conversation(
     conn: asyncpg.Connection,
     *,

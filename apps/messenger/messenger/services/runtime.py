@@ -18,6 +18,7 @@ import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from enum import Enum
 
 import asyncpg
 
@@ -29,6 +30,36 @@ from messenger.telemetry import metrics
 log = logging.getLogger(__name__)
 
 POSTGRES = "postgres"
+# Отдельное имя для метрики зависимости, хотя база та же. Реплика —
+# необязательная зависимость: её отсутствие не отказ, и сливать её
+# состояние с писателем значило бы показывать «postgres down» на исправном
+# сервисе ровно тогда, когда реплика не настроена.
+POSTGRES_READ = "postgres-read"
+
+
+class ReadMode(str, Enum):
+    """Сколько свежести требует запрос.
+
+    Писатель и реплика — свойство развёртывания, а не домена, и потому это
+    живёт здесь, а не в `domain/`: доменное правило не должно меняться от
+    того, сколько у нас реплик. Наружу, в API, это тоже не выходит: служба
+    называет режим, соединение под него выдаёт `Runtime`.
+    """
+
+    # Из писателя: страница, на которой может оказаться только что
+    # записанное, и всё, что касается восстановления после обрыва.
+    STRONG = "strong"
+    # Допустимо отставание: старые страницы листания, где задержка
+    # реплики на секунды никого не касается.
+    STALE_OK = "stale_ok"
+
+
+# Обслуживает ли реплика страницы истории, то есть превращается ли
+# `STALE_OK` в чтение с реплики. Сегодня — нет, и это не переключатель,
+# которым пользуются: он стоит здесь затем, чтобы у будущей правки было
+# ровно одно место вместо ветки в пути запроса. Условие включения и цена
+# ошибки — в `Runtime._pool_for`.
+_READER_SERVES_PAGES = False
 
 
 def pool_settings_from_env() -> postgres.PoolSettings:
@@ -46,6 +77,42 @@ def pool_settings_from_env() -> postgres.PoolSettings:
         password=os.getenv("DATABASE_PASSWORD", ""),
         min_size=int(os.getenv("DATABASE_POOL_MIN", "2")),
         max_size=int(os.getenv("DATABASE_POOL_MAX", "10")),
+    )
+
+
+def read_pool_settings_from_env() -> postgres.PoolSettings | None:
+    """Настройки пула чтения — или `None`, если читать неоткуда.
+
+    Отсутствие `DATABASE_READ_HOST` означает «реплики нет», и это не
+    ошибка конфигурации, а сегодняшнее состояние стендов: второй `Pooler`
+    не поднимается намеренно
+    (`gitops/04-messenger/messenger-postgres/manifests/pooler.yaml`), потому
+    что указывал бы на тот же под и создавал ложное ощущение разделения
+    нагрузки. Поэтому умолчание — `None`, а не адрес писателя: с адресом
+    писателя `STALE_OK` молча читал бы с него и никто бы не заметил, что
+    развилка не работает.
+
+    Ёмкость чтения меньше ёмкости записи сознательно. `max_size` — размер
+    пода, а не базы, и сумма (10 + 5) обязана оставаться ниже
+    `default_pool_size: "20"` PgBouncer, иначе очередь переезжает из
+    приложения в пул и становится невидимой (предупреждение в
+    `repositories/postgres.py`, `PoolSettings`).
+    """
+    host = os.getenv("DATABASE_READ_HOST", "")
+    if not host:
+        return None
+    return postgres.PoolSettings(
+        host=host,
+        port=int(os.getenv("DATABASE_READ_PORT", os.getenv("DATABASE_PORT", "5432"))),
+        database=os.getenv(
+            "DATABASE_READ_NAME", os.getenv("DATABASE_NAME", "messenger")
+        ),
+        user=os.getenv("DATABASE_READ_USER", os.getenv("DATABASE_USER", "messenger")),
+        password=os.getenv(
+            "DATABASE_READ_PASSWORD", os.getenv("DATABASE_PASSWORD", "")
+        ),
+        min_size=int(os.getenv("DATABASE_READ_POOL_MIN", "2")),
+        max_size=int(os.getenv("DATABASE_READ_POOL_MAX", "5")),
     )
 
 
@@ -157,6 +224,12 @@ class Runtime:
     oidc_settings: oidc.OidcSettings = field(default_factory=oidc_settings_from_env)
     application_name: str = "messenger-api"
     pool: asyncpg.Pool | None = None
+    # Пул чтения необязателен: он появляется, когда появляется реплика,
+    # и до тех пор оба режима идут в писателя.
+    read_settings: postgres.PoolSettings | None = field(
+        default_factory=read_pool_settings_from_env
+    )
+    read_pool: asyncpg.Pool | None = None
     keys: oidc.JwksCache | None = None
     login: LoginSettings | None = None
     admin: keycloak.AdminClient | None = None
@@ -187,18 +260,33 @@ class Runtime:
         проверяются по уже прочитанным ключам, и снимать под с трафика
         из-за недоступного Keycloak значит устроить отказ там, где его
         ещё нет.
+
+        Пул чтения открывается здесь же, хотя страниц пока не обслуживает:
+        это единственное место, где он открывается вообще, — в пути запроса
+        его нет (`_pool_for`). Так недоступная реплика стоит одной попытки
+        при подъёме, а не задержки в каждом запросе.
         """
         await self.ensure_pool()
+        await self.ensure_read_pool()
         if self.keys is not None and self.oidc_settings.jwks_url:
             await self.keys.key_for("прогрев")
 
     async def stop(self) -> None:
-        """Закрывает пул, дожидаясь возврата занятых соединений.
+        """Закрывает пулы, дожидаясь возврата занятых соединений.
 
         Без этого выключение пода обрывает соединение посреди транзакции,
         и база узнаёт об этом только по таймауту — держа блокировки всё это
         время.
+
+        Пул чтения закрывается первым и обязательно. Забытый `read_pool`
+        держал бы соединения до убийства пода и обнулял бы смысл `close()`
+        с ожиданием — то есть выключение начинало бы зависеть от второй
+        базы, которой может и не быть.
         """
+        if self.read_pool is not None:
+            await self.read_pool.close()
+            self.read_pool = None
+            metrics.dependency_up(POSTGRES_READ, up=False)
         if self.pool is not None:
             await self.pool.close()
             self.pool = None
@@ -234,10 +322,100 @@ class Runtime:
             self.pool = None
         return self.pool
 
+    async def ensure_read_pool(self) -> asyncpg.Pool | None:
+        """Пул чтения, если он настроен и открылся. Иначе `None`.
+
+        `None` здесь означает «читай с писателя», а не отказ: реплика —
+        ускорение, а не условие работы. Поэтому недоступная реплика не
+        бросает исключения и не выносится в готовность — она молча
+        возвращает чтение писателю, и сервис продолжает отвечать.
+
+        Вызывается сегодня только из `start()`, и это осознанно: в пути
+        запроса реплики нет, пока она не умеет отвечать за границу
+        страницы (`_pool_for`). То есть цикл переподключения у неё —
+        только подъём процесса, а не каждая проба готовности.
+
+        `TimeoutError` ловится здесь, а `ensure_pool` его не ловит, и это
+        не расхождение. У писателя падение по таймауту означает, что
+        работать не на чем, и исключение обязано дойти до обработчика.
+        У реплики за тем же таймаутом стоит настроенный, но недоступный
+        хост — тот самый случай, ради которого развилка и написана.
+        """
+        if self.read_pool is not None:
+            return self.read_pool
+        if self.read_settings is None:
+            return None
+        try:
+            self.read_pool = await postgres.create_pool(
+                self.read_settings,
+                application_name=f"{self.application_name}-read",
+            )
+        except (OSError, asyncpg.PostgresError, TimeoutError) as exc:
+            log.warning(
+                "пул чтения не открылся, чтение пойдёт с писателя",
+                extra={
+                    "event": "db_read_pool_unavailable",
+                    "result": "failed",
+                    "error_code": type(exc).__name__,
+                    "dependency": POSTGRES_READ,
+                },
+            )
+            self.read_pool = None
+        else:
+            metrics.dependency_up(POSTGRES_READ, up=True)
+        return self.read_pool
+
+    async def _pool_for(self, mode: ReadMode) -> asyncpg.Pool | None:
+        """Пул под требуемую свежесть. Выбор ровно в одном месте.
+
+        `STALE_OK` не означает «читать с реплики» — он означает, что
+        отставание допустимо. Реплики нет, она не поднялась, или её чтение
+        небезопасно — читаем с писателя, и результат от этого только свежее.
+
+        Сегодня безопасным оно не бывает ни при каких условиях, потому что
+        ответа на вопрос «догнала ли реплика границу, с которой читается эта
+        страница» в сервисе нет. Пока его нет, `_READER_SERVES_PAGES` —
+        `False`, и реплика страниц не обслуживает.
+
+        Цена ошибки здесь — не задержка, а молчаливая дыра в истории.
+        Писатель на номере 100, реплика на 90, страница `before_seq = 96`:
+        реплика вернёт 90…86, и номеров 95…91 не увидит никто и никогда —
+        следующий ответ снова выглядит непрерывным, а сравнить клиенту не
+        с чем. То есть проверить это на стенде нечем, и заметить нельзя.
+        Локально невоспроизводимо вовсе: `DATABASE_READ_HOST` не задан,
+        обе ветки идут в один пул — то есть `HIST-001` зелёный именно
+        поэтому, а не потому, что развилка проверена.
+
+        Отсюда же и вторая половина решения: пока реплика не обслуживает
+        страницы, её нет и в пути запроса. Иначе `ensure_read_pool`
+        вызывалась бы на каждом `STALE_OK`, и недоступная реплика добавляла
+        бы к запросу свой `connect_timeout`, собирая шторм подключений;
+        а поднявшаяся однажды и умершая позже возвращала бы нерабочий пул
+        (поле не `None` — повторной попытки не будет), и ошибка `acquire`
+        не привела бы никуда, хотя комментарий обещает обратное:
+        «реплика — ускорение, а не условие работы».
+
+        Пул всё равно открывается — в `start()`, вместе с процессом.
+        Не ради страниц, а чтобы шов был живым, а не описанным: он виден
+        метрикой `postgres-read`, а его отказы — событием
+        `db_read_pool_unavailable`.
+        """
+        if mode is ReadMode.STALE_OK and _READER_SERVES_PAGES:
+            replica = await self.ensure_read_pool()
+            if replica is not None:
+                return replica
+        return await self.ensure_pool()
+
     @asynccontextmanager
-    async def connection(self) -> AsyncIterator[asyncpg.Connection]:
-        """Соединение на время блока. Транзакцией владеет вызывающий."""
-        pool = await self.ensure_pool()
+    async def connection(
+        self, mode: ReadMode = ReadMode.STRONG
+    ) -> AsyncIterator[asyncpg.Connection]:
+        """Соединение на время блока. Транзакцией владеет вызывающий.
+
+        Умолчание — писатель, и это не удобство, а безопасная сторона:
+        забыть указать режим значит прочитать свежее, а не устаревшее.
+        """
+        pool = await self._pool_for(mode)
         if pool is None:
             raise ConnectionError("Postgres недоступен")
         async with postgres.connection(pool) as conn:
@@ -253,6 +431,11 @@ async def check_readiness(runtime: Runtime) -> ReadinessReport:
     """
     checks: dict[str, str] = {}
 
+    # Реплика в пробу готовности не входит, и добавление её — правка одной
+    # строки, которую здесь и хочется сделать. Делать её нельзя: реплики
+    # может не быть вовсе, и под ушёл бы в цикл перезапуска при исправной
+    # записи и исправном STRONG-чтении. Отставание реплики наблюдается
+    # метрикой, а не снятием пода с трафика.
     pool = await runtime.ensure_pool()
     if pool is None:
         checks[POSTGRES] = "unavailable"

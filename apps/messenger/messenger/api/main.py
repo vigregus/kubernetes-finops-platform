@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 from starlette.requests import Request
 
 from messenger.domain.errors import Problem, Reason, to_problem
+from messenger.domain.history import DEFAULT_PAGE_SIZE, InvalidCursor, validate_cursors
 from messenger.domain.identity import TokenRejection
 from messenger.domain.ids import (
     AttachmentId,
@@ -42,6 +43,7 @@ from messenger.domain.message import (
 from messenger.domain.user import capabilities_of
 from messenger.services import backchannel as backchannel_service
 from messenger.services import conversations as conversation_service
+from messenger.services import history as history_service
 from messenger.services import identity as identity_service
 from messenger.services import login as login_service
 from messenger.services import messages as message_service
@@ -1043,6 +1045,154 @@ def _invalid_payload(exc: ValueError) -> Problem:
     описывает нарушенное правило, а не то, что прислали.
     """
     return Problem(422, "invalid_payload", str(exc))
+
+
+def _invalid_cursors(exc: InvalidCursor) -> Problem:
+    """Негодный курсор или их сочетание: `400`, а не `422`.
+
+    Сосед `_invalid_payload`, но код другой, и разница не в слое, а в
+    предмете. Тело, не разобравшееся в модель, — это `422` от FastAPI;
+    здесь тело разобралось полностью, негодна строка запроса. Контракт
+    объявляет на этом маршруте `400` и перечисляет ровно эти нарушения,
+    а `422` не объявлен в нём нигде — то есть `422` здесь был бы ответом,
+    которого клиент не ждёт и в спецификации не найдёт.
+
+    Новой `Reason` для этого не заводится. Таксономия `Reason` закрыта и
+    описывает то, что произошло с данными или с правом; у `to_problem`
+    заголовок статичный, и текст нарушенного правила — то единственное,
+    по чему клиент поймёт, что не так с его запросом, — в него не
+    поместится. Поэтому заголовком идёт он.
+
+    Ноль и отрицательные значения проверяются здесь же, а не `Query(ge=..)`:
+    ограничение в объявлении параметра вернуло бы `422` в чужом формате
+    раньше, чем до проверки дошло бы дело, и объявленный `400` оказался бы
+    недостижим — первый такой случай в API.
+
+    Эта же функция собирает ответ на курсор, негодность которого видна
+    только рядом с данными: `after_seq` выше головы беседы. Доменное
+    исключение одно на оба случая (`InvalidCursor`), и ответ один — значит
+    и сборка ответа одна: разойдясь, они дали бы два разных `400` на одну
+    ошибку клиента.
+    """
+    return Problem(400, "invalid_cursor", str(exc))
+
+
+def _history_body(result: history_service.HistoryResult) -> dict[str, object]:
+    """Страница в форме контракта. Все пять полей — всегда.
+
+    Сообщения собираются тем же `_message_body`, что и в одиночной выдаче:
+    вторая сборка тела рано или поздно разошлась бы с первой, и расхождение
+    вылезло бы в самом заметном месте — в истории.
+
+    Сравнение с `None` явное и только `is not None`. `sync_to_seq = 0` —
+    законное значение («снимок есть, и он пуст»), и `if sync_to_seq:`
+    превратил бы его в «снимка нет»: клиент перестал бы считать беседу
+    синхронизированной и пошёл бы догонять то, что уже догнал.
+    """
+    return {
+        "items": [_message_body(item) for item in result.page.items],
+        "has_more": result.page.has_more,
+        "next_before_seq": (
+            int(result.next_before_seq)
+            if result.next_before_seq is not None
+            else None
+        ),
+        "next_after_seq": (
+            int(result.next_after_seq) if result.next_after_seq is not None else None
+        ),
+        "sync_to_seq": (
+            int(result.sync_to_seq) if result.sync_to_seq is not None else None
+        ),
+    }
+
+
+@app.get("/conversations/{conversation_id}/messages", response_model=dict[str, object])
+async def list_messages(
+    conversation_id: uuid.UUID,
+    request: Request,
+    response: Response,
+    before_seq: int | None = None,
+    after_seq: int | None = None,
+    through_seq: int | None = None,
+    limit: int = DEFAULT_PAGE_SIZE,
+) -> dict[str, object] | Response:
+    """История беседы: страницами назад или догрузкой вперёд.
+
+    Два направления — две разные гарантии, а не два способа листать одно
+    и то же. Назад (`before_seq`) страница устойчива к дописи в голову:
+    уже загруженное не сдвигается. Вперёд (`after_seq`) — восстановление
+    пропущенного после обрыва, и оно останавливается на границе снимка
+    `through_seq`, потому что выше неё сообщения приходят потоком.
+
+    Курсор выше головы беседы — `400`, а не пустая страница. Такого номера
+    не выдавал никто, и ответить на него «ты догнал» значит молча
+    развернуть клиента назад: он перестанет запрашивать историю, считая
+    синхронизацию завершённой.
+    """
+    # Проверка до всего остального: негодная строка запроса не должна
+    # занимать соединение с базой и, тем более, разбирать удостоверение.
+    # Ответ на неё от ресурса не зависит, поэтому и порядок такой — как
+    # у проверки содержимого в `send_message`.
+    try:
+        validate_cursors(
+            before_seq=before_seq,
+            after_seq=after_seq,
+            through_seq=through_seq,
+            limit=limit,
+        )
+    except ValueError as exc:
+        return _problem_response(_invalid_cursors(exc), response)
+
+    runtime = request.app.state.runtime
+    # Два соединения, и не вложенных, — решение, а не небрежность.
+    # Удостоверение читается всегда с писателя: `sessions` на отставшей
+    # реплике оставила бы живой сессию, отозванную секунду назад, а
+    # устаревшее состояние не расширяет права (И-1). Устаревание членства
+    # для чтения санкционировано отдельно, устаревание сессии — нет.
+    # Поэтому соединение под страницу берётся вторым и под свой режим.
+    async with runtime.connection() as conn:
+        auth = await _current(request, conn)
+        if not auth.ok or auth.user is None:
+            return _auth_failure(auth.rejection, response)
+
+    mode = history_service.read_mode(before_seq=before_seq, after_seq=after_seq)
+    try:
+        async with runtime.connection(mode=mode) as conn:
+            result = await history_service.list_messages(
+                conn,
+                viewer=auth.user,
+                conversation_id=ConversationId(conversation_id),
+                before_seq=before_seq,
+                after_seq=after_seq,
+                through_seq=through_seq,
+                limit=limit,
+            )
+    except InvalidCursor as exc:
+        # Второй источник того же `400`: правило о курсоре, для которого
+        # нужна голова беседы. Проверить его в строке запроса нельзя —
+        # в ней головы нет, — поэтому проверка живёт в сервисе, а ответ
+        # собирается здесь, тем же `_invalid_cursors`.
+        #
+        # Ловится именно `InvalidCursor`, а не `ValueError`, хотя выше
+        # ловится он: здесь широкая форма поймала бы любое будущее
+        # `ValueError` из сервиса и выдала бы его за ошибку клиента —
+        # то есть отказала бы в законном запросе, сославшись на курсор,
+        # которого клиент не касался.
+        return _problem_response(_invalid_cursors(exc), response)
+
+    if not result.ok:
+        # Видимость отказа решает сервис, а не обработчик: он знает, пришёл
+        # субъект по своей ссылке или подобрал идентификатор, и `Decision`
+        # уже несёт ответ. Здесь он только доезжает до `to_problem` — иначе
+        # объявленный контрактом `403` остался бы недостижимым.
+        return _problem_response(
+            to_problem(result.rejection or Reason.INTERNAL, result.visibility),
+            response,
+        )
+
+    with tracing.span("response"):
+        body_out = _history_body(result)
+    return body_out
 
 
 @app.post("/conversations/{conversation_id}/messages", response_model=dict[str, object])
