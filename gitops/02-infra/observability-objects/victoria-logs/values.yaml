@@ -1,4 +1,10 @@
 server:
+  # 7d - единый срок на все потоки. По контракту телеметрии
+  # (docs/messenger/06-observability.md, "Потоки журналов разделены")
+  # это отдельная незакрытая работа: application/access должны жить
+  # короче, security/audit - дольше. См. ../tempo/values.yaml - его
+  # retention (72h) сознательно короче этих 7d, а не равен им: трейс
+  # тяжелее лога на единицу времени, полное совпадение раздуло бы диск.
   retentionPeriod: "7d"
   persistentVolume:
     enabled: true
