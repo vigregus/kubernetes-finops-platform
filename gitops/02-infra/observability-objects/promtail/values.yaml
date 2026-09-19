@@ -105,14 +105,35 @@ config:
                 expressions:
                   record_message: record.message
                   record_message_pgbouncer: record.msg
+                  top_msg: msg
                   severity: record.error_severity
                   severity_pgbouncer: record.level
+                  top_level: level
+            # Третий откат, не только два. Один и тот же контейнер
+            # `postgres` под `app="postgresql"` пишет и настоящие записи
+            # Postgres (`record.message`), и собственные webhook-логи
+            # CNPG про ресурс `Database` ("Defaulting for database",
+            # "Validation for Database upon creation", logger:
+            # "database-resource") - у них `record` нет вовсе, текст
+            # только в поле `msg` на верхнем уровне. Без этой ветки
+            # `record_message`/`severity` были не пустой строкой,
+            # а ОТСУТСТВУЮЩИМ ключом - Go-шаблон печатает такой как
+            # буквальное `<no value>`, а не молчит: `_msg` в хранилище
+            # оседал как строка `<no value>`, `level` - тоже. Найдено
+            # не по коду - обе ветки (postgres, pgbouncer) поодиночке
+            # написаны верно, - а по тому же живому запросу, которым
+            # проверялся предыдущий фикс: `<no value>` в двух записях
+            # рядом с настоящими.
+            #
+            # `top_msg`/`top_level` не переопределяют настоящие записи:
+            # эта ветка резервная и достаётся только тогда, когда ни
+            # postgres-, ни pgbouncer-форма ничего не дала.
             - template:
                 source: record_message
-                template: '{{ if .record_message }}{{ .record_message }}{{ else }}{{ .record_message_pgbouncer }}{{ end }}'
+                template: '{{ if .record_message }}{{ .record_message }}{{ else if .record_message_pgbouncer }}{{ .record_message_pgbouncer }}{{ else }}{{ .top_msg }}{{ end }}'
             - template:
                 source: severity
-                template: '{{ if .severity }}{{ .severity }}{{ else }}{{ .severity_pgbouncer }}{{ end }}'
+                template: '{{ if .severity }}{{ .severity }}{{ else if .severity_pgbouncer }}{{ .severity_pgbouncer }}{{ else }}{{ .top_level }}{{ end }}'
             - regex:
                 source: record_message
                 # (?s) so that . matches newlines. Without it this whole
