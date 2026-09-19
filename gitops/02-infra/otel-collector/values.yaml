@@ -184,6 +184,21 @@ ports:
   jaeger-thrift: {enabled: false}
   jaeger-grpc: {enabled: false}
   zipkin: {enabled: false}
+  # Выключен по умолчанию в чарте - комментарий там же говорит прямо:
+  # "you need to enable the port in order to use ... PodMonitor". Без
+  # этого порт 8888 (service.telemetry.metrics выше) нигде не объявлен
+  # в спеке пода, а VMPodScrape (manifests/pod-scrape.yaml, portNumber:
+  # 8888) фильтрует цели ровно по объявленным containerPort - Kubernetes
+  # SD с role: pod перечисляет по одной цели на каждый ЗАЯВЛЕННЫЙ порт,
+  # и без объявления строки для 8888 просто не существует: не "цель
+  # найдена и отброшена", а "перечислять было нечего". Отсюда
+  # `up{job="observability/otel-collector"}` молчал, даже когда
+  # VMPodScrape существовал и был Synced.
+  metrics:
+    enabled: true
+    containerPort: 8888
+    servicePort: 8888
+    protocol: TCP
 
 podLabels:
   finops.internal/product: platform
