@@ -69,21 +69,39 @@ truth for gate completion.
 
 Current verified state:
 
-- G0 (local platform) and G1 (identity, sessions, authorization and direct
-  conversations) are complete;
-- G2-000 is complete: message facts and content use separate Kafka topics,
-  SCRAM identities and least-privilege ACLs;
-- G2-001 is complete: the immutable `Message` / `MessagePayload` domain model
-  and its invariants are covered by unit tests;
-- G2-002 is complete: a message and its fact/content outbox records are written
-  atomically, retries reuse the original `message_id` and sequence, and a live
-  failure-injection test proves rollback of the message, outbox and sequence;
-- the HTTP message endpoint, outbox relay and Kafka consumers are not complete,
-  so the end-to-end G2 delivery gate remains open.
+- G0 (local platform) is complete: bootstrap from an empty cluster, GitOps
+  waves, migrations with invariant checks, contracts, telemetry reaching Tempo,
+  and the shared log envelope with its event catalog;
+- G1 (identity, sessions, authorization and direct conversations) is complete,
+  including immediate session revocation over Centrifugo;
+- G2 (reliable delivery) is complete. Message facts and content travel on
+  separate Kafka topics with per-consumer SCRAM identities and least-privilege
+  ACLs, so the unread consumer cannot read content; a message and its two outbox
+  records are written in one transaction, with a live failure injection proving
+  the rollback; the relay publishes to Kafka and the realtime consumer assembles
+  the two halves and publishes to the conversation channel. The whole path —
+  authenticated `POST`, Postgres commit, outbox, Kafka, Centrifugo, WebSocket —
+  is proven live, including the gate's exit condition: a deliberately repeated
+  event is seen by the recipient exactly once;
+- G3 (client consistency) has started with its contract and schema. The history
+  route gained `after_seq` plus a fixed sync boundary (`sync_to_seq` /
+  `through_seq`), so recovery converges on a snapshot instead of chasing a
+  moving head while the realtime channel carries part of the same range;
+  delivery and read are now one receipt (`POST /conversations/{id}/receipts`)
+  instead of a read-only marker — the old `PUT /read` is gone, and the break is
+  recorded by name in `packages/contracts/compat-allowlist.yaml` rather than by
+  weakening the compatibility check — and migration `0009` adds
+  `last_delivered_seq`, backfills `read ≤ delivered` and leaves the constraint
+  validated. The contract job is a required status check on `main`, behind a PR
+  requirement that also binds administrators, and the workflow no longer filters
+  by path on `pull_request` — a check that sometimes does not run cannot be a
+  merge condition. History paging, gap detection, reconnect with
+  `recovered=false`, unread counters, presence and the web client itself are
+  still open.
 
-The deployed local API image contains G2-002, while `make local-test` verifies
-contracts, layer rules, unit tests, migrations, authenticated Kafka ACLs and the
-live Postgres/Keycloak/Centrifugo integration suite.
+`make local-test` verifies contracts, authenticated Kafka ACLs, layer rules, the
+log event catalog, migration safety, lint, unit tests, migrations and the live
+Postgres/Keycloak/Centrifugo integration suite.
 
 ### Local v1
 

@@ -194,27 +194,118 @@ paths:
       description: |
         Пагинация по `before_seq`, а не по смещению: на миллионах сообщений
         `OFFSET` деградирует линейно, причём именно на старых беседах.
+
+        `before_seq` и `after_seq` взаимно исключающие, и обе границы
+        строгие: `before_seq=100` — это `seq < 100`, `after_seq=100` —
+        `seq > 100`. Строгие именно потому, что клиент передаёт номер,
+        который у него уже есть, и повторная выдача его же создала бы
+        дубль на стыке страниц (`HIST-001`).
+
+        Направление ответа разное, и это не деталь. Листание назад отдаёт
+        новые первыми — так их показывает интерфейс. Догрузка вперёд
+        (`after_seq`) отдаёт по возрастанию: это синхронизация
+        пропущенного, а не листание, и клиенту нужен порядок применения.
+
+        **Синхронизация идёт до неподвижной точки.** Голова беседы движется:
+        пока клиент листает 101–150, приходят 201–300 и часть из них уже
+        несёт поток. Догонять движущуюся голову по REST и одновременно
+        принимать те же номера по WebSocket — гонка, которую клиент не может
+        выиграть: он не знает, где кончается снимок и начинается поток.
+        Поэтому первый запрос без `through_seq` замораживает границу:
+        сервер берёт голову на момент чтения и возвращает её как
+        `sync_to_seq`. Все следующие страницы идут с `through_seq`,
+        равным этой границе, и не видят ничего выше неё.
+
+        Диапазон страницы: `after_seq < seq <= through_seq`. Когда снимок
+        исчерпан, `has_more` становится `false`, а `next_after_seq` —
+        `null`: клиент синхронизирован до неподвижной точки, и всё, что
+        выше неё, приходит только потоком. Без этой границы `has_more`
+        оставался бы `true` вечно на живой беседе, и клиент не смог бы
+        отличить «я догнал» от «я отстаю».
+
+        Границы сравниваются строго, поэтому два случая с `through_seq`
+        расходятся, и это расхождение намеренное:
+
+        - `through_seq` **равен** `after_seq` — законный пустой снимок:
+          `200`, `items` пуст, `has_more` — `false`, `next_after_seq` —
+          `null`, синхронизация завершена. Так выглядит повтор запроса,
+          который клиент уже выполнил: ответить на него ошибкой значило бы
+          наказать за повтор, а повтор после обрыва связи — обычное дело,
+          не сбой клиента;
+        - `through_seq` **меньше** `after_seq` — `400`: такого диапазона
+          не существует, и получить его можно только ошибкой в клиенте.
+          Отдать здесь пустую страницу было бы хуже отказа: клиент прочёл
+          бы её как «синхронизация завершена» и молча потерял бы всё,
+          что пропустил.
       operationId: listMessages
       parameters:
         - name: before_seq
           in: query
+          description: Строго меньше указанного номера. Взаимно исключим с `after_seq`.
           schema: { type: integer, format: int64, minimum: 1 }
+        - name: after_seq
+          in: query
+          description: |
+            Строго больше указанного номера. Ответ идёт по возрастанию.
+            Без `through_seq` граница снимка берётся заново — так начинается
+            синхронизация; с ним продолжается уже начатая.
+          schema: { type: integer, format: int64, minimum: 0 }
+        - name: through_seq
+          in: query
+          description: |
+            Верхняя граница снимка, включительно. Только вместе с
+            `after_seq`: у листания назад снимка нет. Значение — `sync_to_seq`
+            из первого ответа, и менять его по дороге нельзя, иначе снимок
+            поедет и граница перестанет что-либо значить.
+
+            Строго `after_seq < through_seq` не требуется. Равенство —
+            законный пустой снимок и ожидаемый ответ на повтор запроса;
+            ошибка только при `through_seq < after_seq`.
+          schema: { type: integer, format: int64, minimum: 0 }
         - $ref: '#/components/parameters/Limit'
       responses:
         '200':
-          description: Сообщения, новые первыми
+          description: Страница истории
           content:
             application/json:
               schema:
                 type: object
-                required: [items]
+                required: [items, has_more, sync_to_seq]
                 properties:
                   items:
                     type: array
                     items: { $ref: '#/components/schemas/Message' }
+                  has_more:
+                    type: boolean
+                    description: |
+                      Есть ли ещё записи в том же направлении в пределах
+                      снимка. Без этого признака «пропустил 50» работает,
+                      а «пропустил 50 000» превращается в угадывание
+                      следующего запроса. При синхронизации вперёд считается
+                      только до `sync_to_seq`: сообщения выше границы
+                      приходят потоком, и обещать их здесь значило бы
+                      обещать то, чего в ответе не будет.
                   next_before_seq:
                     type: [integer, 'null']
                     format: int64
+                  next_after_seq:
+                    type: [integer, 'null']
+                    format: int64
+                    description: |
+                      Продолжение догрузки: `after_seq` следующего запроса.
+                      `null` — снимок исчерпан.
+                  sync_to_seq:
+                    type: [integer, 'null']
+                    format: int64
+                    description: |
+                      Неподвижная точка синхронизации. На первом запросе —
+                      голова беседы на момент чтения, дальше — неизменная
+                      граница снимка. Выше неё клиент не запрашивает: этот
+                      участок идёт потоком, и смешивать два источника в
+                      одном диапазоне нельзя. `null` при листании назад:
+                      листание не синхронизация, и границы у него нет.
+                      `0` — другое значение: снимок есть, и он пуст.
+        '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
@@ -264,36 +355,76 @@ paths:
               schema: { $ref: '#/components/schemas/Problem' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
 
-  /conversations/{conversation_id}/read:
+  /conversations/{conversation_id}/receipts:
     parameters:
       - $ref: '#/components/parameters/ConversationId'
-    put:
+    post:
       tags: [messages]
-      summary: Отметить прочитанным до номера
+      summary: Квитанция о доставке и прочтении
       description: |
-        Только вперёд. Пришедшая с опозданием отметка с меньшим номером
-        не откатывает счётчик — ответ всё равно `200` с текущим значением.
-      operationId: setReadState
+        Одна запись несёт оба номера, потому что это одно состояние. Веди их
+        двумя запросами — и появится положение «прочитано больше, чем
+        доставлено», запрещённое `RCP-004`.
+
+        Обе величины идут **только вперёд**: пришедшая с опозданием квитанция
+        не откатывает счётчик, и ответ всё равно `200` с текущим значением
+        (`RCP-003`). Обе ограничиваются максимумом беседы — объявить
+        прочитанным то, чего не существует, нельзя (`RCP-005`). Чтение
+        подразумевает получение, поэтому `delivered_seq` поднимается до
+        `read_seq`, если клиент сообщил больше, чем доставил: прочитать
+        неполученное невозможно.
+
+        Несколько устройств одного пользователя: доставлено, если хотя бы
+        одно получило; прочитано, если хотя бы одно прочитало до этого
+        номера. Хранится максимум, поэтому отдельного сведения по каждому
+        устройству не требуется (`RCP-001`).
+
+        Батчится по номеру, а не отправляется на каждое сообщение: квитанция
+        на сообщение удваивает трафик чата.
+      operationId: setReceipts
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [last_read_seq]
+              additionalProperties: false
               properties:
-                last_read_seq: { type: integer, format: int64, minimum: 0 }
+                delivered_seq:
+                  type: integer
+                  format: int64
+                  minimum: 0
+                  description: Номер, до которого сообщения получены на устройстве.
+                read_seq:
+                  type: integer
+                  format: int64
+                  minimum: 0
+                  description: Номер, до которого сообщения показаны пользователю.
+              anyOf:
+                - required: [delivered_seq]
+                - required: [read_seq]
+              description: |
+                Хотя бы один номер обязателен. `minProperties: 1` здесь
+                недостаточно: он требует любое одно свойство, а не одно из
+                двух названных, и опечатка в имени поля прошла бы как
+                валидный запрос, ничего не изменив. Лишние поля отвергаются
+                поимённо — `additionalProperties: false`, — а не игнорируются
+                молча: клиент, считающий, что отправил квитанцию, обязан
+                получить отказ, а не тишину.
       responses:
         '200':
-          description: Текущее состояние прочтения
+          description: Состояние после применения, а не присланное клиентом
           content:
             application/json:
               schema:
                 type: object
-                required: [last_read_seq]
+                required: [delivered_seq, read_seq]
                 properties:
-                  last_read_seq: { type: integer, format: int64 }
+                  delivered_seq: { type: integer, format: int64 }
+                  read_seq: { type: integer, format: int64 }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
 
   /attachments:
     post:
@@ -450,6 +581,18 @@ components:
   responses:
     Unauthorized:
       description: Токен отсутствует, просрочен или отозван
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    BadRequest:
+      description: |
+        Запрос неверен. Например, переданы оба курсора сразу: `before_seq`
+        и `after_seq` описывают разные направления, и один запрос не может
+        означать оба. Или `through_seq` пришёл без `after_seq`. Или
+        `through_seq` меньше `after_seq` — такого диапазона не существует,
+        и получить его можно только ошибкой в клиенте. Равенство `after_seq`
+        и `through_seq` ошибкой не считается: это пустой снимок и обычный
+        ответ на повтор.
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }
