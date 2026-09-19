@@ -763,22 +763,57 @@ async def observe(request: Request, call_next):
             )
 
             # Журнал обращений — отдельный поток со своим сроком хранения.
-            log.info(
-                "%s %s %s",
-                request.method,
-                route,
-                response.status_code,
-                extra={
-                    "event": "http_request",
-                    "log_stream": logging_envelope.STREAM_ACCESS,
-                    "route": route,
-                    "method": request.method,
-                    "status": response.status_code,
-                    "duration_ms": round(elapsed * 1000, 2),
-                    "request_id": request_id,
-                    "result": "success" if response.status_code < 500 else "failed",
-                },
-            )
+            #
+            # Уровень поднят до WARNING при 5xx, а не оставлен INFO с
+            # полем result=failed: `level:ERROR`/`level:WARN` - первый
+            # фильтр, которым открывают VictoriaLogs при инциденте, и
+            # раньше он не находил здесь ни одного отказа - все обращения
+            # шли одним уровнем INFO, в отличие от адаптеров
+            # (kafka.py, keycloak.py, centrifugo.py), которые корректно
+            # используют warning/error. 4xx (в том числе 401 от сканера
+            # портов) уровень не поднимает: это законный исход, не отказ.
+            #
+            # Вызов повторён на обеих ветках, а не собран через
+            # `log_call = log.warning if ... else log.info` или через
+            # вынесенный в переменную `extra=`: `scripts/check-log-streams.py`
+            # разбирает AST и ждёт от `extra` дословный словарь прямо
+            # в вызове `log.<уровень>(...)` — оба сокращения для него
+            # невидимы, и каталог событий перестал бы проверять самую
+            # частую запись в системе.
+            if response.status_code >= 500:
+                log.warning(
+                    "%s %s %s",
+                    request.method,
+                    route,
+                    response.status_code,
+                    extra={
+                        "event": "http_request",
+                        "log_stream": logging_envelope.STREAM_ACCESS,
+                        "route": route,
+                        "method": request.method,
+                        "status": response.status_code,
+                        "duration_ms": round(elapsed * 1000, 2),
+                        "request_id": request_id,
+                        "result": "failed",
+                    },
+                )
+            else:
+                log.info(
+                    "%s %s %s",
+                    request.method,
+                    route,
+                    response.status_code,
+                    extra={
+                        "event": "http_request",
+                        "log_stream": logging_envelope.STREAM_ACCESS,
+                        "route": route,
+                        "method": request.method,
+                        "status": response.status_code,
+                        "duration_ms": round(elapsed * 1000, 2),
+                        "request_id": request_id,
+                        "result": "success",
+                    },
+                )
             return response
     finally:
         logging_envelope.REQUEST_ID.reset(token)
