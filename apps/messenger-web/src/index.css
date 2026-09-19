@@ -1,0 +1,76 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  /* Surfaces */
+  --color-surface: #fff8f6;
+  --color-surface-cream: #fdfcf7;
+  --color-surface-container: #f5ecea;
+  --color-surface-container-low: #fbf2f0;
+  --color-surface-container-high: #efe6e4;
+  --color-surface-warm-subtle: #efece4;
+
+  /* Content on surfaces */
+  --color-on-surface: #1e1b1a;
+  --color-on-surface-variant: #5a4138;
+  --color-on-primary: #ffffff;
+  --color-text-charcoal: #1c1917;
+  --color-text-warm-secondary: #57534e;
+  --color-text-warm-muted: #78716c;
+
+  /* Accents & status */
+  --color-accent-terracotta: #ea580c;
+  --color-accent-amber: #d97706;
+  --color-status-success: #15803d;
+  --color-status-warning: #b45309;
+  --color-status-error: #c2410c;
+  --color-error-container: #ffdad6;
+
+  /* Borders */
+  --color-outline-variant: #e2bfb2;
+}
+
+@layer base {
+  html,
+  body {
+    margin: 0;
+    padding: 0;
+  }
+
+  body {
+    overscroll-behavior: none;
+    background-color: var(--color-surface);
+    color: var(--color-on-surface);
+    font-family: var(--font-sans);
+  }
+
+  #root {
+    height: 100dvh;
+  }
+
+  ::-webkit-scrollbar {
+    display: none;
+  }
+
+  * {
+    scrollbar-width: none;
+  }
+}
+
+@layer utilities {
+  .material-symbol {
+    font-family: "Material Symbols Outlined";
+    font-weight: normal;
+    font-style: normal;
+    line-height: 1;
+    letter-spacing: normal;
+    text-transform: none;
+    white-space: nowrap;
+    word-wrap: normal;
+    direction: ltr;
+    -webkit-font-smoothing: antialiased;
+    display: inline-block;
+  }
+}
