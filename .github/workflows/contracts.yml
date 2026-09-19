@@ -35,6 +35,12 @@ jobs:
 
       - run: pip install --quiet pyyaml
 
+      - name: Сама проверка ловит то, что обязана
+        # Проверка, которую нельзя проверить, краснеет так же редко, как
+        # ничего не проверяющая: сломанное сравнение параметров прошло бы
+        # молча и в этот раз, и во все следующие.
+        run: python3 packages/contracts/test_validate.py
+
       - name: Схемы связны
         run: python3 packages/contracts/validate.py
 

@@ -9,6 +9,30 @@
    можно только осознанно, а не случайно, потому что по ту сторону контракта
    уже работает чужой код.
 
+**Что именно видит вторая проверка.** Поля и их типы — внутри
+`components.schemas`, обязательность — у схем, названных в обеих ревизиях,
+маршруты — по списку путей. Отдельно — параметры запроса: удаление
+параметра у операции и появление у него `required: true`. Этот класс
+защищён потому, что он в контракте реально используется (курсор списка
+бесед), и потому что разрыв в нём **тише всех прочих**: параметр не поле
+схемы, `flatten_schema` его не видит, и удаление `before_conversation_id`
+не тронуло бы ни одной строки, которую проверка умеет сравнивать.
+
+Чего вторая проверка не видит и после этого: **сужение семантики** уже
+существующего параметра (он на месте, схема его не изменилась) и тип
+элемента, заданный ссылкой, — `flatten_schema` ссылки не разворачивает,
+так что `items: { $ref: … }` сравнивается как «массив» и остаётся тем же
+массивом при подмене элемента. Оба случая записываются прозой, а не
+allowlist: запись требует находки, а находки здесь нет.
+
+Там же причина, по которой ответы обязаны быть `$ref` на компоненту, а не
+`inline`: у inline-схемы нет имени, и поля её ответа для сравнения
+не существуют. Пять ответов, объявленных inline до появления этого
+правила, перечислены в `INLINE_RESPONSE_SCHEMAS` — как `GRANDFATHERED`
+в проверке миграций: список закрыт, новый inline-ответ роняет проверку,
+а исчезнувший из контракта требует удалить себя из списка. Поля этих пяти
+проверка по-прежнему не сравнивает — это известная дыра, а не гарантия.
+
 Осознанный разрыв объявляется в compat-allowlist.yaml — поимённо, с датой и
 причиной. Проверка при этом не ослабляется: разрешённой становится ровно
 названная записью пара (вид, имя), всё остальное остаётся ошибкой. Список
@@ -70,17 +94,56 @@ def collect_refs(node, acc):
     return acc
 
 
-def resolve(doc, ref: str):
-    """Только локальные ссылки: контракт обязан быть самодостаточным файлом."""
+def lookup(doc, ref: str):
+    """Узел по локальной ссылке. `None` — ссылки нет, она внешняя или битая."""
     if not ref.startswith("#/"):
-        return True  # внешние не проверяем
+        return None  # внешние не проверяем: не наш файл
     node = doc
     for part in ref[2:].split("/"):
         part = part.replace("~1", "/").replace("~0", "~")
         if not isinstance(node, dict) or part not in node:
-            return False
+            return None
         node = node[part]
-    return True
+    return node
+
+
+def resolve(doc, ref: str):
+    """Только локальные ссылки: контракт обязан быть самодостаточным файлом."""
+    if not ref.startswith("#/"):
+        return True  # внешние не проверяем
+    return lookup(doc, ref) is not None
+
+
+# Ответы, объявленные inline до того, как проверка научилась их требовать.
+# Список закрыт: новый inline-ответ — ошибка структуры, потому что его поля
+# невидимы для сравнения совместимости, то есть разрыв в них пройдёт молча.
+# Записи этих пяти, наоборот, остаются невидимыми — это долг, а не гарантия.
+INLINE_RESPONSE_SCHEMAS = (
+    "GET /conversations/{conversation_id}/messages",
+    "GET /sessions",
+    "POST /attachments",
+    "POST /conversations/{conversation_id}/receipts",
+    "POST /realtime/token",
+)
+
+
+def inline_responses(doc):
+    """Операции, у которых схема ответа объявлена на месте, а не ссылкой."""
+    found = set()
+    for route, methods in (doc.get("paths") or {}).items():
+        for method, op in methods.items():
+            if method in ("parameters", "summary", "description"):
+                continue
+            if not isinstance(op, dict):
+                continue
+            for response in (op.get("responses") or {}).values():
+                if not isinstance(response, dict):
+                    continue
+                for body in (response.get("content") or {}).values():
+                    schema = body.get("schema") if isinstance(body, dict) else None
+                    if isinstance(schema, dict) and "$ref" not in schema:
+                        found.add(f"{method.upper()} {route}")
+    return found
 
 
 def check_structure(errors):
@@ -105,6 +168,19 @@ def check_structure(errors):
             if not op.get("responses"):
                 errors.append(f"{method.upper()} {route}: нет ответов")
 
+    found = inline_responses(doc)
+    for name in sorted(found - set(INLINE_RESPONSE_SCHEMAS)):
+        errors.append(
+            f"{name}: схема ответа объявлена inline — вынести в components.schemas. "
+            "Поля inline-ответа не сравниваются, и разрыв в них пройдёт молча."
+        )
+    for name in sorted(set(INLINE_RESPONSE_SCHEMAS) - found):
+        errors.append(
+            f"INLINE_RESPONSE_SCHEMAS: {name} больше не объявлен inline — убрать "
+            "из списка. Пока запись лежит, она разрешит новый inline-ответ "
+            "с тем же именем."
+        )
+
 
 # --- 2. обратная совместимость --------------------------------------------
 
@@ -127,7 +203,76 @@ def schemas_of(doc):
     return {"": doc}
 
 
-ALLOWED_KINDS = ("field", "field_type", "required", "route")
+ALLOWED_KINDS = ("field", "field_type", "required", "route", "parameter")
+
+
+def operation_parameters(doc, path_item, op):
+    """Параметры операции: свои и унаследованные от уровня пути.
+
+    Имя параметра в OpenAPI — пара (имя, место), а не имя: `limit`
+    в строке запроса и `limit` в пути это разные параметры, и параметр
+    операции перекрывает одноимённый параметр пути. Ключ поэтому пара.
+
+    Параметры объявляются и ссылкой, и на месте, поэтому ссылка здесь
+    разыменовывается: без этого `$ref: '#/components/parameters/Limit'`
+    не участвовал бы в сравнении вовсе — то есть вынести параметр
+    в компоненту значило бы спрятать его от проверки.
+    """
+    merged = {}
+    for source in (path_item, op):
+        for param in (source.get("parameters") or []):
+            if not isinstance(param, dict):
+                continue
+            if "$ref" in param:
+                param = lookup(doc, param["$ref"])
+                if not isinstance(param, dict):
+                    continue
+            name, place = param.get("name"), param.get("in")
+            if isinstance(name, str) and isinstance(place, str):
+                merged[(place, name)] = param
+    return merged
+
+
+def parameter_findings(old, new):
+    """Разрывы в параметрах запроса: тройки (вид, имя, сообщение).
+
+    Отдельной функцией, а не строкой в `check_compat`, потому что проверку
+    самой проверки иначе не написать: `check_compat` читает контракт
+    из git и складывает ошибки в общий список, а сравнивать надо два
+    словаря. Проверка, которую нельзя проверить, — это тот же зелёный CTR,
+    который ничего не доказывает, только на уровень выше; поэтому она и
+    закреплена `test_validate.py`.
+
+    Сравниваются операции, присутствующие в обеих ревизиях: удаление
+    операции целиком — разрыв вида `route`, и второй раз называть его
+    здесь нечем.
+    """
+    findings = []
+    for route, old_methods in (old.get("paths") or {}).items():
+        new_item = (new.get("paths") or {}).get(route)
+        if not isinstance(new_item, dict):
+            continue
+        for method, old_op in old_methods.items():
+            if method in ("parameters", "summary", "description"):
+                continue
+            new_op = new_item.get(method)
+            if not isinstance(old_op, dict) or not isinstance(new_op, dict):
+                continue
+            was = operation_parameters(old, old_methods, old_op)
+            became = operation_parameters(new, new_item, new_op)
+            for key, param in sorted(was.items()):
+                place, name = key
+                label = f"{method.upper()} {route} {place}:{name}"
+                if key not in became:
+                    findings.append(("parameter", label, f"параметр {label} удалён"))
+                elif (
+                    became[key].get("required") is True
+                    and param.get("required") is not True
+                ):
+                    findings.append(
+                        ("parameter", label, f"параметр {label} стал обязательным")
+                    )
+    return findings
 
 
 def load_allowlist(errors):
@@ -207,6 +352,11 @@ def check_compat(base_rev, errors, notes):
             removed = set(old.get("paths", {})) - set(new.get("paths", {}))
             for route in sorted(removed):
                 findings.append(("route", route, f"маршрут {route} удалён"))
+
+            # Параметры запроса. Удалённый параметр и параметр, ставший
+            # обязательным, ломают вызывающего так же, как удалённое поле
+            # схему получателя, — но невидимы там, где ищутся поля.
+            findings.extend(parameter_findings(old, new))
 
         for kind, name, message in findings:
             key = (path.name, kind, name)
