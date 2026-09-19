@@ -758,8 +758,12 @@ async def observe(request: Request, call_next):
                 method=request.method,
                 status_class=f"{response.status_code // 100}xx",
             ).inc()
+            # exemplar: клик по точке на графике p99/p95 ведёт прямо
+            # на пример трассы, а не в три хода (дашборд -> окно логов ->
+            # клик по trace_id из строки). `span.trace_id` уже под рукой -
+            # не нужен contextvar, как в telemetry/metrics.py._exemplar().
             DURATION.labels(service=SERVICE, route=route, method=request.method).observe(
-                elapsed
+                elapsed, exemplar={"trace_id": span.trace_id}
             )
 
             # Журнал обращений — отдельный поток со своим сроком хранения.

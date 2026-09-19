@@ -10,9 +10,28 @@ import os
 
 from prometheus_client import Counter, Gauge, Histogram
 
+from messenger.telemetry import trace
+
 # Имя берётся из окружения один раз. Передавать его аргументом в каждый вызов
 # значит однажды передать не то — и ряд разъедется с остальными.
 SERVICE = os.getenv("SERVICE_NAME", "unknown")
+
+
+def _exemplar() -> dict[str, str] | None:
+    """trace_id текущей задачи для гистограммы, если он есть.
+
+    Тот же contextvar, что читает `JsonFormatter` для поля `trace_id`
+    в логе (telemetry/logging.py) и `lock_active_conversation` для
+    SQL-комментария (repositories/messages.py) - один источник на все
+    сигналы, а не три разных способа узнать "какая сейчас трасса".
+    Без exemplar'а переход от всплеска на графике к примеру трассы идёт
+    в три шага (дашборд -> окно логов -> клик по trace_id); с ним -
+    прямым кликом по точке на графике. Хранит ли и отдаёт ли конкретная
+    VictoriaMetrics/vmagent в этом кластере exemplars - не проверено
+    вживую; сама запись безвредна, даже если получатель её отбросит.
+    """
+    trace_id = trace.current_trace_id()
+    return {"trace_id": trace_id} if trace_id else None
 
 # Доступна ли зависимость по последней проверке. 0 или 1, без градаций:
 # «наполовину доступна» — это отдельные метрики задержки и ошибок, а
@@ -261,7 +280,9 @@ MESSAGE_COMMIT_DURATION = Histogram(
 
 def message_commit(duration_seconds: float, *, result: str) -> None:
     MESSAGE_SEND_OPERATIONS.labels(service=SERVICE, result=result).inc()
-    MESSAGE_COMMIT_DURATION.labels(service=SERVICE).observe(duration_seconds)
+    MESSAGE_COMMIT_DURATION.labels(service=SERVICE).observe(
+        duration_seconds, exemplar=_exemplar()
+    )
 
 
 # T_outbox: от вставки записи (уже случилась, коммит выше) до её аренды
@@ -283,11 +304,13 @@ OUTBOX_KAFKA_PUBLISH_DURATION = Histogram(
 
 
 def outbox_claim_duration(seconds: float) -> None:
-    OUTBOX_CLAIM_DURATION.labels(service=SERVICE).observe(seconds)
+    OUTBOX_CLAIM_DURATION.labels(service=SERVICE).observe(seconds, exemplar=_exemplar())
 
 
 def outbox_kafka_publish_duration(seconds: float) -> None:
-    OUTBOX_KAFKA_PUBLISH_DURATION.labels(service=SERVICE).observe(seconds)
+    OUTBOX_KAFKA_PUBLISH_DURATION.labels(service=SERVICE).observe(
+        seconds, exemplar=_exemplar()
+    )
 
 
 # T_consumer: от получения пачки из Kafka до фиксации смещения. Метка
@@ -302,7 +325,7 @@ CONSUMER_PROCESSING_DURATION = Histogram(
 
 def consumer_processing_duration(seconds: float, *, consumer: str) -> None:
     CONSUMER_PROCESSING_DURATION.labels(service=SERVICE, consumer=consumer).observe(
-        seconds
+        seconds, exemplar=_exemplar()
     )
 
 
@@ -316,7 +339,9 @@ REALTIME_PUBLISH_DURATION = Histogram(
 
 
 def realtime_publish_duration(seconds: float) -> None:
-    REALTIME_PUBLISH_DURATION.labels(service=SERVICE).observe(seconds)
+    REALTIME_PUBLISH_DURATION.labels(service=SERVICE).observe(
+        seconds, exemplar=_exemplar()
+    )
 
 
 # T_delivery, приближённо: от `occurred_at` (момент коммита, записанный
@@ -333,4 +358,6 @@ MESSAGE_DELIVERY_DURATION = Histogram(
 
 
 def message_delivery_duration(seconds: float) -> None:
-    MESSAGE_DELIVERY_DURATION.labels(service=SERVICE).observe(seconds)
+    MESSAGE_DELIVERY_DURATION.labels(service=SERVICE).observe(
+        seconds, exemplar=_exemplar()
+    )
