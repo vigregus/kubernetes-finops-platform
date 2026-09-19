@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 from starlette.requests import Request
 
 from messenger.domain.errors import Problem, Reason, to_problem
-from messenger.domain.history import DEFAULT_PAGE_SIZE, validate_cursors
+from messenger.domain.history import DEFAULT_PAGE_SIZE, InvalidCursor, validate_cursors
 from messenger.domain.identity import TokenRejection
 from messenger.domain.ids import (
     AttachmentId,
@@ -1047,8 +1047,8 @@ def _invalid_payload(exc: ValueError) -> Problem:
     return Problem(422, "invalid_payload", str(exc))
 
 
-def _invalid_cursors(exc: ValueError) -> Problem:
-    """Негодное сочетание курсоров: `400`, а не `422`.
+def _invalid_cursors(exc: InvalidCursor) -> Problem:
+    """Негодный курсор или их сочетание: `400`, а не `422`.
 
     Сосед `_invalid_payload`, но код другой, и разница не в слое, а в
     предмете. Тело, не разобравшееся в модель, — это `422` от FastAPI;
@@ -1067,6 +1067,12 @@ def _invalid_cursors(exc: ValueError) -> Problem:
     ограничение в объявлении параметра вернуло бы `422` в чужом формате
     раньше, чем до проверки дошло бы дело, и объявленный `400` оказался бы
     недостижим — первый такой случай в API.
+
+    Эта же функция собирает ответ на курсор, негодность которого видна
+    только рядом с данными: `after_seq` выше головы беседы. Доменное
+    исключение одно на оба случая (`InvalidCursor`), и ответ один — значит
+    и сборка ответа одна: разойдясь, они дали бы два разных `400` на одну
+    ошибку клиента.
     """
     return Problem(400, "invalid_cursor", str(exc))
 
@@ -1117,6 +1123,11 @@ async def list_messages(
     уже загруженное не сдвигается. Вперёд (`after_seq`) — восстановление
     пропущенного после обрыва, и оно останавливается на границе снимка
     `through_seq`, потому что выше неё сообщения приходят потоком.
+
+    Курсор выше головы беседы — `400`, а не пустая страница. Такого номера
+    не выдавал никто, и ответить на него «ты догнал» значит молча
+    развернуть клиента назад: он перестанет запрашивать историю, считая
+    синхронизацию завершённой.
     """
     # Проверка до всего остального: негодная строка запроса не должна
     # занимать соединение с базой и, тем более, разбирать удостоверение.
@@ -1145,16 +1156,29 @@ async def list_messages(
             return _auth_failure(auth.rejection, response)
 
     mode = history_service.read_mode(before_seq=before_seq, after_seq=after_seq)
-    async with runtime.connection(mode=mode) as conn:
-        result = await history_service.list_messages(
-            conn,
-            viewer=auth.user,
-            conversation_id=ConversationId(conversation_id),
-            before_seq=before_seq,
-            after_seq=after_seq,
-            through_seq=through_seq,
-            limit=limit,
-        )
+    try:
+        async with runtime.connection(mode=mode) as conn:
+            result = await history_service.list_messages(
+                conn,
+                viewer=auth.user,
+                conversation_id=ConversationId(conversation_id),
+                before_seq=before_seq,
+                after_seq=after_seq,
+                through_seq=through_seq,
+                limit=limit,
+            )
+    except InvalidCursor as exc:
+        # Второй источник того же `400`: правило о курсоре, для которого
+        # нужна голова беседы. Проверить его в строке запроса нельзя —
+        # в ней головы нет, — поэтому проверка живёт в сервисе, а ответ
+        # собирается здесь, тем же `_invalid_cursors`.
+        #
+        # Ловится именно `InvalidCursor`, а не `ValueError`, хотя выше
+        # ловится он: здесь широкая форма поймала бы любое будущее
+        # `ValueError` из сервиса и выдала бы его за ошибку клиента —
+        # то есть отказала бы в законном запросе, сославшись на курсор,
+        # которого клиент не касался.
+        return _problem_response(_invalid_cursors(exc), response)
 
     if not result.ok:
         # Видимость отказа решает сервис, а не обработчик: он знает, пришёл

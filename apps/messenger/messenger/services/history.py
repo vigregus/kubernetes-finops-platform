@@ -19,6 +19,7 @@ from messenger.domain.history import (
     DEFAULT_PAGE_SIZE,
     HistoryDirection,
     MessagePage,
+    validate_bound,
     validate_cursors,
 )
 from messenger.domain.ids import ConversationId, ConversationSeq
@@ -97,6 +98,13 @@ def read_mode(
     читаться так же строго, как первая. Не приняв параметра, функция не
     даёт это правило нарушить — нарушение потребовало бы сначала
     расширить её подпись.
+
+    Назвать требование и получить его — разные вещи, и здесь это важно:
+    `STALE_OK` говорит «отставание допустимо», а не «читай с реплики».
+    Решает `Runtime`, и сегодня он удовлетворяет `STALE_OK` писателем —
+    причина и условие включения реплики записаны в `Runtime._pool_for`.
+    Поэтому `read_mode` не «указывает, где читать», и читать его так
+    нельзя.
     """
     if before_seq is not None and after_seq is None:
         return ReadMode.STALE_OK
@@ -167,28 +175,32 @@ async def list_messages(
     # `has_more=false` до `k−1`, `sync_to_seq` возвращается равным `k`,
     # клиент считает синхронизацию завершённой и не видит `k` ни здесь,
     # ни в потоке.
-    if through_seq is None:
-        head = await conversations.fetch_last_seq(
-            conn, conversation_id=conversation_id
+    #
+    # Читается она всегда, а не только когда граница берётся из неё, и
+    # вторая причина тому — не порядок, а предел: курсор выше головы
+    # отвергается (`validate_bound`). Без этого `after_seq = 20` при голове
+    # 15 отдаёт `200` с `sync_to_seq = 15`, то есть синхронизацию **назад**,
+    # и клиент с разошедшимся курсором считает себя догнавшим и больше
+    # не спросит.
+    head = await conversations.fetch_last_seq(conn, conversation_id=conversation_id)
+    # Беседа исчезла между решением о доступе и чтением. Отдать пустую
+    # страницу с `sync_to_seq = null` честнее, чем `None` в поле,
+    # которое обязано быть числом: клиент прочтёт это как «снимка не
+    # было», а не как «синхронизация завершена на нуле».
+    if head is None:
+        return HistoryResult(
+            direction=HistoryDirection.FORWARD,
+            rejection=Reason.CONVERSATION_NOT_FOUND,
+            visibility=decision.visibility,
         )
-        # Беседа исчезла между решением о доступе и чтением. Отдать пустую
-        # страницу с `sync_to_seq = null` честнее, чем `None` в поле,
-        # которое обязано быть числом: клиент прочтёт это как «снимка не
-        # было», а не как «синхронизация завершена на нуле».
-        if head is None:
-            return HistoryResult(
-                direction=HistoryDirection.FORWARD,
-                rejection=Reason.CONVERSATION_NOT_FOUND,
-                visibility=decision.visibility,
-            )
-        bound = head
-    else:
-        # Эхо, а не повторное чтение головы. Контракт: «менять его по
-        # дороге нельзя, иначе снимок поедет». Проверить `through_seq`
-        # против головы значило бы вернуть гонку, ради устранения которой
-        # снимок и придуман, — значение выше головы или ниже уже
-        # отданного `sync_to_seq` остаётся ответственностью клиента.
-        bound = through_seq
+    validate_bound(after_seq=after_seq, through_seq=through_seq, head=head)
+
+    # Границей остаётся эхо `through_seq`, а не только что прочитанная
+    # голова: контракт — «менять его по дороге нельзя, иначе снимок поедет».
+    # Прочитанная голова гонки не возвращает именно потому, что ничего не
+    # замораживает: она отвергает то, чего ещё нет, и не подменяет собой
+    # то, что первый запрос уже назвал.
+    bound = through_seq if through_seq is not None else head
 
     page = await messages.fetch_page_forward(
         conn,

@@ -9,6 +9,15 @@
 Ограничение `messages_payload_matches_state` само отвергнет и «удалил,
 но содержимое осталось», и «содержимое убрал, а удаление не поставил», —
 поэтому валидность строки обеспечивает схема, а не наше утверждение.
+
+У проверки две фазы, и они намеренно разные. Первая — история, надгробие,
+границы и доступ — идёт в одной транзакции с откатом в конце: следов она
+не оставляет вовсе. Вторая — `DB-001` — коммитит по-настоящему, потому что
+вопрос у неё про **другое соединение**: увидит ли свежую страницу запрос,
+который пойдёт следом. В одной транзакции это утверждение выродилось бы
+в «транзакция видит собственную запись» — верное для Postgres и неверное
+для сервиса. Следы второй фазы снимаются вручную и в порядке, обратном
+созданию, — проверкой после уборки.
 """
 from __future__ import annotations
 
@@ -19,6 +28,7 @@ import uuid
 
 from messenger.domain.conversation import ConversationType
 from messenger.domain.errors import Reason, Visibility
+from messenger.domain.history import InvalidCursor
 from messenger.domain.ids import ClientMessageId, ConversationId, ConversationSeq
 from messenger.domain.message import MessageKind, MessagePayload
 from messenger.repositories import conversations, users
@@ -357,6 +367,26 @@ async def run() -> None:
                 and empty_snapshot.sync_to_seq == 15,
                 str(empty_snapshot),
             )
+            # Курсор из будущего — ошибка клиента, а не «пока пусто».
+            # Разница видна только здесь: невозможным `after_seq` делает
+            # голова беседы, и в строке запроса её нет. Пропусти сервер
+            # такой курсор — клиент получил бы `200` с `sync_to_seq`
+            # **ниже** своего курсора, прочёл бы это как «догнал»
+            # и больше не запросил бы историю.
+            ahead = await conn.fetchval(
+                "SELECT last_seq FROM conversations WHERE conversation_id = $1",
+                conversation_id,
+            )
+            try:
+                await page(after_seq=int(ahead) + 1)
+                отвергнут, причина = False, "страница отдана"
+            except InvalidCursor as exc:
+                отвергнут, причина = True, str(exc)
+            check(
+                "курсор выше головы отвергается, а не отдаёт синхронизацию назад",
+                отвергнут,
+                f"голова={ahead}, курсор={int(ahead) + 1}, {причина}",
+            )
             check(
                 "sync_to_seq есть ровно там, где задан after_seq",
                 first.sync_to_seq is None and with_tombstone.sync_to_seq is None,
@@ -364,24 +394,12 @@ async def run() -> None:
                 f"с before_seq={with_tombstone.sync_to_seq}",
             )
 
-            # --- DB-001: своя запись видна сразу ------------------------------
-            # Реплики в локальном кластере нет, поэтому проверяется вторая
-            # половина гарантии: чтение свежей страницы тем маршрутом, который
-            # выбрал маршрутизатор, действительно видит только что записанное.
-            # Первая половина — решение маршрутизатора — закрыта юнит-тестом;
-            # отставание настоящей реплики остаётся WAITING STAGE.
-            mode = history_service.read_mode(before_seq=None, after_seq=None)
-            check(
-                "DB-001: свежая страница читается с писателя",
-                mode is ReadMode.STRONG,
-                str(mode),
-            )
-            just_written = await page()
-            check(
-                "DB-001: только что отправленное не исчезает",
-                just_written.ok and 17 in seqs(just_written.page),
-                str(seqs(just_written.page) if just_written.ok else just_written.rejection),
-            )
+            # DB-001 живёт ниже, вне транзакции: «только что отправленное
+            # не исчезает» обязано проверяться на **другом** соединении.
+            # Здесь же оно означало бы «транзакция видит собственную
+            # незакоммиченную запись» — верное утверждение о Postgres
+            # и неверное о сервисе: в HTTP запись коммитит один запрос,
+            # а читает её следующий, со своим соединением.
 
             # --- Доступ -------------------------------------------------------
             denied = await page(viewer=outsider)
@@ -398,15 +416,127 @@ async def run() -> None:
         finally:
             await outer.rollback()
 
+    # --- DB-001: своя запись видна сразу, на другом соединении ---------------
+    #
+    # Две половины гарантии по отдельности. Первая — решение маршрутизатора —
+    # закрыта юнит-тестом (`test_history_service.py`). Здесь вторая: чтение
+    # свежей страницы тем путём, который маршрутизатор выбрал, действительно
+    # видит только что записанное, и видит его **другим соединением**.
+    # Непроверенным остаётся ровно одно звено — что настоящая реплика отстаёт;
+    # для этого нужен stage.
+    #
+    # Своя беседа, а не та, что выше: там всё откатывается, а здесь обязано
+    # остаться в базе до прочтения — то есть до момента, когда коммит увидят
+    # другие соединения. Поэтому и уборка своя, и она не формальность: без неё
+    # проверка оставляла бы в общей базе беседу, пользователей и события
+    # outbox. Внешних ключей с `ON DELETE CASCADE` в схеме нет ни одного,
+    # а `outbox` вообще не ссылается на `messages` (`aggregate_id` — просто
+    # uuid), так что удаление молча оставило бы события висеть.
+    db001_conversation = ConversationId(uuid.uuid4())
+    db001_marker = uuid.uuid4().hex
+    try:
+        # Оба соединения держатся одновременно, и это не стиль. Пул отдаёт
+        # освобождённое соединение повторно, поэтому «взяли после записи»
+        # ещё не значит «взяли другое»: проверка на одном и том же
+        # соединении ничего не доказывает о следующем HTTP-запросе. Здесь
+        # они физически разные — `max_size = 2` заставляет пул открыть
+        # второе, — а запись к моменту чтения закоммичена: `send_message`
+        # владеет своей транзакцией и закрывает её сама.
+        async with pool.acquire() as writer_conn, pool.acquire() as reader_conn:
+            author_db001 = (
+                await users.ensure_user(
+                    writer_conn,
+                    external_id=f"db001-check-{db001_marker}-author",
+                    display_name="Автор",
+                    email=f"db001-{db001_marker}-author@example.org",
+                    email_verified=True,
+                )
+            ).user
+            await conversations.insert_conversation(
+                writer_conn,
+                conversation_id=db001_conversation,
+                type=ConversationType.DIRECT,
+                direct_key=f"db001-check:{db001_marker}",
+            )
+            await conversations.add_member(
+                writer_conn,
+                conversation_id=db001_conversation,
+                user_id=author_db001.user_id,
+            )
+            written = await message_service.send_message(
+                writer_conn,
+                sender_id=author_db001.user_id,
+                conversation_id=db001_conversation,
+                client_message_id=ClientMessageId(uuid.uuid4()),
+                kind=MessageKind.TEXT,
+                payload=MessagePayload(text="привет"),
+            )
+            check(
+                "DB-001: отправка принята и закоммичена",
+                written.ok,
+                str(written.rejection),
+            )
+
+            # Дальше — как следующий HTTP-запрос: своё соединение, свой
+            # доступ, свежая страница. Маршрутизатор выбирает писателя
+            # (DB-001 в этой половине и состоит).
+            mode = history_service.read_mode(before_seq=None, after_seq=None)
+            check(
+                "DB-001: свежая страница маршрутизируется к писателю",
+                mode is ReadMode.STRONG,
+                str(mode),
+            )
+            just_written = await history_service.list_messages(
+                reader_conn,
+                viewer=author_db001,
+                conversation_id=db001_conversation,
+                limit=5,
+            )
+            check(
+                "DB-001: только что отправленное не исчезает на другом соединении",
+                just_written.ok and seqs(just_written.page) == [1],
+                str(
+                    seqs(just_written.page)
+                    if just_written.ok
+                    else just_written.rejection
+                ),
+            )
+    finally:
+        # Порядок обратен созданию: outbox не связан ключом с messages,
+        # участники ссылаются на беседу и пользователей, сообщения — на беседу.
+        async with pool.acquire() as cleanup_conn:
+            await cleanup_conn.execute(
+                "DELETE FROM outbox WHERE partition_key = $1", str(db001_conversation)
+            )
+            await cleanup_conn.execute(
+                "DELETE FROM messages WHERE conversation_id = $1", db001_conversation
+            )
+            await cleanup_conn.execute(
+                "DELETE FROM conversation_members WHERE conversation_id = $1",
+                db001_conversation,
+            )
+            await cleanup_conn.execute(
+                "DELETE FROM conversations WHERE conversation_id = $1", db001_conversation
+            )
+            await cleanup_conn.execute(
+                "DELETE FROM users WHERE external_id LIKE $1",
+                f"db001-check-{db001_marker}-%",
+            )
+
     leftovers = await pool.fetchrow(
         """
         SELECT
-            (SELECT count(*) FROM users WHERE external_id LIKE $1) AS users,
-            (SELECT count(*) FROM conversations WHERE conversation_id = $2) AS conversations,
-            (SELECT count(*) FROM messages WHERE conversation_id = $2) AS messages
+            (SELECT count(*) FROM users WHERE external_id LIKE ANY($1)) AS users,
+            (SELECT count(*) FROM conversations WHERE conversation_id = ANY($2))
+                AS conversations,
+            (SELECT count(*) FROM conversation_members WHERE conversation_id = ANY($2))
+                AS members,
+            (SELECT count(*) FROM messages WHERE conversation_id = ANY($2)) AS messages,
+            (SELECT count(*) FROM outbox WHERE partition_key = ANY($3)) AS outbox_events
         """,
-        f"history-check-{marker}-%",
-        conversation_id,
+        [f"history-check-{marker}-%", f"db001-check-{db001_marker}-%"],
+        [conversation_id, db001_conversation],
+        [str(conversation_id), str(db001_conversation)],
     )
     check(
         "после проверки в базе не осталось следов",

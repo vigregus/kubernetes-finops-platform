@@ -7,7 +7,7 @@ from typing import Any
 
 import asyncpg
 
-from messenger.domain.history import MessagePage
+from messenger.domain.history import MAX_SEQ, MessagePage
 from messenger.domain.ids import (
     ClientMessageId,
     ConversationId,
@@ -30,14 +30,21 @@ _COLUMNS = """
     created_at, edited_at, deleted_at
 """
 
-# Верхняя граница для выборки «с самых новых»: `conversation_seq` объявлен
-# `bigint`, поэтому «строго меньше максимума» и есть «без границы».
-# Считается в Python и подставляется параметром, а не выражается через
-# `COALESCE($2, $3)` или `($2 IS NULL OR ...)`: там условие перестаёт быть
-# сравнением по индексируемой колонке, и планировщик читает индекс
-# полностью, отбрасывая лишнее после. На `messages_conversation_seq_idx`
+# Две верхние границы для обратной выборки, и различие между ними — не
+# косметика. Курсор клиента **исключает** свой номер: на нестрогом последний
+# элемент страницы попал бы ещё и в следующую, и `HIST-001` покраснел бы на
+# стыке. А «самые новые» — наоборот, **включают** максимум: строгая граница
+# на `MAX_SEQ` отсекла бы законный номер `2**63 - 1`, который схема не
+# запрещает, и сообщение с ним исчезло бы из истории молча — страница просто
+# оказалась бы короче на один.
+#
+# Оба условия — простое сравнение по индексируемой колонке, а не
+# `COALESCE($2, $3)` или `($2 IS NULL OR ...)`: там планировщик читает индекс
+# целиком и отбрасывает лишнее после, а на
+# `messages_conversation_seq_idx (conversation_id, conversation_seq DESC)`
 # обратная страница обязана сниматься одним проходом.
-_NO_UPPER_BOUND = ConversationSeq(2**63 - 1)
+_BELOW_MAX = "conversation_seq <= $2"
+_BELOW_CURSOR = "conversation_seq < $2"
 
 
 def _to_message(row: asyncpg.Record) -> Message:
@@ -242,27 +249,26 @@ async def fetch_page_backward(
     элемент страницы попадёт ещё и в следующую, и клиент увидит дубль на
     стыке, не заметив пропуска.
 
-    Отсутствие курсора — не «нет условия», а «условие от максимума».
-    `COALESCE($2, $3)` и `($2 IS NULL OR conversation_seq < $2)` дали бы то
-    же множество строк, но перестали бы быть условием **по индексу**:
-    `messages_conversation_seq_idx (conversation_id, conversation_seq DESC)`
-    отдаёт страницу одним обратным проходом только при простом сравнении.
+    Отсутствие курсора — не «нет условия», а «условие от максимума»: см.
+    `_BELOW_MAX` и `_BELOW_CURSOR` о том, почему граница включается только
+    здесь.
 
     Надгробия не отфильтрованы намеренно. Удалённое сообщение занимает свой
     слот и в нумерации, и в размере страницы (ADR 0004); `deleted_at IS NULL`
     в `WHERE` дал бы страницу короче `limit`, и клиент не отличил бы
     «обрезано удалением» от «конец истории».
     """
-    bound = before_seq if before_seq is not None else _NO_UPPER_BOUND
+    predicate = _BELOW_CURSOR if before_seq is not None else _BELOW_MAX
+    bound = before_seq if before_seq is not None else MAX_SEQ
     rows = await conn.fetch(
         f"""
         SELECT {_COLUMNS}
           FROM messages
          WHERE conversation_id = $1
-           AND conversation_seq < $2
+           AND {predicate}
          ORDER BY conversation_seq DESC
          LIMIT $3
-        """,  # noqa: S608 - подставляется только _COLUMNS, данных в тексте нет
+        """,  # noqa: S608 - подставляются _COLUMNS и оператор, данных в тексте нет
         conversation_id,
         bound,
         limit + 1,

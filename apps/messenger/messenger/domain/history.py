@@ -29,6 +29,35 @@ MAX_PAGE_SIZE = 100
 MIN_BEFORE_SEQ = 1
 MIN_AFTER_SEQ = 0
 
+# Наибольший номер, который вообще может быть у сообщения: `conversation_seq`
+# объявлен `bigint`, и контракт говорит то же самое — `format: int64`.
+#
+# Проверять верхнюю границу обязательно, и не ради полноты. Python и FastAPI
+# примут `?before_seq=999999999999999999999999999` молча, а расхождение
+# вылезет уже в драйвере: `asyncpg` отдаёт `DataError` на приведении
+# к `bigint`, то есть вместо объявленного контрактом `400` клиент получит
+# `500`. Ошибка клиента обязана оставаться ошибкой клиента.
+#
+# Это же значение — верхняя граница страницы «с самых новых».
+MAX_SEQ = 2**63 - 1
+
+
+class InvalidCursor(ValueError):
+    """Курсор, негодность которого видна не всегда сразу.
+
+    Часть правил о курсорах — про саму строку запроса, и проверить их можно
+    до обращения к данным: `before_seq` вместе с `after_seq`, размер
+    страницы, пределы `int64`. Другая часть — про курсор рядом с данными:
+    `after_seq = 20` при голове 15 выглядит правильным числом, и невозможным
+    его делает только голова.
+
+    Оба случая — ошибка клиента и один ответ `400`, поэтому и исключение
+    одно: разделив их, пришлось бы либо завести вторую `Reason` (таксономия
+    закрыта и описывает данные и право, а не строку запроса), либо нести
+    текст нарушения в поле результата, то есть завести второй канал отказа
+    рядом с `rejection`.
+    """
+
 
 class HistoryDirection(str, Enum):
     """Куда листается история.
@@ -63,7 +92,11 @@ def validate_cursors(
     through_seq: int | None,
     limit: int,
 ) -> None:
-    """Запрещённые сочетания курсоров. Отказ — `ValueError`, как у payload.
+    """Запрещённые сочетания курсоров. Отказ — `InvalidCursor`, как у payload.
+
+    Здесь только то, что видно по одной строке запроса: `limit`, минимумы,
+    максимумы и сочетания. Ничего про голову беседы тут быть не может —
+    функция обязана отвечать без базы, потому что вызывается рано.
 
     Равенство `after_seq` и `through_seq` ошибкой **не** считается: это
     пустой снимок и обычный ответ на повтор. Запрет стоит на строгом
@@ -72,27 +105,75 @@ def validate_cursors(
     """
 
     if limit < 1 or limit > MAX_PAGE_SIZE:
-        raise ValueError(
+        raise InvalidCursor(
             f"размер страницы должен быть от 1 до {MAX_PAGE_SIZE}, а не {limit}"
         )
     if before_seq is not None and after_seq is not None:
-        raise ValueError(
+        raise InvalidCursor(
             "before_seq и after_seq задают разные направления — нужен один"
         )
     if through_seq is not None and after_seq is None:
-        raise ValueError("through_seq имеет смысл только вместе с after_seq")
+        raise InvalidCursor("through_seq имеет смысл только вместе с after_seq")
     if before_seq is not None and before_seq < MIN_BEFORE_SEQ:
-        raise ValueError(f"before_seq не может быть меньше {MIN_BEFORE_SEQ}")
+        raise InvalidCursor(f"before_seq не может быть меньше {MIN_BEFORE_SEQ}")
     if after_seq is not None and after_seq < MIN_AFTER_SEQ:
-        raise ValueError(f"after_seq не может быть меньше {MIN_AFTER_SEQ}")
+        raise InvalidCursor(f"after_seq не может быть меньше {MIN_AFTER_SEQ}")
     if through_seq is not None and through_seq < MIN_AFTER_SEQ:
-        raise ValueError(f"through_seq не может быть меньше {MIN_AFTER_SEQ}")
+        raise InvalidCursor(f"through_seq не может быть меньше {MIN_AFTER_SEQ}")
     if (
         through_seq is not None
         and after_seq is not None
         and through_seq < after_seq
     ):
-        raise ValueError(
+        raise InvalidCursor(
             f"through_seq ({through_seq}) меньше after_seq ({after_seq}): "
             "такого диапазона не существует"
+        )
+    # Верхняя граница проверяется здесь же, хотя `limit` уже выше: у курсоров
+    # она своя и лежит в той же причине — не пропустить нарушение `int64`
+    # к драйверу.
+    for name, value in (
+        ("before_seq", before_seq),
+        ("after_seq", after_seq),
+        ("through_seq", through_seq),
+    ):
+        if value is not None and value > MAX_SEQ:
+            raise InvalidCursor(
+                f"{name} ({value}) больше предела int64 ({MAX_SEQ}): "
+                "такого номера не может быть ни у одного сообщения"
+            )
+
+
+def validate_bound(*, after_seq: int, through_seq: int | None, head: int) -> None:
+    """Курсор против головы беседы: `after_seq <= bound <= head`.
+
+    Голова здесь — не «текущее состояние, которое можно освежить», а
+    **предел выданного**: `last_seq = k` наблюдаемо ровно тогда, когда
+    наблюдаемо сообщение `k`, поэтому номер выше головы не мог прийти
+    ни потоком, ни прошлым ответом. Значит, это ошибка клиента, а не гонка,
+    и отвергать её можно без риска отказать законному запросу — в отличие
+    от проверки «догнала ли реплика границу», которая как раз про данные.
+
+    Почему без этой проверки нельзя: `after_seq = 20` при голове 15 даёт
+    диапазон `20 < seq <= 15`, то есть ни одного номера, и сервер честно
+    отвечает `200` с `sync_to_seq = 15`. Клиент, у которого `after_seq`
+    разошёлся с беседой (перепутан идентификатор приложения, уцелевший
+    локальный кеш другой беседы), прочитает это как «синхронизирован»
+    и больше не запросит историю никогда. Молчаливый откат к более старой
+    точке выглядит для клиента одинаково с успехом.
+
+    Проверка не отменяет эхо `through_seq`: голова читается, чтобы
+    отвергнуть будущее, но границей снимка остаётся то, что назвал первый
+    запрос. Подменить её головой — значит вернуть гонку, ради устранения
+    которой снимок и придуман.
+    """
+    if after_seq > head:
+        raise InvalidCursor(
+            f"after_seq ({after_seq}) выше головы беседы ({head}): "
+            "такого сообщения ещё нет"
+        )
+    if through_seq is not None and through_seq > head:
+        raise InvalidCursor(
+            f"through_seq ({through_seq}) выше головы беседы ({head}): "
+            "такого сообщения ещё нет"
         )

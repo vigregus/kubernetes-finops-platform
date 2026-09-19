@@ -22,7 +22,7 @@ from fastapi.testclient import TestClient
 from messenger.api import main
 from messenger.api.main import app
 from messenger.domain.errors import Reason, Visibility
-from messenger.domain.history import HistoryDirection, MessagePage
+from messenger.domain.history import HistoryDirection, InvalidCursor, MessagePage
 from messenger.domain.ids import ConversationId, ConversationSeq
 from messenger.domain.message import Message, MessageKind, MessagePayload
 from messenger.domain.user import User
@@ -199,6 +199,12 @@ def test_размер_страницы_по_умолчанию_из_контра
         {"before_seq": 0},
         {"after_seq": -1},
         {"after_seq": 0, "through_seq": -1},
+        # Верхний предел `int64`. Без него столько цифр доехало бы
+        # до драйвера и обернулось `DataError`, то есть `500` на ошибку
+        # клиента вместо объявленного контрактом `400`.
+        {"before_seq": 2**63},
+        {"after_seq": 2**63},
+        {"after_seq": 0, "through_seq": 2**63},
     ],
 )
 def test_негодный_курсор_отвергается_400(client, monkeypatch, runtime, отказ, параметры):
@@ -232,6 +238,26 @@ def test_нечисловой_курсор_остаётся_422(client, monkeypa
     authenticated(monkeypatch)
     r = client.get(URL, params={"before_seq": "вчера"})
     assert r.status_code == 422
+
+
+def test_курсор_выше_головы_это_400_а_не_пустая_страница(client, monkeypatch, runtime, отказ):
+    """Второй источник того же `400`, и он виден только рядом с данными.
+
+    `after_seq = 20` при голове 15 в строке запроса выглядит правильным
+    числом; невозможным его делает голова. Ответ обязан быть `400`, а не
+    `200` с `sync_to_seq = 15`: клиент прочёл бы второй как «догнал»
+    и перестал запрашивать историю. Обработчик получает доменное
+    исключение из сервиса и собирает ответ тем же `_invalid_cursors` —
+    разойдясь, они дали бы два разных `400` на одну ошибку клиента.
+    """
+    authenticated(monkeypatch)
+
+    async def _отвергает(conn, **kwargs):
+        raise InvalidCursor("after_seq (20) выше головы беседы (15)")
+
+    monkeypatch.setattr(history_service, "list_messages", _отвергает)
+
+    отказ(client.get(URL, params={"after_seq": 20}), status=400, code="invalid_cursor")
 
 
 # --- Доступ ---------------------------------------------------------------
