@@ -22,7 +22,7 @@ from urllib.parse import parse_qs
 from fastapi import FastAPI, Response
 from fastapi.responses import JSONResponse
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from starlette.requests import Request
 
 from messenger.domain.conversation_list import (
@@ -45,6 +45,12 @@ from messenger.domain.message import (
     MessagePayload,
     validate_message_payload,
 )
+from messenger.domain.receipts import (
+    InvalidReceipt,
+    ReadState,
+    Receipts,
+    validate_receipts,
+)
 from messenger.domain.user import capabilities_of
 from messenger.services import backchannel as backchannel_service
 from messenger.services import conversations as conversation_service
@@ -53,6 +59,7 @@ from messenger.services import identity as identity_service
 from messenger.services import login as login_service
 from messenger.services import messages as message_service
 from messenger.services import realtime as realtime_service
+from messenger.services import receipts as receipts_service
 from messenger.services import runtime as runtime_service
 from messenger.services import session_management as session_service
 from messenger.services import verification as verification_service
@@ -1100,6 +1107,45 @@ class SendMessage(BaseModel):
     attachment_ids: list[uuid.UUID] = Field(default_factory=list)
 
 
+class SetReceipts(BaseModel):
+    """Тело `POST /conversations/{id}/receipts`. Имена — из контракта.
+
+    `extra="forbid"` требует контракт (`additionalProperties: false`), и
+    это единственное место в API с таким запретом. У `SendMessage` его
+    нет, и это не повод выравнивать в обратную сторону: там контракт
+    молчит, здесь запрещает. Тихо проглоченная опечатка (`red_seq`)
+    обернулась бы валидным телом без единого названного номера.
+
+    `anyOf` из спецификации повторяется здесь валидатором, а не остаётся
+    транспорту: обработчику форма без номеров бесполезна, и полагаться
+    на то, что схему кто-то проверил до него, значит связать поведение
+    домена со сторонним валидатором спецификации.
+
+    Границы значений (`ge=0`, `le=MAX_SEQ`) в модель **не** ставятся:
+    они переселили бы отказ по диапазону в чужой по формату `422` и
+    раздвоили одну ошибку клиента на два кода. Это то же записанное
+    решение, что и для курсоров, — проверка живёт в домене, ответ
+    собирается `_invalid_receipt`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # `None` — «не сообщили», и это не ноль. Различие живёт только здесь,
+    # до нормализации: `state_of` переводит отсутствие в ноль, и на
+    # области, ограниченной снизу нулём, различить их больше нечем.
+    delivered_seq: int | None = None
+    read_seq: int | None = None
+
+    @model_validator(mode="after")
+    def _require_a_number(self) -> SetReceipts:
+        if self.delivered_seq is None and self.read_seq is None:
+            raise ValueError(
+                "квитанция не называет ни одного номера: "
+                "нужен delivered_seq или read_seq"
+            )
+        return self
+
+
 def _message_body(message) -> dict[str, object]:
     """Сообщение в форме контракта.
 
@@ -1246,6 +1292,41 @@ def _invalid_cursors(exc: InvalidCursor) -> Problem:
     ошибку клиента.
     """
     return Problem(400, "invalid_cursor", str(exc))
+
+
+def _invalid_receipt(exc: InvalidReceipt) -> Problem:
+    """Негодный номер квитанции: `400` с кодом `invalid_receipt`.
+
+    Сосед `_invalid_cursors`, и различие то же: тело разобралось в модель,
+    негодно значение. Код отдельный, а не `invalid_cursor`, потому что у
+    квитанции курсора нет: клиент, разбирающий `code`, получил бы по нему
+    неверную инструкцию — «поправь курсор» вместо «поправь номер».
+
+    Одна функция на оба случая, как и у курсора: негодность видна либо по
+    самой квитанции (`2**63`), либо только рядом с данными (номер выше
+    головы беседы). Доменное исключение одно, ответ один — значит и сборка
+    одна: разойдясь, они дали бы два разных `400` на одну ошибку клиента.
+    """
+    return Problem(400, "invalid_receipt", str(exc))
+
+
+def _receipts_body(state: ReadState) -> dict[str, object]:
+    """Состояние **после применения**, а не присланное клиентом.
+
+    Контракт обещает здесь текущее значение, и на этом держится различие
+    «применено» и «проигнорировано»: отставшая квитанция получает не то,
+    что прислала, — иначе клиент счёл бы применённым отвергнутое
+    монотонностью.
+
+    Оба поля выписываются явно, без проверок на ложность: ноль законен
+    (`minimum: 0`) и он же — всё содержимое свежей строки, поэтому
+    `if state.read_seq:` выбросил бы ключ ровно там, где тело обязано
+    нести оба.
+    """
+    return {
+        "delivered_seq": int(state.delivered_seq),
+        "read_seq": int(state.read_seq),
+    }
 
 
 def _history_body(result: history_service.HistoryResult) -> dict[str, object]:
@@ -1452,6 +1533,82 @@ async def send_message(
     # трассы поиск по `trace_id` находит только одну из трёх, поэтому
     # найти сообщение в Tempo можно ровно по этому атрибуту.
     tracing.set_anchor_attribute("messaging.message.id", str(result.message.message_id))
+    return body_out
+
+
+@app.post("/conversations/{conversation_id}/receipts", response_model=dict[str, object])
+async def set_receipts(
+    conversation_id: uuid.UUID,
+    body: SetReceipts,
+    request: Request,
+    response: Response,
+) -> dict[str, object] | Response:
+    """Квитанция клиента: «дошло до K, прочитано до M».
+
+    Ответ всегда `200` и всегда несёт состояние **после применения**, а не
+    присланное. Этим клиент и отличает «применено» от «проигнорировано»:
+    отставшая квитанция не откатывает счётчик, и если бы в ответ уезжало
+    присланное, клиент счёл бы применённым то, что отвергнуто
+    монотонностью. `201` здесь нет и быть не может — квитанция ничего не
+    создаёт, а описывает уже существующее.
+
+    **Только запись.** Ни строки в `outbox`, ни топика Kafka, ни
+    публикации в Centrifugo: схемы события `receipt.*` не существует, и
+    выдумать её здесь значило бы выпустить в провод событие без
+    владельца. Оповещение собеседника — отдельная задача бэклога.
+
+    Соединение **одно** на удостоверение и запись, в отличие от
+    `list_messages` с его двумя. Там второе берётся под свой режим
+    чтения; здесь путь записи, а у него режим один — писатель. Голова
+    беседы обязана читаться им же: на отставшей реплике `last_seq` меньше
+    головы, и честная квитанция получила бы ложный отказ.
+
+    Отсутствие членства наружу выглядит как отсутствие беседы — `404`,
+    как на `POST /messages`: `403` подтвердил бы, что беседа существует.
+    Негодный номер отвергается `400 invalid_receipt`, и обе причины
+    отказа — предел `int64` и голова беседы — приходят одним кодом из
+    домена.
+    """
+    receipts = Receipts(delivered_seq=body.delivered_seq, read_seq=body.read_seq)
+    # Та же доменная проверка, что и в сервисе, но раньше: негодный запрос
+    # не должен занимать соединение с пулом. Правило одно — вызывается
+    # дважды, а не переписывается здесь своими словами. Ловится именно
+    # `InvalidReceipt`, а не `ValueError`: широкая форма поймала бы любое
+    # будущее доменное исключение и выдала бы его за ошибку клиента.
+    try:
+        validate_receipts(receipts)
+    except InvalidReceipt as exc:
+        return _problem_response(_invalid_receipt(exc), response)
+
+    runtime = request.app.state.runtime
+    async with runtime.connection() as conn:
+        auth = await _current(request, conn)
+        if not auth.ok or auth.user is None:
+            return _auth_failure(auth.rejection, response)
+
+        try:
+            result = await receipts_service.set_receipts(
+                conn,
+                viewer=auth.user,
+                conversation_id=ConversationId(conversation_id),
+                receipts=receipts,
+            )
+        except InvalidReceipt as exc:
+            # Номер выше головы беседы: негодность видна только рядом
+            # с данными, поэтому проверка живёт в сервисе, а ответ
+            # собирается здесь — тем же `_invalid_receipt`, что и выше.
+            return _problem_response(_invalid_receipt(exc), response)
+
+    if not result.ok or result.state is None:
+        # Видимость отказа решает сервис, а не обработчик: он знает,
+        # пришёл субъект по своей ссылке или подобрал идентификатор.
+        return _problem_response(
+            to_problem(result.rejection or Reason.INTERNAL, result.visibility),
+            response,
+        )
+
+    with tracing.span("response"):
+        body_out = _receipts_body(result.state)
     return body_out
 
 
