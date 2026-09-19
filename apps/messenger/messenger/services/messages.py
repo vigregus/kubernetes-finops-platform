@@ -1,6 +1,7 @@
 """Атомарный приём сообщения и двух событий outbox."""
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 
@@ -24,6 +25,8 @@ from messenger.domain.message import (
 )
 from messenger.repositories import conversations, messages, outbox
 from messenger.telemetry import metrics, tracing
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,7 +196,7 @@ async def send_message(
                 # метрика записана.
                 metrics.message_commit(time.perf_counter() - started, result="success")
                 return SendMessageResult(message=message, created=True)
-        except Exception:
+        except Exception as exc:
             # Исключение здесь — это отказ базы, а не отклонённый домен:
             # доменные исходы (NOT_A_MEMBER, ValueError выше по стеку)
             # возвращаются, а не бросаются. `messenger_message_commit_duration_seconds`
@@ -201,4 +204,19 @@ async def send_message(
             # сообщения», а не диагностика причины: причину несёт исключение,
             # которое летит дальше нетронутым.
             metrics.message_commit(time.perf_counter() - started, result="failed")
+            # `message_id` в записи нет: он рождается внутри транзакции
+            # (`new_message_id()` вызывается только перед `message.insert`),
+            # и отказ мог случиться раньше - в блокировке строки беседы
+            # или в самой вставке. `client_message_id` есть всегда: это
+            # вход функции, и по нему разбор "что случилось с попыткой
+            # отправить" возможен даже когда `message_id` никогда
+            # не появился.
+            log.error(
+                "транзакция приёма сообщения не завершилась",
+                extra={"event": "message_commit_failed", "result": "failed",
+                       "error_code": type(exc).__name__,
+                       "conversation_id": str(conversation_id),
+                       "sender_id": str(sender_id),
+                       "client_message_id": str(client_message_id)},
+            )
             raise

@@ -81,6 +81,13 @@ EVENTS: dict[str, str] = {
     # в первой же строке пода, а не после чтения чарта.
     "tracing_config": APPLICATION,
     # Конвейер сообщения.
+    #
+    # `message_commit_failed` - docs/messenger/06-observability.md,
+    # "Определение готовности" называет его обязательным минимумом для
+    # MSG-001: без него путь `message_id -> журналы` для отказавшей
+    # записи не начать (сообщение может даже не получить message_id,
+    # если транзакция упала раньше вставки - см. services/messages.py).
+    "message_commit_failed": APPLICATION,
     "outbox_cycle": APPLICATION,
     "outbox_publish": APPLICATION,
     "outbox_unroutable": APPLICATION,
