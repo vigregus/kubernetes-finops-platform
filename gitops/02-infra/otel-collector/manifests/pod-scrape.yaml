@@ -23,6 +23,15 @@
 #
 # Порт числом, а не именем: 8888 задан в values.yaml как порт опроса,
 # и имя контейнерного порта у чарта своё - число от него не зависит.
+#
+# Поле называется `portNumber`, а не `port`: `port` в этом CRD типизирован
+# как строка и означает имя контейнерного порта (см. другие *-scrape.yaml
+# в этом репозитории - `port: metrics`, `port: web`, `port: prometheus`).
+# Число в `port` YAML разбирает как int, а схема ждёт string - апдейт
+# StatefulSet/объекта отклоняется, и Argo CD ретраит его до победного
+# конца впустую (`.spec.podMetricsEndpoints[0].port: expected string,
+# got ...8888`). `portNumber` (int32) - отдельное поле именно под этот
+# случай, когда нужен номер, а не имя.
 apiVersion: operator.victoriametrics.com/v1beta1
 kind: VMPodScrape
 metadata:
@@ -40,6 +49,6 @@ spec:
     matchLabels:
       app.kubernetes.io/name: opentelemetry-collector
   podMetricsEndpoints:
-    - port: 8888
+    - portNumber: 8888
       path: /metrics
       interval: 15s
