@@ -113,7 +113,7 @@ services:
       httpGet:
         path: /livez
         port: http
-      periodSeconds: 60
+      periodSeconds: 10
       failureThreshold: 3
     livenessProbe:
       httpGet:
