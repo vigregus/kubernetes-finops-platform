@@ -327,13 +327,23 @@ def parameter_schema_findings(old_doc, new_doc, old_param, new_param):
     включая появление и исчезновение: сгенерированный клиент отображает
     `date-time` в свой тип, и ответ на вопрос «что за значение» меняется
     вместе с форматом, даже когда по проводу едет та же строка.
+
+    Появление `type` там, где его не было, — тот же класс, что появление
+    перечисления, границы или формата, и ловится наравне с ними: «тип
+    не объявлен» — не «нечего сравнивать», а самое широкое из возможных
+    состояний. Схема `{}` принимает любое значение, схема `{type: string}`
+    — только строку, и запрос, вчера законный, сегодня получает `400`.
+    Отсутствие типа находкой не сопровождается: снятие ограничения
+    оставляет вчерашний запрос законным.
     """
     was = _param_schema(old_doc, old_param)
     became = _param_schema(new_doc, new_param)
     findings = []
 
     old_types, new_types = _types(was), _types(became)
-    if old_types and new_types and old_types - new_types:
+    if new_types is not None and old_types is None:
+        findings.append(f"появилось ограничение типа {sorted(new_types)}")
+    elif old_types and new_types and old_types - new_types:
         findings.append(f"тип сужен {sorted(old_types)} → {sorted(new_types)}")
 
     old_format, new_format = was.get("format"), became.get("format")
