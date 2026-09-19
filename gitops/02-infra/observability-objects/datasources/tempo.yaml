@@ -14,16 +14,26 @@ spec:
     access: proxy
     url: http://tempo-local.observability.svc.cluster.local:3200
     jsonData:
+      # У мессенджера на одно сообщение — три отдельные трассы (запрос
+      # API, отправитель outbox, потребитель realtime), связанные не
+      # общим trace_id, а атрибутом `messaging.message.id`
+      # (docs/messenger/06-observability.md, "Три трассы, а не одна").
+      # Этот конфиг раньше был унаследован от checkout/analytics (одна
+      # трасса на сервис) и искал логи только по trace_id того спана,
+      # с которого кликнули, - переход из `kafka.produce` в outbox-relay
+      # находил логи только этого сервиса, никогда не consumer-realtime
+      # той же доставки. `tags` ниже строит запрос по `message_id`
+      # вместо trace_id: он есть на корневом спане API (его туда кладёт
+      # `tracing.set_anchor_attribute` после создания сообщения,
+      # apps/messenger/messenger/api/main.py) и на `kafka.produce`/
+      # `centrifugo.publish` — то есть ровно на тех спанах, с которых
+      # реально начинают расследование конкретного сообщения.
       tracesToLogsV2:
         datasourceUid: victorialogs
         spanStartTimeShift: "-2m"
         spanEndTimeShift: "2m"
         filterByTraceID: false
         filterBySpanID: false
-        customQuery: true
-        # apps/checkout and apps/analytics print a JSON line with trace_id
-        # on every request (see app.py). VictoriaLogs auto-parses JSON log
-        # lines and promotes trace_id to a real field (confirmed via
-        # `trace_id:"<id>"` matching entries from both services), so this
-        # queries the field directly rather than full-text searching _msg.
-        query: '_time:5m trace_id:"${__trace.traceId}"'
+        tags:
+          - key: messaging.message.id
+            value: message_id

@@ -17,15 +17,31 @@ spec:
     access: proxy
     url: http://vl-local-victoria-logs-single-server.observability.svc.cluster.local:9428
     jsonData:
-      # trace_id is a structured field on every log line (see log_json() in
-      # apps/checkout|analytics/app.py) - this is the *second* hop of the
-      # metrics -> logs -> traces chain: a metric panel links to a windowed
-      # log view (see dashboards/manifests/application-overview.yaml), and
-      # from there a specific line with a trace_id jumps into Tempo.
+      # Второй прыжок цепочки "метрики -> логи -> трассы": метрика ведёт
+      # на окно логов, оттуда конкретная строка ведёт в Tempo.
+      #
+      # Два derived field, а не один, и это не дублирование. `trace_id`
+      # прыгает на ОДНУ конкретную трассу того же сервиса, что писал
+      # строку, - у мессенджера это только треть пути сообщения
+      # (docs/messenger/06-observability.md, "Три трассы, а не одна":
+      # у API, outbox-relay и consumer-realtime свои trace_id для одной
+      # доставки). `message_id` - это и есть сквозной ключ из документа:
+      # ссылка ведёт не на одну трассу по id, а на TraceQL-поиск по
+      # `messaging.message.id` сразу во всех сервисах namespace
+      # messenger, поэтому она не datasourceUid-переход внутрь Tempo
+      # (тот умеет только "открыть трассу по id"), а обычная ссылка на
+      # готовый Explore-запрос - тот же приём, что уже используют
+      # `traces_url` в victoria-stack/rules/*.yaml.
       derivedFields:
         - datasourceUid: tempo
           matcherType: label
           matcherRegex: trace_id
           name: trace_id
           url: "${__value.raw}"
-          urlDisplayLabel: "View trace"
+          urlDisplayLabel: "View trace (этот сегмент)"
+        - matcherType: label
+          matcherRegex: message_id
+          name: message_id
+          url: >-
+            /explore?schemaVersion=1&panes=%7B%22e1w%22%3A%7B%22datasource%22%3A%22tempo%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22queryType%22%3A%22traceql%22%2C%22query%22%3A%22%7Bmessaging.message.id%3D%5C%22${__value.raw}%5C%22%7D%22%7D%5D%7D%7D&orgId=1
+          urlDisplayLabel: "Найти сообщение во всех трёх трассах"
