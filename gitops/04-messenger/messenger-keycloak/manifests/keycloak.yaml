@@ -58,6 +58,18 @@ spec:
     # на первом же перенаправлении.
     headers: xforwarded
 
+  # Без этого Keycloak пишет текстовый лог4j-вывод, для которого у
+  # хранилища журналов нет ни `_msg`, ни `message`, ни `msg`
+  # (gitops/02-infra/observability-objects/promtail/values.yaml,
+  # `_msg_field=_msg,msg,message,output`) - записи вроде предупреждения
+  # о non-secure cookie context оседали в VictoriaLogs без текста.
+  # `log-console-output=json` переводится оператором в
+  # `KC_LOG_CONSOLE_OUTPUT=json`; поток (`log_stream`) записи не несут -
+  # его добавляет promtail отдельной стадией под namespace `keycloak`.
+  additionalOptions:
+    - name: log-console-output
+      value: json
+
   resources:
     requests:
       cpu: 100m

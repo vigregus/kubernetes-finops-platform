@@ -67,10 +67,13 @@ config:
       # хранения: сейчас у хранилища он один на всё (см.
       # docs/messenger/09-data-lifecycle.md).
       #
-      # Отбор по конкретным нагрузкам, а не по namespace: разбор JSON
+      # Отбор по конкретным нагрузкам, а не по всему кластеру: разбор JSON
       # у пода, который пишет обычный текст (mailpit, одноразовые джобы),
       # - это ошибка на каждую строку в журнале самого promtail, то есть
-      # тот же мусор, только этажом ниже. Конверт пишут только эти три.
+      # тот же мусор, только этажом ниже. Полный конверт (event/result/
+      # log_stream из кода) пишут только эти три; postgresql и keycloak
+      # ниже - сторонние процессы, им достаётся точечная обработка под
+      # их формат, а не наш конверт целиком.
       - match:
           selector: '{namespace="messenger", app=~"api|outbox-relay|consumer-realtime"}'
           stages:
@@ -110,3 +113,36 @@ config:
                 level:
             - output:
                 source: record_message
+      # Keycloak: без этой стадии (и без включения JSON-вывода в
+      # gitops/04-messenger/messenger-keycloak/manifests/keycloak.yaml,
+      # `additionalOptions: log-console-output=json`) он пишет текстовый
+      # лог4j-вывод, для которого нет ни `_msg`, ни `message`, ни `msg` -
+      # тот же класс потерь, что уже был у CNPG выше, просто пока
+      # незакрытый: `WARN [org.keycloak.cookie.DefaultCookieProvider]...`
+      # оседал в хранилище без текста.
+      #
+      # Дальше разбирать нечего: включённый JSON-вывод Keycloak уже несёт
+      # `level` и `message` на верхнем уровне - `message` подхватывает
+      # `_msg_field` клиента выше без правок здесь, `level` ложится
+      # обычным полем сам. Не хватает только `log_stream`: Keycloak
+      # ничего не знает про наш конверт, а без потока запись не попадает
+      # ни в один срок хранения контракта телеметрии. Он выдаёт себя
+      # целиком за `security`, а не отбирается по логгеру: Keycloak
+      # в этом кластере - identity provider целиком, и «кого пустили,
+      # кого нет и почему» - это практически весь его вывод, включая
+      # предупреждения о cookie из присланного лога, которые тоже отвечают
+      # на этот вопрос, просто с другой стороны (защита, а не сам вход).
+      #
+      # Отбор по namespace, а не по `app`: у оператора Keycloak метка
+      # пода не подтверждена на живом кластере (namespace `keycloak`
+      # выделен только под него - см. metadata.namespace в keycloak.yaml,
+      # так что namespace сам по себе уже однозначен, без риска
+      # ошибиться в имени лейбла, которого никто здесь не проверял).
+      - match:
+          selector: '{namespace="keycloak"}'
+          stages:
+            - template:
+                source: log_stream
+                template: security
+            - labels:
+                log_stream:
