@@ -11,7 +11,7 @@ image:
   # и разные теги у них означали бы, что «выкатили версию» больше
   # ничего не значит. Тег обновляет scripts/build-messenger.sh.
   repository: ghcr.io/vigregus/messenger-api
-  tag: "local-f955a787a979"
+  tag: "local-c14d6b6bdf1d"
   pullPolicy: IfNotPresent
   # Локально образ адресуется тегом, и это не послабление, а следствие.
   # `repo@sha256:…` — ссылка на манифест в реестре; у образа, собранного
@@ -130,7 +130,7 @@ services:
     http:
       port: 8080
     image:
-      digest: sha256:3ad71058428a6df9b1d969a75615480642ea17a07fecdd307c22b04882e32d56
+      digest: sha256:16f48bec7bedb01ef9d7cbd75a97e782b0e82e914a4380a1cfb31ba22becaeab
     resources:
       requests: {cpu: 50m, memory: 128Mi}
       limits: {cpu: "1", memory: 512Mi}
@@ -168,7 +168,7 @@ services:
     preStopSeconds: 0
     terminationGracePeriodSeconds: 60
     image:
-      digest: sha256:3ad71058428a6df9b1d969a75615480642ea17a07fecdd307c22b04882e32d56
+      digest: sha256:16f48bec7bedb01ef9d7cbd75a97e782b0e82e914a4380a1cfb31ba22becaeab
     resources:
       requests: {cpu: 50m, memory: 128Mi}
       limits: {cpu: "1", memory: 512Mi}
@@ -189,7 +189,7 @@ services:
     # и зафиксировать смещение, иначе после перезапуска будет повтор.
     terminationGracePeriodSeconds: 60
     image:
-      digest: sha256:3ad71058428a6df9b1d969a75615480642ea17a07fecdd307c22b04882e32d56
+      digest: sha256:16f48bec7bedb01ef9d7cbd75a97e782b0e82e914a4380a1cfb31ba22becaeab
     resources:
       requests: {cpu: 50m, memory: 128Mi}
       limits: {cpu: "1", memory: 512Mi}
