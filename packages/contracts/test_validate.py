@@ -150,6 +150,29 @@ def test_сужение_схемы_параметра_видно():
         assert "p" in findings[0][2], findings
 
 
+def test_названные_ключи_действительно_сравниваются():
+    # `COMPARED_KEYS` — обещание, а не список для чтения: каждый названный
+    # в нём ключ обязан порождать находку при сужении. Ключ, названный
+    # и не сравнённый, — это ровно та дыра, ради которой список и заведён,
+    # только теперь она выглядит как покрытие.
+    base = {
+        "type": "integer", "format": "int32", "enum": [1, 2],
+        "minimum": 1, "exclusiveMinimum": 1, "minLength": 1, "minItems": 1,
+        "maximum": 100, "exclusiveMaximum": 100, "maxLength": 100, "maxItems": 100,
+    }
+    narrowed = {
+        "type": "string", "format": "int64", "enum": [1],
+        "minimum": 5, "exclusiveMinimum": 5, "minLength": 5, "minItems": 5,
+        "maximum": 50, "exclusiveMaximum": 50, "maxLength": 50, "maxItems": 50,
+    }
+    assert set(narrowed) == set(validate.COMPARED_KEYS), "список разошёлся с проверкой"
+    for key, value in narrowed.items():
+        findings = validate.parameter_schema_findings(
+            {}, {}, _typed("p", base), _typed("p", {**base, key: value}),
+        )
+        assert findings, (key, findings)
+
+
 def test_сужение_схемы_параметра_объявленной_ссылкой_видно():
     # Схема параметра — та же ссылка, что и у поля: спрятать её в компоненту
     # нельзя, иначе разрыв становился бы тем незаметнее, чем аккуратнее
