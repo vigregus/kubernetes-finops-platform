@@ -110,7 +110,8 @@ async def authenticate(
         log.info(
             "заведена учётная запись",
             extra={"event": "user_created", "result": "success",
-                   "log_stream": logging_envelope.STREAM_SECURITY},
+                   "log_stream": logging_envelope.STREAM_SECURITY,
+                   "user_id": str(result.user.user_id)},
         )
 
     user = result.user
@@ -136,6 +137,7 @@ async def authenticate(
                 "log_stream": logging_envelope.STREAM_SECURITY,
                 "result": "failed",
                 "error_code": TokenRejection.SESSION_REVOKED.value,
+                "user_id": str(user.user_id),
             },
         )
         return AuthResult(rejection=TokenRejection.SESSION_REVOKED)
@@ -182,7 +184,8 @@ async def _device_for(
         log.info(
             "идентификатор устройства занят другим пользователем",
             extra={"event": "device_id_rejected", "result": "failed",
-                   "log_stream": logging_envelope.STREAM_SECURITY},
+                   "log_stream": logging_envelope.STREAM_SECURITY,
+                   "user_id": str(user_id)},
         )
 
     fresh = await sessions.ensure_device(

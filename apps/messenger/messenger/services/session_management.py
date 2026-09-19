@@ -146,6 +146,7 @@ async def revoke_for_token(
                 "result": "success",
                 "reason": RevocationReason.LOGOUT_DEVICE.value,
                 "current": current,
+                "user_id": str(auth.user.user_id),
             },
         )
         await drop_connections(
@@ -201,6 +202,7 @@ async def revoke_all_for_token(
             "result": "success",
             "reason": RevocationReason.LOGOUT_ALL.value,
             "revoked": count,
+            "user_id": str(auth.user.user_id),
         },
     )
     if revoked:

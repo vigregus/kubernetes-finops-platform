@@ -60,6 +60,7 @@ async def send_initial_verification(
             "event": "verify_email_initial",
             "log_stream": logging_envelope.STREAM_SECURITY,
             "result": "success" if sent else "failed",
+            "user_id": str(user.user_id),
         },
     )
     return sent
@@ -102,6 +103,7 @@ async def resend_verification(
                 "result": "failed",
                 "error_code": "rate_limited",
                 "degraded": decision.degraded,
+                "user_id": str(user.user_id),
             },
         )
         return ResendResult(
@@ -118,6 +120,7 @@ async def resend_verification(
     log.info(
         "письмо о подтверждении отправлено повторно",
         extra={"event": "verify_email_sent", "result": "success",
-               "log_stream": logging_envelope.STREAM_SECURITY},
+               "log_stream": logging_envelope.STREAM_SECURITY,
+               "user_id": str(user.user_id)},
     )
     return ResendResult(sent=True, retry_after_seconds=RESEND_WINDOW_SECONDS)
