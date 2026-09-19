@@ -11,26 +11,40 @@
 
 **Что именно видит вторая проверка.** Поля и их типы — внутри
 `components.schemas`, обязательность — у схем, названных в обеих ревизиях,
-маршруты — по списку путей. Отдельно — параметры запроса: удаление
-параметра у операции и появление у него `required: true`. Этот класс
-защищён потому, что он в контракте реально используется (курсор списка
-бесед), и потому что разрыв в нём **тише всех прочих**: параметр не поле
-схемы, `flatten_schema` его не видит, и удаление `before_conversation_id`
-не тронуло бы ни одной строки, которую проверка умеет сравнивать.
+маршруты — по списку путей. Отдельно — то, чего в схемах не видно:
+
+* **параметры запроса** — удаление, `required: true` и сужение схемы
+  самого параметра (`COMPARED_KEYS`). Разрыв здесь **тише всех прочих**:
+  параметр не поле схемы, `flatten_schema` его не видит, и удаление
+  `before_conversation_id` не тронуло бы ни одной строки, которую проверка
+  умеет сравнивать;
+* **ссылка на схему ответа** — по ключу «метод, путь, статус, тип
+  содержимого». Подмена `$ref` на другую существующую компоненту иначе
+  не видна вовсе: обе компоненты на месте, поля в них не менялись, а
+  клиент получает другой тип. Содержимое сравнивается отдельно, по именам
+  схем, и второй раз называть его здесь нечем.
+
+Статус и тип содержимого в ключе ответа — не подробность: у операции
+ответов несколько, и ключ «метод + путь» разрешал бы положить второй
+inline-ответ рядом с уже разрешённым старому.
 
 Чего вторая проверка не видит и после этого: **сужение семантики** уже
-существующего параметра (он на месте, схема его не изменилась) и тип
+существующего параметра (он на месте, схема его не изменилась); тип
 элемента, заданный ссылкой, — `flatten_schema` ссылки не разворачивает,
 так что `items: { $ref: … }` сравнивается как «массив» и остаётся тем же
-массивом при подмене элемента. Оба случая записываются прозой, а не
-allowlist: запись требует находки, а находки здесь нет.
+массивом при подмене элемента; и ключи схемы параметра, не названные
+в `COMPARED_KEYS`, — `pattern`, `multipleOf`, `const`. Первые два случая
+записываются прозой, а не allowlist: запись требует находки, а находки
+здесь нет.
 
 Там же причина, по которой ответы обязаны быть `$ref` на компоненту, а не
 `inline`: у inline-схемы нет имени, и поля её ответа для сравнения
 не существуют. Пять ответов, объявленных inline до появления этого
 правила, перечислены в `INLINE_RESPONSE_SCHEMAS` — как `GRANDFATHERED`
 в проверке миграций: список закрыт, новый inline-ответ роняет проверку,
-а исчезнувший из контракта требует удалить себя из списка. Поля этих пяти
+а исчезнувший из контракта требует удалить себя из списка. Записи названы
+целиком — метод, путь, статус, тип содержимого: разрешение, выданное
+операции, разрешало бы и второй inline-ответ в ней. Поля этих пяти
 проверка по-прежнему не сравнивает — это известная дыра, а не гарантия.
 
 Осознанный разрыв объявляется в compat-allowlist.yaml — поимённо, с датой и
@@ -118,32 +132,63 @@ def resolve(doc, ref: str):
 # Список закрыт: новый inline-ответ — ошибка структуры, потому что его поля
 # невидимы для сравнения совместимости, то есть разрыв в них пройдёт молча.
 # Записи этих пяти, наоборот, остаются невидимыми — это долг, а не гарантия.
+#
+# Названы целиком — метод, путь, статус, тип содержимого. Пока запись была
+# парой «метод + путь», она разрешала операции, а не ответу: у `GET /sessions`
+# уже есть inline-ответ `200`, и второй, `503`, добавлялся рядом с ним, не
+# сдвинув множество найденного ни на элемент. Разрешение, выданное операции,
+# распространялось на всё, что в ней появится.
 INLINE_RESPONSE_SCHEMAS = (
-    "GET /conversations/{conversation_id}/messages",
-    "GET /sessions",
-    "POST /attachments",
-    "POST /conversations/{conversation_id}/receipts",
-    "POST /realtime/token",
+    "GET /conversations/{conversation_id}/messages 200 application/json",
+    "GET /sessions 200 application/json",
+    "POST /attachments 201 application/json",
+    "POST /conversations/{conversation_id}/receipts 200 application/json",
+    "POST /realtime/token 200 application/json",
 )
 
 
-def inline_responses(doc):
-    """Операции, у которых схема ответа объявлена на месте, а не ссылкой."""
-    found = set()
+def response_schemas(doc):
+    """Схемы ответов: ключ «метод путь статус тип содержимого» → `$ref`|None.
+
+    `None` означает схему, объявленную на месте. Ключ включает статус и тип
+    содержимого, потому что ответов у операции несколько и различать их
+    обязательно: и для закрытого списка выше, и для сравнения ссылок.
+
+    Ответ, объявленный ссылкой на `components.responses`, разыменовывается
+    по той же причине, что и параметр: у узла-ссылки нет ни `content`, ни
+    схемы, поэтому без этого он не участвовал бы в сравнении вовсе — а так
+    объявлены все двадцать два ответа-ошибки контракта.
+
+    Сравнивается схема **тела**, а не имя компоненты: `Unauthorized` и
+    `NotFound` отличаются статусом и описанием, но тело у обоих `Problem`,
+    и сгенерированный клиент от подмены одной на другую не меняется.
+    Разрывом считается смена схемы, до которой компонента доводит.
+    """
+    found = {}
     for route, methods in (doc.get("paths") or {}).items():
         for method, op in methods.items():
             if method in ("parameters", "summary", "description"):
                 continue
             if not isinstance(op, dict):
                 continue
-            for response in (op.get("responses") or {}).values():
+            for status, response in (op.get("responses") or {}).items():
                 if not isinstance(response, dict):
                     continue
-                for body in (response.get("content") or {}).values():
+                if "$ref" in response:
+                    response = lookup(doc, response["$ref"])
+                    if not isinstance(response, dict):
+                        continue
+                for media, body in (response.get("content") or {}).items():
                     schema = body.get("schema") if isinstance(body, dict) else None
-                    if isinstance(schema, dict) and "$ref" not in schema:
-                        found.add(f"{method.upper()} {route}")
+                    if not isinstance(schema, dict):
+                        continue
+                    found[f"{method.upper()} {route} {status} {media}"] = schema.get("$ref")
     return found
+
+
+def inline_responses(doc):
+    """Ответы, у которых схема объявлена на месте, а не ссылкой."""
+    return {key for key, ref in response_schemas(doc).items() if ref is None}
 
 
 def check_structure(errors):
@@ -203,7 +248,7 @@ def schemas_of(doc):
     return {"": doc}
 
 
-ALLOWED_KINDS = ("field", "field_type", "required", "route", "parameter")
+ALLOWED_KINDS = ("field", "field_type", "required", "route", "parameter", "response")
 
 
 def operation_parameters(doc, path_item, op):
@@ -233,6 +278,88 @@ def operation_parameters(doc, path_item, op):
     return merged
 
 
+# Ключи схемы параметра, которые сравниваются. Перечислены поимённо,
+# а не «всё, что найдётся»: неперечисленный ключ остаётся невидимым, и это
+# названный пробел, а не гарантия. Границы разложены на две группы по тому,
+# в какую сторону движение сужает множество допустимых значений.
+_BOUNDS_UP = ("minimum", "exclusiveMinimum", "minLength", "minItems")
+_BOUNDS_DOWN = ("maximum", "exclusiveMaximum", "maxLength", "maxItems")
+COMPARED_KEYS = ("type", "format", "enum", *_BOUNDS_UP, *_BOUNDS_DOWN)
+
+
+def _param_schema(doc, param):
+    """Схема параметра, разыменованная, если объявлена ссылкой."""
+    schema = param.get("schema")
+    if not isinstance(schema, dict):
+        return {}
+    if "$ref" in schema:
+        resolved = lookup(doc, schema["$ref"])
+        return resolved if isinstance(resolved, dict) else {}
+    return schema
+
+
+def _types(schema):
+    """Множество объявленных типов. `None` — тип не объявлен, судить не о чем."""
+    value = schema.get("type")
+    if isinstance(value, str):
+        return {value}
+    if isinstance(value, list):
+        return {t for t in value if isinstance(t, str)}
+    return None
+
+
+def _number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def parameter_schema_findings(old_doc, new_doc, old_param, new_param):
+    """Сужения схемы одного параметра: список сообщений.
+
+    Параметр, оставшийся на месте, всё ещё может сломать вызывающего:
+    сужение типа, смена формата, поднятая нижняя граница, опущенная верхняя
+    или укороченное перечисление отвергают запрос, который вчера был
+    законным. Пропущенное `required: true` — тот же класс, и оно ловится
+    рядом, в `parameter_findings`.
+
+    Расширение разрывом не считается: `string` → `[string, 'null']`, снятие
+    перечисления, ослабленная граница оставляют вчерашний запрос законным.
+    Из этого же следует, что формат сравнивается **любой** разницей,
+    включая появление и исчезновение: сгенерированный клиент отображает
+    `date-time` в свой тип, и ответ на вопрос «что за значение» меняется
+    вместе с форматом, даже когда по проводу едет та же строка.
+    """
+    was = _param_schema(old_doc, old_param)
+    became = _param_schema(new_doc, new_param)
+    findings = []
+
+    old_types, new_types = _types(was), _types(became)
+    if old_types and new_types and old_types - new_types:
+        findings.append(f"тип сужен {sorted(old_types)} → {sorted(new_types)}")
+
+    old_format, new_format = was.get("format"), became.get("format")
+    if old_format != new_format:
+        findings.append(f"формат {old_format or 'не объявлен'} → {new_format or 'не объявлен'}")
+
+    old_enum, new_enum = was.get("enum"), became.get("enum")
+    if isinstance(old_enum, list) and isinstance(new_enum, list):
+        dropped = [v for v in old_enum if v not in new_enum]
+        if dropped:
+            findings.append(f"из перечисления убраны {dropped}")
+    elif isinstance(new_enum, list) and old_enum is None:
+        findings.append("появилось перечисление, которого не было")
+
+    for key in _BOUNDS_UP:
+        old_bound, new_bound = was.get(key), became.get(key)
+        if _number(new_bound) and (not _number(old_bound) or new_bound > old_bound):
+            findings.append(f"граница {key} поднята {old_bound!r} → {new_bound!r}")
+    for key in _BOUNDS_DOWN:
+        old_bound, new_bound = was.get(key), became.get(key)
+        if _number(new_bound) and (not _number(old_bound) or new_bound < old_bound):
+            findings.append(f"граница {key} опущена {old_bound!r} → {new_bound!r}")
+
+    return findings
+
+
 def parameter_findings(old, new):
     """Разрывы в параметрах запроса: тройки (вид, имя, сообщение).
 
@@ -246,6 +373,12 @@ def parameter_findings(old, new):
     Сравниваются операции, присутствующие в обеих ревизиях: удаление
     операции целиком — разрыв вида `route`, и второй раз называть его
     здесь нечем.
+
+    Параметр — не только имя: он приходит со схемой, и сужение её ломает
+    ровно так же, как удаление. Поэтому сравнение параметра идёт в два
+    шага — сам параметр и его схема (`parameter_schema_findings`), — и оба
+    дают находки одного вида: разрешение выдаётся элементу контракта,
+    а не тексту сообщения о нём.
     """
     findings = []
     for route, old_methods in (old.get("paths") or {}).items():
@@ -265,13 +398,50 @@ def parameter_findings(old, new):
                 label = f"{method.upper()} {route} {place}:{name}"
                 if key not in became:
                     findings.append(("parameter", label, f"параметр {label} удалён"))
-                elif (
+                    continue
+                if (
                     became[key].get("required") is True
                     and param.get("required") is not True
                 ):
                     findings.append(
                         ("parameter", label, f"параметр {label} стал обязательным")
                     )
+                for detail in parameter_schema_findings(old, new, param, became[key]):
+                    findings.append(
+                        ("parameter", label, f"параметр {label}: {detail}")
+                    )
+    return findings
+
+
+def response_findings(old, new):
+    """Разрывы в схемах ответов: тройки (вид, имя, сообщение).
+
+    Сравнивается **ссылка** на компоненту, а не её содержимое: содержимое
+    сравнивается отдельно, по именам схем, и второй раз называть его здесь
+    нечем. Подмена `$ref` на другую существующую компоненту — это и есть
+    разрыв, который иначе не виден: обе компоненты на месте, поля в них
+    не менялись, а клиент получает другой тип.
+
+    `None` в старой ревизии означает inline-схему, и такой ответ
+    пропускается: сравнивать его не с чем, и в этом была причина запретить
+    inline. Отсюда же следует, что вынос inline-ответа в компоненту
+    разрывом не считается — направление, в котором проверка велит идти,
+    не может быть ею же и наказано. Обратное движение, `$ref` → inline,
+    разрывом считается: сравнивать ответ перестаёт быть возможно.
+    """
+    findings = []
+    was, became = response_schemas(old), response_schemas(new)
+    for key, old_ref in sorted(was.items()):
+        if key not in became:
+            findings.append(("response", key, f"ответ {key} удалён"))
+        elif old_ref is None:
+            continue
+        elif became[key] != old_ref:
+            findings.append((
+                "response", key,
+                f"у ответа {key} схема сменилась "
+                f"{old_ref} → {became[key] or 'inline'}",
+            ))
     return findings
 
 
@@ -353,10 +523,17 @@ def check_compat(base_rev, errors, notes):
             for route in sorted(removed):
                 findings.append(("route", route, f"маршрут {route} удалён"))
 
-            # Параметры запроса. Удалённый параметр и параметр, ставший
-            # обязательным, ломают вызывающего так же, как удалённое поле
-            # схему получателя, — но невидимы там, где ищутся поля.
+            # Параметры запроса. Удалённый параметр, параметр, ставший
+            # обязательным, и суженная схема параметра ломают вызывающего
+            # так же, как удалённое поле схему получателя, — но невидимы
+            # там, где ищутся поля.
             findings.extend(parameter_findings(old, new))
+
+            # Ссылки на схемы ответов. Смена `$ref` на другую компоненту
+            # не меняет ни одного поля, которое умеет сравнивать `flatten_schema`:
+            # обе компоненты остаются в `components.schemas` и сравниваются
+            # сами с собой.
+            findings.extend(response_findings(old, new))
 
         for kind, name, message in findings:
             key = (path.name, kind, name)
