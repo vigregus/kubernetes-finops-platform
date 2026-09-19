@@ -35,6 +35,25 @@ spec:
       - pg_stat_statements
     parameters:
       max_connections: "200"
+      # Без этого Postgres не пишет ни строки о конкретном медленном
+      # запросе - pg_stat_statements выше даёт только агрегат по
+      # нормализованному тексту, без привязки к моменту и без trace_id.
+      # 200мс - ниже целевой задержки коммита сообщения (99.95% ≤ 1с,
+      # messenger_message_commit_duration_seconds), чтобы ловить именно
+      # то, что реально угрожает этому SLO, а не весь трафик.
+      #
+      # promtail уже разбирает такие строки (../../../02-infra/
+      # observability-objects/promtail/values.yaml, app="postgresql") -
+      # тот регэксп до сих пор был наполовину простаивающим именно
+      # потому, что этот параметр нигде не был включён.
+      log_min_duration_statement: "200"
+      # Отдельно от log_min_duration_statement: `membership.check`
+      # (repositories/messages.py, lock_active_conversation) - это
+      # SELECT ... FOR UPDATE, блокировка строки беседы. Без
+      # log_lock_waits ожидание чужой блокировки неотличимо от медленного
+      # диска ни в логе, ни в спане (docs/messenger/06-observability.md,
+      # «Чего в этих спанах нет»).
+      log_lock_waits: "on"
 
   storage:
     size: 2Gi

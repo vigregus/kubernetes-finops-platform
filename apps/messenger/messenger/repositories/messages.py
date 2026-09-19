@@ -15,6 +15,7 @@ from messenger.domain.ids import (
     UserId,
 )
 from messenger.domain.message import Message, MessageKind, MessagePayload
+from messenger.telemetry import trace
 
 
 def _to_message(row: asyncpg.Record) -> Message:
@@ -55,9 +56,31 @@ async def lock_active_conversation(
     Одна строка — один счётчик. Поэтому две реплики API получают разные
     последовательные номера независимо от порядка прихода к процессам.
     Бывший участник и посторонний не проходят условие ``left_at IS NULL``.
+
+    Текст запроса несёт `/* trace_id=... */` первым комментарием — это
+    единственное место в репозиториях, где он есть: promtail уже умеет
+    вынимать такой комментарий из `log_min_duration_statement`
+    (../../gitops/02-infra/observability-objects/promtail/values.yaml),
+    но до сих пор не находил его ни в одном запросе мессенджера. Выбран
+    именно этот запрос, а не обёртка над всем `conn`: он единственная
+    блокировка на пути сообщения (`SELECT ... FOR UPDATE`), и без
+    trace_id в его логе ожидание чужой блокировки неотличимо от
+    медленного диска ни в логе, ни в спане (docs/messenger/
+    06-observability.md, «Чего в этих спанах нет»). Комментарий с разным
+    trace_id на каждый вызов делает текст запроса не-кешируемым
+    подготовленным выражением asyncpg (`Connection._stmt_cache` ключуется
+    точным текстом) - цена принята сознательно для этого одного запроса,
+    а не распространена на весь `conn`, где она ударила бы по каждой
+    вставке в конвейере сообщения без такой же отдачи.
     """
-    value = await conn.fetchval(
-        """
+    trace_id = trace.current_trace_id()
+    # Ровно один пробел после `*/`, не перенос строки: его и только его
+    # ждёт регэксп promtail (`/\* trace_id=... \*/ `, буквально с одним
+    # пробелом) - `query.strip()` убирает отступ и переносы шаблона,
+    # чтобы после конкатенации текст начинался как раз с "SELECT",
+    # а не с пустой строки перед ним.
+    comment = f"/* trace_id={trace_id} */ " if trace_id else ""
+    query = """
         SELECT c.last_seq
           FROM conversations c
           JOIN conversation_members cm
@@ -66,7 +89,9 @@ async def lock_active_conversation(
            AND cm.left_at IS NULL
          WHERE c.conversation_id = $1
            FOR UPDATE OF c
-        """,
+    """
+    value = await conn.fetchval(
+        comment + query.strip(),
         conversation_id,
         sender_id,
     )
