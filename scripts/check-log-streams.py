@@ -67,6 +67,13 @@ EVENTS: dict[str, str] = {
     "service_start": APPLICATION,
     "service_stop": APPLICATION,
     "db_pool_unavailable": APPLICATION,
+    # Отдельно от недоступности писателя, хотя база та же: этот отказ
+    # не отказ — чтение уходит на писателя, и сервис продолжает отвечать.
+    # Слитое в одно событие, оно показывало бы «база недоступна» на
+    # исправном сервисе ровно тогда, когда реплика не настроена, —
+    # та же причина, по которой `POSTGRES_READ` отделён от `POSTGRES`
+    # (services/runtime.py).
+    "db_read_pool_unavailable": APPLICATION,
     "dependency_check": APPLICATION,
     "kafka_connect": APPLICATION,
     "kafka_record": APPLICATION,
