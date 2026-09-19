@@ -117,10 +117,14 @@ def test_пустой_курсор_законен():
     validate_activity_cursors(**_bounds())
 
 
-def test_одиночная_отметка_активности_законна():
-    # Объявлена контрактом сегодня и означает строго «старше отметки».
-    # Отвергать её значило бы сузить уже обещанное поведение.
-    validate_activity_cursors(**_bounds(before_activity_at=NOW))
+def test_одиночная_отметка_активности_отвергается():
+    # Половина пары — не «более слабая граница», а запрос, про который
+    # известно, что он теряет данные: `updated_at < $1` вычитает всю
+    # группу бесед с равной отметкой целиком. Пустая страница на месте
+    # отказа была бы хуже ошибки: она выглядит как конец списка, и клиент
+    # на ней останавливается, о потере не узнав.
+    with pytest.raises(InvalidCursor):
+        validate_activity_cursors(**_bounds(before_activity_at=NOW))
 
 
 def test_второй_компонент_без_первого_отвергается():
@@ -145,9 +149,14 @@ def test_наивная_отметка_отвергается():
     # Наивную дату `asyncpg` истолкует по местной зоне процесса, а не
     # по UTC: ответ был бы посчитан не на тот вопрос, который задал
     # клиент, и заметно это стало бы только на машине с другой зоной.
+    # Курсор передаётся парой: иначе отказ пришёл бы от проверки
+    # неполной пары, и тест зеленел бы, ничего не сказав о времени.
     with pytest.raises(InvalidCursor):
         validate_activity_cursors(
-            **_bounds(before_activity_at=datetime(2026, 9, 14, 12, 0))
+            **_bounds(
+                before_activity_at=datetime(2026, 9, 14, 12, 0),
+                before_conversation_id=ConversationId(uuid.uuid4()),
+            )
         )
 
 
@@ -155,7 +164,10 @@ def test_отметка_в_любой_зоне_кроме_utc_законна():
     # Требование — смещение, а не именно UTC: один и тот же момент
     # в другой зоне остаётся тем же моментом.
     validate_activity_cursors(
-        **_bounds(before_activity_at=NOW.astimezone(timezone(timedelta(hours=3))))
+        **_bounds(
+            before_activity_at=NOW.astimezone(timezone(timedelta(hours=3))),
+            before_conversation_id=ConversationId(uuid.uuid4()),
+        )
     )
 
 
@@ -164,14 +176,16 @@ def test_страница_по_умолчанию_пуста_и_без_прод�
     assert page.items == () and not page.has_more
 
 
-def test_курсор_без_второго_компонента_различим():
-    # Разные варианты — разные состояния, а не «пара с пустым
-    # идентификатором»: одиночный курсор означает «строго старше
-    # отметки», и смешивать их нельзя.
-    пара = ActivityCursor(
+def test_половину_курсора_нельзя_собрать_типом():
+    # Не «какая проверка сработает», а «сколько состояний у типа»:
+    # у `ActivityCursor` их два — пара и отсутствие, третьего нет.
+    # Пока `conversation_id` был необязателен, половина пары была
+    # представима, и её приходилось ловить отдельно; теперь её нельзя
+    # собрать даже в обход HTTP-границы.
+    with pytest.raises(TypeError):
+        ActivityCursor(updated_at=NOW)  # type: ignore[call-arg]
+
+    целый = ActivityCursor(
         updated_at=NOW, conversation_id=ConversationId(uuid.uuid4())
     )
-    одиночный = ActivityCursor(updated_at=NOW)
-    assert пара.conversation_id is not None
-    assert одиночный.conversation_id is None
-    assert пара != одиночный
+    assert целый.updated_at == NOW

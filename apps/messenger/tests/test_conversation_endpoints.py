@@ -373,25 +373,53 @@ def test_второй_компонент_без_первого_даёт_400(clie
     отказ(response, status=400, code="invalid_cursor")
 
 
-def test_наивная_отметка_даёт_400(client, monkeypatch, отказ):
+def test_одиночная_отметка_даёт_400(client, monkeypatch, отказ):
+    # Половина пары отвергается, а не обслуживается «по слабой границе»:
+    # по одной отметке стык страниц теряет беседы с равным `updated_at`,
+    # а пустая страница на месте отказа неотличима от конца списка.
     authenticated(monkeypatch)
-    # Без смещения: сравнить её не с чем, а `asyncpg` истолковал бы её
-    # по местной зоне процесса, то есть ответ зависел бы от развёртывания.
     response = client.get(
-        "/conversations?before_activity_at=2026-09-15T00:00:00",
+        "/conversations?before_activity_at=2026-09-15T00:00:00Z",
         headers={"Authorization": "Bearer token"},
     )
     отказ(response, status=400, code="invalid_cursor")
 
 
-def test_негодный_курсор_не_открывает_соединение(client, monkeypatch, runtime, отказ):
+def test_наивная_отметка_даёт_400(client, monkeypatch, отказ):
+    authenticated(monkeypatch)
+    # Отметка передаётся **в паре**: одиночную отвергает правило выше,
+    # и тест на часовой пояс зеленел бы по чужой причине, ничего не сказав
+    # о времени. Смысл отказа прежний: без смещения сравнивать её не с чем,
+    # а `asyncpg` истолковал бы её по местной зоне процесса, то есть ответ
+    # зависел бы от развёртывания.
+    response = client.get(
+        f"/conversations?before_activity_at=2026-09-15T00:00:00"
+        f"&before_conversation_id={CONVERSATION_ID}",
+        headers={"Authorization": "Bearer token"},
+    )
+    отказ(response, status=400, code="invalid_cursor")
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "limit=0",
+        f"before_conversation_id={CONVERSATION_ID}",
+        "before_activity_at=2026-09-15T00:00:00Z",
+    ],
+)
+def test_негодный_курсор_не_открывает_соединение(
+    client, monkeypatch, runtime, отказ, query
+):
     authenticated(monkeypatch)
     response = client.get(
-        "/conversations?limit=0", headers={"Authorization": "Bearer token"}
+        f"/conversations?{query}", headers={"Authorization": "Bearer token"}
     )
     отказ(response, status=400, code="invalid_cursor")
     # Проверка стоит до соединения намеренно: негодная строка запроса
-    # не должна занимать ни соединение, ни чтение удостоверения.
+    # не должна занимать ни соединение, ни чтение удостоверения. Три
+    # случая, а не один: половина пары — тот же отказ на той же границе,
+    # и соединение он занимать не должен так же.
     assert runtime.opened == 0
 
 

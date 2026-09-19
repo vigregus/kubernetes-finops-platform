@@ -116,6 +116,9 @@ local-test: contracts kafka-security layers log-streams sql lint unit migrate sm
 contracts: ## Схемы связны и обратно совместимы
 	@echo "· контракты"
 	@python3 packages/contracts/validate.py $${CONTRACT_BASE:-}
+	@# Сама проверка проверяется тоже: без этого её можно сломать молча,
+	@# и зелёный CTR будет означать только то, что она ничего не нашла.
+	@python3 packages/contracts/test_validate.py
 
 kafka-security: ## SEC-010: потребитель непрочитанного не читает содержимое
 	@echo "· безопасность Kafka"
