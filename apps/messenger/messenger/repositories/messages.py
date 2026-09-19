@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import asyncpg
@@ -316,4 +316,42 @@ async def fetch_page_forward(
         limit + 1,
     )
     return _page(rows, limit)
+
+
+async def fetch_latest_by_conversation(
+    conn: asyncpg.Connection, *, conversation_ids: Sequence[ConversationId]
+) -> dict[ConversationId, Message]:
+    """Последнее сообщение каждой из названных бесед — одним запросом.
+
+    `DISTINCT ON (conversation_id)` с `ORDER BY conversation_id,
+    conversation_seq DESC` повторяет ключ индекса
+    `messages_conversation_seq_idx`, то есть даёт одну строку на беседу
+    одним проходом, а не по запросу на беседу: список бесед — ровно тот
+    случай, где «по запросу на элемент» превращается в N+1.
+
+    Соблазн добавить `AND deleted_at IS NULL` выглядит улучшением, а на
+    деле сдвинул бы «последнее» на предыдущее сообщение. Удалённое
+    занимает свой номер (`ADR 0004`), поэтому беседа, в которой удалили
+    последнее, обязана показать именно его — иначе список «оживёт»
+    и расскажет про сообщение, которого клиент уже не увидит.
+
+    Собирается общим `_to_message`: второй разбор строки разошёлся бы
+    с первым ровно на надгробии — `payload IS NULL` уронил бы наивный
+    `None.get(...)`.
+    """
+    if not conversation_ids:
+        # Пустая страница — законный ответ, а не повод сходить в базу.
+        return {}
+    rows = await conn.fetch(
+        f"""
+        SELECT DISTINCT ON (conversation_id) {_COLUMNS}
+          FROM messages
+         WHERE conversation_id = ANY($1::uuid[])
+         ORDER BY conversation_id, conversation_seq DESC
+        """,  # noqa: S608 - подставляется только _COLUMNS, данных в тексте нет
+        list(conversation_ids),
+    )
+    return {
+        ConversationId(row["conversation_id"]): _to_message(row) for row in rows
+    }
 

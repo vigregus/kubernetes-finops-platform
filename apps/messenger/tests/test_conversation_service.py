@@ -13,9 +13,23 @@ from messenger.domain.conversation import (
     ConversationType,
     EnsureConversationResult,
 )
+from messenger.domain.conversation_list import (
+    ActivityCursor,
+    ConversationPage,
+    ConversationSummary,
+)
 from messenger.domain.errors import Reason
-from messenger.domain.ids import ConversationId, ConversationSeq, UserId, direct_key
-from messenger.domain.user import User
+from messenger.domain.history import InvalidCursor
+from messenger.domain.ids import (
+    ClientMessageId,
+    ConversationId,
+    ConversationSeq,
+    MessageId,
+    UserId,
+    direct_key,
+)
+from messenger.domain.message import Message, MessageKind, MessagePayload
+from messenger.domain.user import User, UserSummary
 from messenger.services import conversations as service
 
 NOW = datetime(2026, 9, 15, tzinfo=UTC)
@@ -163,3 +177,174 @@ def test_последовательный_повтор_возвращает_су
     )
     assert result.ok and not result.created and result.conversation == expected
     assert [user.user_id for user in result.participants] == [ACTOR_ID, OTHER_ID]
+
+
+# --- список бесед ----------------------------------------------------------
+
+FIRST_ID = ConversationId(uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"))
+SECOND_ID = ConversationId(uuid.UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"))
+
+
+def _summary(conversation_id: ConversationId, *, updated_at: datetime = NOW):
+    return ConversationSummary(
+        conversation=Conversation(
+            conversation_id=conversation_id,
+            type=ConversationType.DIRECT,
+            direct_key="a:b",
+            last_seq=ConversationSeq(0),
+            created_at=updated_at,
+            updated_at=updated_at,
+        ),
+        participants=(UserSummary(user_id=ACTOR_ID, display_name="Аня"),),
+    )
+
+
+def _message(conversation_id: ConversationId) -> Message:
+    return Message(
+        message_id=MessageId(uuid.uuid4()),
+        conversation_id=conversation_id,
+        conversation_seq=ConversationSeq(1),
+        sender_id=ACTOR_ID,
+        client_message_id=ClientMessageId(uuid.uuid4()),
+        kind=MessageKind.TEXT,
+        payload=MessagePayload(text="привет"),
+        created_at=NOW,
+    )
+
+
+def _stub_page(monkeypatch, page: ConversationPage, latest: dict | None = None):
+    """Подменяет обе выборки и записывает, с чем их позвали."""
+    позвали: dict = {}
+
+    async def _page(*args, **kwargs):
+        позвали.update(kwargs)
+        return page
+
+    async def _latest(*args, **kwargs):
+        позвали["latest_ids"] = kwargs["conversation_ids"]
+        return latest or {}
+
+    monkeypatch.setattr(service.conversations, "list_user_conversations", _page)
+    monkeypatch.setattr(service.messages, "fetch_latest_by_conversation", _latest)
+    return позвали
+
+
+def test_страница_собирается_из_двух_выборок(monkeypatch):
+    message = _message(FIRST_ID)
+    page = ConversationPage(
+        items=(_summary(FIRST_ID), _summary(SECOND_ID)), has_more=True
+    )
+    позвали = _stub_page(monkeypatch, page, {FIRST_ID: message})
+
+    result = asyncio.run(
+        service.list_conversations(Connection(), viewer_id=ACTOR_ID, limit=2)
+    )
+    assert result.ok
+    assert позвали["user_id"] == ACTOR_ID and позвали["cursor"] is None
+    # Сообщения спрашиваются ровно по беседам страницы, а не по всей
+    # таблице: иначе N+1 вернулся бы через чёрный ход.
+    assert позвали["latest_ids"] == [FIRST_ID, SECOND_ID]
+    assert result.page.items[0].last_message == message
+    assert result.page.items[1].last_message is None
+
+
+def test_продолжение_берётся_из_последнего_элемента_парой(monkeypatch):
+    # Отметки равны намеренно: у бесед, тронутых одной транзакцией,
+    # `now()` совпадает до микросекунды, и именно на этом стыке одиночный
+    # курсор теряет или дублирует беседы. Второй компонент обязан уехать
+    # вместе с первым.
+    page = ConversationPage(
+        items=(_summary(FIRST_ID), _summary(SECOND_ID, updated_at=NOW)),
+        has_more=True,
+    )
+    _stub_page(monkeypatch, page)
+
+    result = asyncio.run(
+        service.list_conversations(Connection(), viewer_id=ACTOR_ID, limit=1)
+    )
+    # `has_more` переносится как есть, а не выводится из длины: страница
+    # ровно исчерпана, и пересчёт здесь объявил бы конец списка.
+    assert result.page.has_more
+    assert result.next_cursor == ActivityCursor(
+        updated_at=NOW, conversation_id=SECOND_ID
+    )
+
+
+def test_конец_списка_не_даёт_курсора(monkeypatch):
+    page = ConversationPage(items=(_summary(FIRST_ID),), has_more=False)
+    _stub_page(monkeypatch, page)
+
+    result = asyncio.run(service.list_conversations(Connection(), viewer_id=ACTOR_ID))
+    assert result.next_cursor is None
+
+
+def test_пустая_страница_не_даёт_курсора(monkeypatch):
+    # У человека без бесед ответ — пустой список, а не отказ. Курсора
+    # здесь нет и браться ему неоткуда: элементов нет вовсе.
+    позвали = _stub_page(monkeypatch, ConversationPage())
+
+    result = asyncio.run(service.list_conversations(Connection(), viewer_id=ACTOR_ID))
+    assert result.page.items == () and not result.page.has_more
+    assert result.next_cursor is None
+    assert позвали["latest_ids"] == []
+
+
+def test_одиночный_курсор_доезжает_как_только_время(monkeypatch):
+    # Клиент вправе вести один компонент: он объявлен контрактом.
+    # Сервис не «укрепляет» его до пары — этим он сузил бы обещанное.
+    позвали = _stub_page(monkeypatch, ConversationPage())
+    cursor = ActivityCursor(updated_at=NOW)
+
+    asyncio.run(
+        service.list_conversations(
+            Connection(), viewer_id=ACTOR_ID, cursor=cursor, limit=10
+        )
+    )
+    assert позвали["cursor"] == cursor and позвали["limit"] == 10
+
+
+def test_негодный_размер_страницы_не_доходит_до_репозитория(monkeypatch):
+    async def _не_вызывать(*args, **kwargs):
+        raise AssertionError("репозиторий позван с негодным размером страницы")
+
+    monkeypatch.setattr(service.conversations, "list_user_conversations", _не_вызывать)
+    with pytest.raises(InvalidCursor):
+        asyncio.run(
+            service.list_conversations(Connection(), viewer_id=ACTOR_ID, limit=0)
+        )
+
+
+def test_наивная_отметка_отвергается_и_сервисом(monkeypatch):
+    # Та же проверка, что в обработчике, и это не дублирование: обработчик
+    # зовёт её рано, чтобы негодный запрос не занял соединение, но сервис
+    # обязан остаться правым сам по себе — его зовут не только из HTTP.
+    async def _не_вызывать(*args, **kwargs):
+        raise AssertionError("репозиторий позван с наивной отметкой")
+
+    monkeypatch.setattr(service.conversations, "list_user_conversations", _не_вызывать)
+    with pytest.raises(InvalidCursor):
+        asyncio.run(
+            service.list_conversations(
+                Connection(),
+                viewer_id=ACTOR_ID,
+                cursor=ActivityCursor(updated_at=datetime(2026, 9, 15)),
+                limit=10,
+            )
+        )
+
+
+def test_половина_курсора_непредставима_типом():
+    # «Второй компонент без первого» отвергнуть в сервисе нечем, и это
+    # не пробел: у `ActivityCursor` отметка обязательна, поэтому такого
+    # состояния нельзя даже собрать — правило живёт на границе HTTP,
+    # где параметры приходят по отдельности.
+    with pytest.raises(TypeError):
+        ActivityCursor(conversation_id=FIRST_ID)  # type: ignore[call-arg]
+
+
+def test_отказ_в_сервисе_отсутствует_по_построению():
+    # Список отбирает субъект, и отбор — он же и право: ресурса, о котором
+    # следовало бы спросить авторизацию, в запросе нет. Поэтому у
+    # результата нет поля `rejection`, а `ok` истинно на пустой странице.
+    result = service.ConversationListResult()
+    assert result.ok and not hasattr(result, "rejection")

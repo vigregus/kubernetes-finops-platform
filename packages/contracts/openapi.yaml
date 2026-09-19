@@ -127,6 +127,16 @@ paths:
           in: query
           description: Пагинация по ключу, а не по смещению.
           schema: { type: string, format: date-time }
+        - name: before_conversation_id
+          in: query
+          description: |
+            Второй компонент курсора, вместе с `before_activity_at`.
+            Одного времени мало: отметка активности не уникальна — беседы,
+            изменённые одной транзакцией, получают одинаковую, — и стык
+            страниц на такой паре терял бы беседы. Без него
+            `before_activity_at` остаётся законным и означает строго
+            «старше этой отметки».
+          schema: { type: string, format: uuid }
       responses:
         '200':
           description: Беседы, свежие первыми
@@ -142,6 +152,10 @@ paths:
                   next_before_activity_at:
                     type: [string, 'null']
                     format: date-time
+                  next_before_conversation_id:
+                    type: [string, 'null']
+                    format: uuid
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
 
     post:
@@ -593,6 +607,12 @@ components:
         и получить его можно только ошибкой в клиенте. Равенство `after_seq`
         и `through_seq` ошибкой не считается: это пустой снимок и обычный
         ответ на повтор.
+
+        У списка бесед свои правила того же кода: `limit` вне объявленного
+        диапазона, `before_conversation_id` без `before_activity_at` (сам по
+        себе второй компонент границы не задаёт) и `before_activity_at` без
+        смещения часового пояса — по такой отметке непонятно, с какой зоной
+        её сравнивать. Все три — `400` с кодом `invalid_cursor`.
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }

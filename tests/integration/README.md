@@ -52,7 +52,9 @@ scripts/integration-messenger.sh
 | --- | --- |
 | `authorization_check` | `AUTHZ-003…005`: свежесть состояния, сокрытие чужого, аудит |
 | `conversation_create_check` | `G1-010/011`: создание direct-беседы и встречная гонка |
+| `conversation_list_check` | `G3-001`/`LIST-001…003`: порядок списка бесед и статический обход страницами |
 | `conversations_check` | `G1-009`: модели беседы и членства |
+| `history_check` | `G3-001`/`HIST-001…004`: история страницами, надгробие внутри страницы, `DB-001` |
 | `login_check` | вход целиком: страница Keycloak, код, обмен, cookie |
 | `logout_check` | `AUTH-002`: один вход закрыт, второй работает |
 | `logout_all_check` | `AUTH-003`: «выйти везде» закрывает все входы |
