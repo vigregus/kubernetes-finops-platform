@@ -43,3 +43,9 @@ tmp/
 coverage/
 apps/web/node_modules/*
 
+# Node/JS frontends (apps/web, etc.)
+node_modules/
+storybook-static/
+*.tsbuildinfo
+*storybook.log
+
