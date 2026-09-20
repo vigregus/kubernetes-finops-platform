@@ -107,9 +107,9 @@ Current verified state:
   monotone per-conversation checkpoint that makes a replay a no-op without any
   `event_id` journal, a receipt that recomputes the count but never beyond the
   consumer's checkpoint, and a conversation list that rebuilds a missing row
-  from the source of truth — but it is **not deployed** (`enabled: false`) and
-  its integration check has never run, so gate G3-003 is *implementation
-  prepared*, not closed. Gap detection, reconnect with `recovered=false`,
+  from the source of truth — and it is deployed from the same digest as the
+  API and the other consumers, but its integration check has never run, so
+  gate G3-003 is *deployed*, not closed. Gap detection, reconnect with `recovered=false`,
   presence and the web client itself are still open.
 
 `make local-test` verifies contracts, authenticated Kafka ACLs, layer rules, the
