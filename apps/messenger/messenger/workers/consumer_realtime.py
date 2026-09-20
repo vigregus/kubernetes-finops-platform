@@ -8,6 +8,12 @@
 между обработкой и фиксацией, получит те же события ещё раз — и это
 нормально: повтор отсеет дедупликация. Обратный порядок терял бы
 события молча.
+
+Отказ на середине пачки возвращает её в поток (`subscriber.rewind`):
+`getmany` сдвигает позицию в момент выдачи, поэтому одной несостоявшейся
+фиксации мало — оставленный хвост пачки не вернулся бы живому процессу
+никогда. Дефект общий с потребителем непрочитанного, потому что общий
+адаптер, и разбор целиком — в `workers/consumer_unread.py`.
 """
 from __future__ import annotations
 
@@ -96,6 +102,13 @@ async def run(stop: asyncio.Event) -> None:
                 continue
             metrics.dependency_up("redis", up=True)
 
+            # Координаты записи, на которой цикл прервался, и размер пачки:
+            # отказ может случиться и на самом опросе, когда записи ещё не
+            # было, и тогда `null` в журнале - правда, а падение на
+            # неинициализированном имени - нет.
+            batch_size = 0
+            current: kafka.KafkaRecord | None = None
+
             try:
                 # Корень пачки - дочерний относительно span'а цикла, а не
                 # трассы: так решений хвостовой выборки меньше, а
@@ -114,6 +127,7 @@ async def run(stop: asyncio.Event) -> None:
                     with tracing.span("kafka.consume", kind=tracing.CLIENT) as consume:
                         events = await subscriber.poll()
                         consume.set_attribute("messaging.batch.message_count", len(events))
+                    batch_size = len(events)
                     if events:
                         batch.set_attribute("messaging.batch.message_count", len(events))
                         # T_consumer: от получения пачки до фиксации смещения.
@@ -123,7 +137,7 @@ async def run(stop: asyncio.Event) -> None:
                         # отвечала бы не на "долго ли обрабатывали", а на
                         # "сколько раз в Kafka ничего не было".
                         processing_started = time.perf_counter()
-                        for topic, headers, body in events:
+                        for current in events:
                             # Контекст создателя берётся из заголовка, а тело -
                             # запасной путь: заголовок ставит отправитель, и он
                             # есть даже у записи, которую потребитель отбросит
@@ -136,18 +150,29 @@ async def run(stop: asyncio.Event) -> None:
                             # с его работой, и её длительность о работе
                             # потребителя ничего не говорит.
                             await realtime_delivery.handle_event(
-                                topic=topic, body=body, cache=cache, centrifugo=client,
-                                link=trace.origin_from(headers, body),
+                                topic=current.topic, body=current.body, cache=cache,
+                                centrifugo=client,
+                                link=trace.origin_from(current.headers, current.body),
                             )
                         await subscriber.commit()
                         metrics.consumer_processing_duration(
                             time.perf_counter() - processing_started, consumer="realtime"
                         )
             except Exception as exc:  # noqa: BLE001 - цикл обязан пережить любой отказ
+                # Возврат до паузы, и это не перестраховка: без `seek`
+                # хвост незавершённой пачки не вернётся ни этому циклу,
+                # ни следующему.
+                await subscriber.rewind()
                 log.warning(
                     "цикл потребителя прерван",
                     extra={"event": "realtime_cycle", "result": "failed",
-                           "error_code": type(exc).__name__},
+                           "error_code": type(exc).__name__,
+                           # Координаты незавершённой записи: отказ должен
+                           # называть запись, а не только тип исключения.
+                           "batch_size": batch_size,
+                           "failed_topic": current.topic if current else None,
+                           "failed_partition": current.partition if current else None,
+                           "failed_offset": current.offset if current else None},
                 )
                 await _sleep(stop, 1.0)
 

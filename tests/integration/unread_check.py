@@ -48,6 +48,21 @@
   лежит в `messages`, а в счёт попасть не должно), а не отдельным
   сценарием: без гонки «число по чекпойнту» и «число по голове беседы»
   неразличимы.
+* Порядок очереди и возврат незавершённой пачки — **два сценария**,
+  а не один. Гонка держит строку меньше предела запроса (`command_timeout`,
+  5 с), потому что за ту же строку встаёт квитанция и ждёт её всё это
+  время: продержи держатель дольше — красное было бы про таймаут
+  квитанции, а не про порядок. Отказ потребителя, наоборот, требует
+  держать строку дольше предела, и у него своё утверждение: та же запись
+  вернулась и применилась. Смешав их, проверка при красном не отвечала бы,
+  что именно сломалось.
+* **Перезапуск пода в сценарии отказа не опознаётся, а исключается
+  окном.** Изнутри пода не видно ни Kubernetes, ни имени процесса:
+  `application_name` до сервера не доходит через PgBouncer в режиме
+  транзакций (`repositories/postgres.py`). Поэтому «запись обработана
+  без перезапуска» утверждается временем возврата — окном, в которое
+  поднявшемуся заново контейнеру не встать, — а не тождеством процесса.
+  Граница названа, чтобы её не читали шире, чем она есть.
 * Стирание автора меняет вердикт предиката и для **самого автора**: его
   собственное сообщение перестаёт быть своим (`IS DISTINCT FROM` без
   субъекта — любое), а уцелевшая строка автора об этом не узнаёт, потому
@@ -323,14 +338,90 @@ SELECT count(*)
 
 CURRENT_XID = "SELECT pg_current_xact_id()::text::bigint % 4294967296"
 
+# Предел одной команды у потребителя: `acquire_timeout_seconds` из
+# `PoolSettings` (5 с), который `create_pool` передаёт asyncpg как
+# `command_timeout`. Число нужно здесь дважды и в разные стороны: гонка
+# обязана отпустить строку **раньше** него, а отказ — держать **дольше**.
+COMMAND_TIMEOUT_SECONDS = 5.0
 
-async def blocked_count(conn, *, xid: int, expected: int, seconds: float = 25.0) -> bool:
-    deadline = time.monotonic() + seconds
+# Сколько строку держат в гонке. Меньше предела команды с запасом, потому
+# что за ту же строку встаёт квитанция и ждёт её всё это время: продержи
+# держатель дольше — красное было бы про её таймаут, а не про порядок,
+# и гонка перестала бы показывать то, ради чего заведена.
+HOLD_BUDGET_SECONDS = 4.0
+
+# Сколько ждут подхода потребителя к занятой строке. Событие идёт путём
+# «HTTP → outbox → отправитель → Kafka → опрос»: пауза отправителя 0.5 с,
+# опрос потребителя до 1 с, остальное — сеть и запись. Запас взят на
+# планировщик, а не «на всякий случай»: предел здесь утверждение о пути.
+FIRST_APPROACH_SECONDS = 45.0
+
+# Сколько ждут возврата той же записи после обрыва. Пауза цикла после
+# отказа — секунда (`_sleep(stop, 1.0)`), следующий опрос — ещё до
+# секунды, значит укладывается в две. Предел короткий, и это тоже
+# утверждение, а не «достаточно большое число»: контейнеру, поднятому
+# заново, в это окно не встать — kubelet держит упавший контейнер
+# в паузе не меньше десяти секунд, а потом потребителю нужно ещё
+# присоединиться к группе. Так и проверяется «без перезапуска пода»:
+# опознать процесс изнутри пода нечем.
+RETURN_BUDGET_SECONDS = 8.0
+
+
+async def blocked_count(conn, *, xid: int, expected: int, deadline: float) -> bool:
+    """Ждёт, пока за транзакцией встанет `expected` ждущих, до предела.
+
+    Предел передаётся моментом, а не длительностью: две последовательные
+    паузы сложились бы, и держатель продержал бы строку вдвое дольше
+    отведённого ему.
+    """
     while time.monotonic() < deadline:
         if await conn.fetchval(WAITING, xid) >= expected:
             return True
         await asyncio.sleep(0.02)
     return False
+
+
+async def waiting(conn, *, xid: int) -> int:
+    """Сколько транзакций ждут замков этой транзакции.
+
+    Считаются неполученные блокировки на **транзакцию держателя**: номер
+    процесса на этот вопрос не отвечает — перед базой PgBouncer в режиме
+    транзакций, и `application_name` до сервера не доходит, — а номер
+    транзакции от того, кто спрашивает, не зависит.
+    """
+    return await conn.fetchval(WAITING, xid)
+
+
+async def waiting_for(conn, *, xid: int, seconds: float) -> float | None:
+    """Ждёт, пока за транзакцией встанет хоть одна, и возвращает момент.
+
+    Момент, а не признак: по расстоянию между обрывом и следующим
+    подходом проверяется, что вернулся живой цикл, а не контейнер,
+    поднятый заново.
+    """
+    deadline = time.monotonic() + seconds
+    while True:
+        if await waiting(conn, xid=xid) >= 1:
+            return time.monotonic()
+        if time.monotonic() >= deadline:
+            return None
+        await asyncio.sleep(0.05)
+
+
+async def waiting_gone(conn, *, xid: int, seconds: float) -> float | None:
+    """Ждёт, пока ждущих не останется вовсе, и возвращает момент.
+
+    Именно ноль, а не «меньше прежнего»: попытка, оборванная по пределу
+    команды, уходит из `pg_locks` целиком, и это единственное, что
+    отличает обрыв от «ждёт дальше».
+    """
+    deadline = time.monotonic() + seconds
+    while True:
+        if await waiting(conn, xid=xid) == 0:
+            return time.monotonic()
+        if time.monotonic() >= deadline:
+            return None
+        await asyncio.sleep(0.05)
 
 
 async def run_race(
@@ -367,6 +458,12 @@ async def run_race(
     считающая по голове, положит в проекцию лишнее, а потребитель
     прибавит к этому своё событие — и итог разойдётся с источником истины
     по обоим концам сразу.
+
+    Строка держится `HOLD_BUDGET_SECONDS` — меньше предела команды
+    потребителя и квитанции. Отказ потребителя на занятой строке
+    проверяется **отдельным** сценарием (`run_failure_retry`): смешав их,
+    гонка при красном не отвечала бы, что именно сломалось — порядок
+    очереди или возврат незавершённой пачки.
     """
     async with pool.acquire() as holder_conn, pool.acquire() as viewer_conn:
         holder = holder_conn.transaction()
@@ -394,6 +491,11 @@ async def run_race(
             # не быть, и `pg_current_xact_id()` вернул бы NULL.
             xid = await holder_conn.fetchval(CURRENT_XID)
 
+            # Предел очереди один на оба ожидания: держатель отпускает
+            # строку раньше, чем истечёт предел команды у квитанции,
+            # и второго подхода потребителя сверх этого бюджета не ждёт.
+            deadline = time.monotonic() + HOLD_BUDGET_SECONDS
+
             task = asyncio.create_task(
                 receipt(
                     viewer_conn,
@@ -402,7 +504,7 @@ async def run_race(
                     read=read,
                 )
             )
-            queued = await blocked_count(holder_conn, xid=xid, expected=1)
+            queued = await blocked_count(holder_conn, xid=xid, expected=1, deadline=deadline)
             if not queued:
                 check(
                     f"{label}: квитанция встала за строкой чекпойнта",
@@ -410,11 +512,15 @@ async def run_race(
                     "ожидания не наблюдалось — квитанция не берёт замок беседы",
                 )
             await send_new()
-            both = queued and await blocked_count(holder_conn, xid=xid, expected=2)
+            both = queued and await blocked_count(
+                holder_conn, xid=xid, expected=2, deadline=deadline
+            )
             check(
                 f"{label}: потребитель встал за той же строкой",
                 both,
-                "второго ждущего не наблюдалось — событие применено без замка",
+                f"за {HOLD_BUDGET_SECONDS:.0f} с второго ждущего не было; строка держится"
+                " меньше предела запроса квитанции, поэтому это либо событие,"
+                " до потребителя не дошедшее, либо применение мимо замка",
             )
             await holder.commit()
             committed = True
@@ -432,7 +538,19 @@ async def run_race(
         # Ограничение по времени обязательное: несостоявшаяся гонка иначе
         # превратилась бы в висящий прогон, и это выглядело бы как
         # «проверка идёт», а не как «проверка не прошла».
-        result = await asyncio.wait_for(task, 30)
+        try:
+            result = await asyncio.wait_for(task, 30)
+        except Exception as exc:
+            # Отдельным `check`, а не всплытием наверх: оборвавшаяся
+            # квитанция — это находка о строке и её пределе запроса,
+            # а не повод уронить прогон с трассировкой.
+            check(
+                f"{label}: квитанция дождалась строки, а не оборвалась",
+                False,
+                f"{type(exc).__name__}: строка держалась {HOLD_BUDGET_SECONDS:.0f} с"
+                f" при пределе запроса {COMMAND_TIMEOUT_SECONDS:.0f} с",
+            )
+            return
         check(
             f"{label}: квитанция принята, а не отвергнута",
             result.ok,
@@ -444,6 +562,115 @@ async def run_race(
             f"пересчитано {result.unread_count}, ожидалось {expected_count},"
             f" голова беседы {head_seq}",
         )
+
+
+# --- отказ потребителя на занятой строке -------------------------------------
+
+
+async def run_failure_retry(pool, *, conversation_id, send_new, label: str) -> None:
+    """Отказ потребителя на занятой строке и возврат той же записи.
+
+    Строку чекпойнта держит третье соединение, и держит дольше предела
+    одной команды потребителя (`command_timeout`, 5 с). Это не подпорка
+    под отказ, а единственный отказ, который в этой системе обязан
+    переживаться повтором: строка беседы занята чужой транзакцией.
+    Потребитель получает на ней `TimeoutError`, откатывает событие
+    и возвращает пачку в поток — иначе запись осталась бы прочитанной
+    и неприменённой навсегда (`Subscriber.rewind`).
+
+    Доказывается рядом наблюдаемых событий, а не одним числом:
+
+        подход → обрыв → подход снова → (строка отпущена) применение
+
+    Обрыв виден как исчезновение ждущего **при занятой строке**: дождаться
+    он не мог — строка наша, — значит оборвался сам. Второй подход — это
+    тот же цикл, вернувший ту же запись: не вернув пачку, потребитель
+    о ней уже забыл бы, и подойти во второй раз ему стало бы нечем.
+
+    **Перезапуск пода здесь не опознаётся, а исключается окном.**
+    Изнутри пода не видно ни Kubernetes, ни имени процесса:
+    `application_name` до сервера не доходит через PgBouncer в режиме
+    транзакций (`repositories/postgres.py`), а другого признака «это тот
+    же процесс» у проверки нет. Поэтому утверждается время: возврат
+    приходит через паузу цикла, в окно, куда поднявшемуся заново
+    контейнеру не встать. Граница названа, чтобы её не читали шире, чем
+    она есть.
+    """
+    async with pool.acquire() as holder_conn:
+        holder = holder_conn.transaction()
+        await holder.start()
+        released = False
+        try:
+            await holder_conn.execute(
+                """
+                INSERT INTO unread_offsets (conversation_id, applied_through_seq)
+                VALUES ($1, 0)
+                ON CONFLICT (conversation_id) DO NOTHING
+                """,
+                conversation_id,
+            )
+            await holder_conn.fetchval(
+                "SELECT applied_through_seq FROM unread_offsets"
+                " WHERE conversation_id = $1 FOR UPDATE",
+                conversation_id,
+            )
+            xid = await holder_conn.fetchval(CURRENT_XID)
+
+            # Сообщение уходит уже под замком: иначе событие применилось бы
+            # до того, как строка занята, и обрывать было бы нечего.
+            await send_new()
+            approach = await waiting_for(
+                holder_conn, xid=xid, seconds=FIRST_APPROACH_SECONDS
+            )
+            check(
+                f"{label}: потребитель подошёл к занятой строке чекпойнта",
+                approach is not None,
+                f"ждущего не было за {FIRST_APPROACH_SECONDS:.0f} с"
+                " — событие не дошло до потребителя",
+            )
+            if approach is None:
+                return
+
+            # Запас сверх предела команды: он отсчитывается с момента, когда
+            # запрос дошёл до сервера, а ждущий наблюдался до этого.
+            broke = await waiting_gone(
+                holder_conn, xid=xid, seconds=COMMAND_TIMEOUT_SECONDS + 5.0
+            )
+            check(
+                f"{label}: попытка потребителя оборвана на пределе запроса",
+                broke is not None,
+                f"ждущий не исчез за {COMMAND_TIMEOUT_SECONDS + 5.0:.0f} с,"
+                " а строка всё ещё занята — отказа не было",
+            )
+            if broke is None:
+                return
+
+            returned = await waiting_for(
+                holder_conn, xid=xid, seconds=RETURN_BUDGET_SECONDS
+            )
+            check(
+                f"{label}: та же запись вернулась к потребителю без перезапуска пода",
+                returned is not None,
+                f"второго подхода не было за {RETURN_BUDGET_SECONDS:.0f} с: без возврата"
+                " пачки запись осталась бы прочитанной и неприменённой навсегда",
+            )
+            if returned is None:
+                return
+            print(
+                f"      возврат через {returned - broke:.1f} с после обрыва"
+                " (пауза цикла — 1 с)"
+            )
+
+            # Строка отпускается после наблюдений, а не до: отпусти её
+            # раньше — и возврат было бы нечем отличить от первой попытки.
+            await holder.commit()
+            released = True
+        finally:
+            if not released:
+                # Отпускается всегда: держать строку дольше предела запроса
+                # значило бы проверять таймаут вместо возврата, а брошенная
+                # транзакция держала бы её и после проверки.
+                await holder.rollback()
 
 
 # --- прогон ------------------------------------------------------------------
@@ -1052,6 +1279,30 @@ async def run() -> None:
                 "гонка: состояние сошлось с источником истины",
                 await counter(pool, conversation_id=conversation, user_id=reader_id)
                 == 4
+                == await source_of_truth(pool, conversation_id=conversation, user_id=reader_id),
+                f"проекция {await counter(pool, conversation_id=conversation, user_id=reader_id)},"
+                f" источник {await source_of_truth(pool, conversation_id=conversation, user_id=reader_id)}",
+            )
+
+            # --- отказ потребителя на занятой строке ----------------------
+            # Отдельный сценарий, а не продолжение гонки: у них разные
+            # утверждения. Гонка держит строку меньше предела запроса и
+            # показывает порядок очереди; здесь строка держится дольше
+            # предела, и проверяется возврат незавершённой пачки.
+            await run_failure_retry(
+                pool,
+                conversation_id=conversation,
+                send_new=lambda: our_sends("четырнадцатое во время отказа"),
+                label="отказ",
+            )
+            await until(
+                "отказ: четырнадцатое сообщение применено после возврата",
+                lambda: checkpoint(pool, conversation_id=conversation),
+                expected=14,
+            )
+            check(
+                "отказ: состояние сошлось с источником истины",
+                await counter(pool, conversation_id=conversation, user_id=reader_id)
                 == await source_of_truth(pool, conversation_id=conversation, user_id=reader_id),
                 f"проекция {await counter(pool, conversation_id=conversation, user_id=reader_id)},"
                 f" источник {await source_of_truth(pool, conversation_id=conversation, user_id=reader_id)}",

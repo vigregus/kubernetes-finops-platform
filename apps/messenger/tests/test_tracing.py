@@ -608,6 +608,7 @@ class FakeSubscriber:
         # ровно как у настоящего подписчика.
         self.stop_event = stop_event
         self.committed = 0
+        self.rewinds = 0
 
     async def start(self) -> bool:
         return True
@@ -619,6 +620,9 @@ class FakeSubscriber:
 
     async def commit(self) -> None:
         self.committed += 1
+
+    async def rewind(self) -> None:
+        self.rewinds += 1
 
     async def stop(self) -> None:
         pass
@@ -685,8 +689,10 @@ def test_дерево_потребителя_и_ссылка_на_отправи
     stop = asyncio.Event()
     подписчик = FakeSubscriber(
         [
-            (delivery.FACT_TOPIC, headers, факт),
-            (delivery.CONTENT_TOPIC, headers, содержимое),
+            kafka_adapter.KafkaRecord(topic=delivery.FACT_TOPIC, partition=0, offset=41,
+                                      headers=headers, body=факт),
+            kafka_adapter.KafkaRecord(topic=delivery.CONTENT_TOPIC, partition=0, offset=42,
+                                      headers=headers, body=содержимое),
         ],
         stop,
     )

@@ -19,6 +19,7 @@ from typing import Any
 
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 from aiokafka.errors import KafkaError
+from aiokafka.structs import TopicPartition
 
 log = logging.getLogger(__name__)
 
@@ -130,6 +131,24 @@ class ConsumerSettings:
     max_records: int = 100
 
 
+@dataclass(frozen=True, slots=True)
+class KafkaRecord:
+    """Запись потока: что пришло, откуда и на каком месте.
+
+    Координаты - не украшение. По ним воркер называет в журнале ту
+    запись, на которой прервался цикл, а `rewind` возвращает партицию
+    к началу выданной пачки. Кортеж «топик, заголовки, тело» этого не
+    позволяет: смещения и партиции в нём нет, а восстановить их потом
+    неоткуда - транспортный слой о ней знает ровно в этот момент.
+    """
+
+    topic: str
+    partition: int
+    offset: int
+    headers: dict[str, str]
+    body: dict[str, Any]
+
+
 @dataclass(slots=True)
 class Subscriber:
     """Потребитель с ручной фиксацией смещения.
@@ -142,10 +161,22 @@ class Subscriber:
     Фиксация после обработки означает, что при падении событие придёт
     второй раз. Это осознанная цена at-least-once, и переживает её
     дедупликация, а не надежда.
+
+    Одной фиксации, однако, мало, и это выяснилось живым прогоном, а не
+    рассуждением: `getmany` сдвигает внутреннюю позицию в момент выдачи
+    записей, поэтому отказ на середине пачки оставлял её хвост прочитанным
+    и неприменённым - навсегда, без всякого перезапуска. Возврат делает
+    `rewind`.
     """
 
     settings: ConsumerSettings
     _consumer: AIOKafkaConsumer | None = field(default=None)
+    # Начало последней выданной пачки по партициям - то, к чему возвращает
+    # `rewind`. Именно начало, а не первая необработанная запись: прогресс
+    # по каждой записи пришлось бы вести в воркере, который о партициях
+    # не знает, а повтор разобранного префикса бесплатен (применение
+    # идемпотентно) там, где цена ошибки - потерянный хвост.
+    _fetched_from: dict[TopicPartition, int] = field(default_factory=dict)
 
     async def start(self) -> bool:
         if self._consumer is not None:
@@ -182,12 +213,18 @@ class Subscriber:
             await self._consumer.stop()
             self._consumer = None
 
-    async def poll(self) -> list[tuple[str, dict[str, str], dict[str, Any]]]:
-        """Пачка событий: топик, заголовки, тело.
+    async def poll(self) -> list[KafkaRecord]:
+        """Пачка записей: что пришло, откуда и на каком месте.
 
         Тело разбирается здесь, потому что негодный JSON - это отказ
         транспорта, а не предметной области: сервис не должен уметь
         отличать сообщение от мусора в логе.
+
+        Здесь же запоминается начало пачки по партициям, и это не
+        бухгалтерия ради журнала: после `getmany` внутренняя позиция
+        стоит за выданными записями, поэтому решение о возврате
+        принимается по тому, что выдали мы, а брокер об этом уже
+        ничего не помнит.
         """
         if self._consumer is None:
             raise ConnectionError("потребитель не подключён")
@@ -195,7 +232,14 @@ class Subscriber:
             timeout_ms=self.settings.poll_timeout_ms,
             max_records=self.settings.max_records,
         )
-        events: list[tuple[str, dict[str, str], dict[str, Any]]] = []
+        # Состояние возврата заменяется целиком, а не дополняется: пачка
+        # без записей по партиции и означает, что возвращать её некуда.
+        self._fetched_from = {
+            partition: records[0].offset
+            for partition, records in batches.items()
+            if records
+        }
+        events: list[KafkaRecord] = []
         for partition, records in batches.items():
             for record in records:
                 headers = {
@@ -211,10 +255,52 @@ class Subscriber:
                                "topic": partition.topic, "offset": record.offset},
                     )
                     continue
-                events.append((partition.topic, headers, body))
+                events.append(KafkaRecord(
+                    topic=partition.topic,
+                    partition=partition.partition,
+                    offset=record.offset,
+                    headers=headers,
+                    body=body,
+                ))
         return events
 
+    async def rewind(self) -> None:
+        """Возвращает позицию к началу последней выданной пачки.
+
+        Не фиксация и не «мягкий» пропуск: `getmany` сдвигает внутреннюю
+        позицию в момент выдачи, поэтому необработанный хвост пачки
+        живому процессу вернёт только `seek`. Без него «смещение не
+        зафиксировано» охраняет лишь от перезапуска - и только до тех
+        пор, пока позиция не уехала вперёд, - а отказ на середине пачки
+        терял бы её хвост молча. Цена названа вслух: разобранный префикс
+        пачки приедет второй раз. Это допустимо, потому что применение
+        идемпотентно, и дешевле потерянного события.
+
+        Отозванные партиции пропускаются: ребаланс мог случиться между
+        выдачей пачки и отказом обработки, а `seek` по чужой партиции
+        бросает `IllegalStateError` - из `except` воркера это уронило бы
+        процесс. Терять при этом нечего: хвост отозванной партиции
+        вернёт новый владелец, начиная с зафиксированного смещения.
+        """
+        if self._consumer is None:
+            return
+        assigned = self._consumer.assignment()
+        for partition, offset in self._fetched_from.items():
+            if partition in assigned:
+                # `seek` синхронный и вдобавок выбрасывает буфер партиции -
+                # иначе возврат позиции ничего не значил бы: записи
+                # вернулись бы из уже прочитанного буфера.
+                self._consumer.seek(partition, offset)
+
     async def commit(self) -> None:
-        """Фиксирует смещение. Только после обработки всей пачки."""
+        """Фиксирует смещение. Только после обработки всей пачки.
+
+        Вместе со смещением забывается начало пачки. Возврат к тому, что
+        уже зафиксировано, был бы не подстраховкой, а повтором давно
+        разобранного - и с каждой неудачей его становилось бы больше.
+        Забывается после подтверждения брокера: упавшая фиксация обязана
+        оставить возврат возможным.
+        """
         if self._consumer is not None:
             await self._consumer.commit()
+            self._fetched_from.clear()
