@@ -102,9 +102,15 @@ Current verified state:
   forward, and a number above the conversation head is rejected with `400
   invalid_receipt` rather than silently clamped. The receipt is not fanned out
   to the other participant: no event schema exists for it, and inventing one
-  would put an event without an owner on the wire. Gap detection, reconnect with
-  `recovered=false`, unread counters, presence and the web client itself are
-  still open.
+  would put an event without an owner on the wire. The unread consumer is
+  written and unit-tested — a projection over `messages` and `last_read_seq`, a
+  monotone per-conversation checkpoint that makes a replay a no-op without any
+  `event_id` journal, a receipt that recomputes the count but never beyond the
+  consumer's checkpoint, and a conversation list that rebuilds a missing row
+  from the source of truth — but it is **not deployed** (`enabled: false`) and
+  its integration check has never run, so gate G3-003 is *implementation
+  prepared*, not closed. Gap detection, reconnect with `recovered=false`,
+  presence and the web client itself are still open.
 
 `make local-test` verifies contracts, authenticated Kafka ACLs, layer rules, the
 log event catalog, migration safety, lint, unit tests, migrations and the live

@@ -738,7 +738,16 @@ components:
           type: array
           items: { $ref: '#/components/schemas/UserSummary' }
         last_message: { $ref: '#/components/schemas/Message' }
-        unread_count: { type: integer, minimum: 0 }
+        unread_count:
+          type: integer
+          minimum: 0
+          description: |
+            Производное от `messages` и `last_read_seq`, а не факт о беседе:
+            хранится ради дешевизны чтения и может быть потеряно без
+            последствий — число восстанавливается из источника истины
+            в момент запроса. Отсутствие ключа означает «источник истины
+            не даёт числа этому читателю», а не ноль: ноль — уверенное
+            «всё прочитано», и подставлять его вместо отсутствия нельзя.
         created_at: { type: string, format: date-time }
 
     ConversationListPage:

@@ -411,6 +411,23 @@ messenger_client_gap_detected_total
 messenger_recovery_total{method="centrifugo|database"}
 ```
 
+**Не всё в этом списке существует в коде — и это записано здесь, чтобы
+следующий гейт не получил «они уже есть».** Реализованы
+`messenger_consumer_processing_duration_seconds`,
+`messenger_realtime_publish_duration_seconds` и метрики outbox, причём две
+из них под другими именами, чем в списке: `messenger_outbox_pending`
+и `messenger_outbox_oldest_age_seconds`, а публикация разведена на
+`messenger_outbox_events_total{outcome,event_type}`
+и `messenger_outbox_published_total{result}` — имя из каталога при сверке
+не находится, и это первое, на что стоит смотреть. Не реализованы нигде:
+`messenger_kafka_consumer_lag_seconds`, `messenger_duplicate_events_total`,
+`messenger_client_gap_detected_total`, `messenger_recovery_total` — это строки
+каталога, а не метрики. Лаг требует `consumer.position()` и `highwater()`
+из `aiokafka`, которых `adapters/kafka.py` не отдаёт; повтор и пропуск видны
+лог-событиями (`realtime_duplicate`, `unread_event` с полем `result`). Долг
+назван здесь, а не в задаче: иначе он снова обнаружится при написании алерта —
+в момент, когда метрику уже обещали.
+
 **Возраст самой старой необработанной записи важнее их количества.** Сто тысяч
 строк в outbox могут быть нормой при высокой пропускной способности; пятнадцать
 минут возраста — отказ при любой. Порог по количеству пришлось бы менять при
