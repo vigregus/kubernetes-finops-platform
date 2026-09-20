@@ -130,7 +130,7 @@ services:
     http:
       port: 8080
     image:
-      digest: sha256:16f48bec7bedb01ef9d7cbd75a97e782b0e82e914a4380a1cfb31ba22becaeab
+      digest: sha256:180c6aba533b4dd0f8f27762ea7ebba783c60ce7ee35c2ac1b8661303d43bf90
     resources:
       requests: {cpu: 50m, memory: 128Mi}
       limits: {cpu: "1", memory: 512Mi}
@@ -168,7 +168,7 @@ services:
     preStopSeconds: 0
     terminationGracePeriodSeconds: 60
     image:
-      digest: sha256:16f48bec7bedb01ef9d7cbd75a97e782b0e82e914a4380a1cfb31ba22becaeab
+      digest: sha256:180c6aba533b4dd0f8f27762ea7ebba783c60ce7ee35c2ac1b8661303d43bf90
     resources:
       requests: {cpu: 50m, memory: 128Mi}
       limits: {cpu: "1", memory: 512Mi}
@@ -189,19 +189,19 @@ services:
     # и зафиксировать смещение, иначе после перезапуска будет повтор.
     terminationGracePeriodSeconds: 60
     image:
-      digest: sha256:16f48bec7bedb01ef9d7cbd75a97e782b0e82e914a4380a1cfb31ba22becaeab
+      digest: sha256:180c6aba533b4dd0f8f27762ea7ebba783c60ce7ee35c2ac1b8661303d43bf90
     resources:
       requests: {cpu: 50m, memory: 128Mi}
       limits: {cpu: "1", memory: 512Mi}
 
   consumer-unread:
-    # Выключено **до** продвижения дайджеста, и это не половинчатость,
-    # а порядок. Образ адресуется дайджестом, а дайджест появляется
-    # только после сборки этого коммита в CI; подставить сюда прежний
-    # (от которого потребителя непрочитанного в образе ещё нет) значило
-    # бы выкатить нагрузку, падающую на импорте модуля. Настоящее
-    # значение этого ключа — в коммите продвижения, и он идёт следом.
-    enabled: false
+    # Включена коммитом продвижения, и порядок тут был не формальностью:
+    # образ адресуется дайджестом, дайджест появляется только после сборки
+    # этого коммита в CI, а прежний дайджест отдал бы нагрузку, в которой
+    # потребителя непрочитанного ещё нет, — то есть падающую на импорте
+    # модуля. Поэтому `enabled` и дайджест ставятся одним коммитом, и
+    # включённой нагрузка бывает только при дайджесте, где потребитель есть.
+    enabled: true
     # Учётная запись без права на содержимое: проекции непрочитанного
     # нужен факт появления сообщения, и SEC-010 держится её правами,
     # а не дисциплиной кода.
@@ -222,6 +222,8 @@ services:
     # Как у соседей: потребитель обязан успеть дообработать пачку
     # и зафиксировать смещение, иначе после перезапуска будет повтор.
     terminationGracePeriodSeconds: 60
+    image:
+      digest: sha256:180c6aba533b4dd0f8f27762ea7ebba783c60ce7ee35c2ac1b8661303d43bf90
     resources:
       requests: {cpu: 50m, memory: 128Mi}
       limits: {cpu: "1", memory: 512Mi}
