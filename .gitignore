@@ -41,4 +41,5 @@ dist/
 tmp/
 .tmp/
 coverage/
+apps/web/node_modules/*
 
