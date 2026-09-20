@@ -21,7 +21,7 @@ from messenger.domain.conversation_list import (
 from messenger.domain.errors import Reason
 from messenger.domain.ids import ConversationId, UserId, direct_key
 from messenger.domain.user import User
-from messenger.repositories import conversations, messages
+from messenger.repositories import conversations, messages, unread
 from messenger.services import authorization
 
 
@@ -99,6 +99,18 @@ async def list_conversations(
     вызывается дважды, а не переписывается здесь своими словами. Негодный
     запрос не должен занимать соединение, поэтому обработчик зовёт её
     первым, до сюда дело доходит уже проверенным.
+
+    Дополнение страницы идёт **двумя** запросами на страницу, а не
+    запросом на беседу: и последнее сообщение, и счётчик непрочитанного
+    читаются пачкой по идентификаторам. Отдельный поход в базу на каждую
+    строку списка — это ровно то read amplification, ради устранения
+    которого проекция и заводится.
+
+    `get` без умолчания у обоих: у беседы без сообщений последнего нет,
+    а у пользователя, ни разу не получавшего событий, нет строки проекции.
+    Подставить вместо отсутствия ноль значило бы показать «всё прочитано»
+    тому, о ком мы просто ничего не знаем. Различие несёт
+    `ConversationSummary.unread_count` — `None` против нуля.
     """
     validate_activity_cursors(
         before_activity_at=cursor.updated_at if cursor is not None else None,
@@ -111,22 +123,25 @@ async def list_conversations(
     page = await conversations.list_user_conversations(
         conn, user_id=viewer_id, cursor=cursor, limit=limit
     )
+    conversation_ids = [
+        item.conversation.conversation_id for item in page.items
+    ]
     latest = await messages.fetch_latest_by_conversation(
-        conn,
-        conversation_ids=[
-            item.conversation.conversation_id for item in page.items
-        ],
+        conn, conversation_ids=conversation_ids
+    )
+    counts = await unread.fetch_projection(
+        conn, user_id=viewer_id, conversation_ids=conversation_ids
     )
     return ConversationListResult(
         page=ConversationPage(
             # `replace`, а не сборка заново: сущность и участники уже
             # проверены репозиторием, и второй сборкой их можно было бы
-            # только испортить. `get` без умолчания — у беседы без
-            # сообщений последнего нет, и это не ошибка.
+            # только испортить.
             items=tuple(
                 replace(
                     item,
                     last_message=latest.get(item.conversation.conversation_id),
+                    unread_count=counts.get(item.conversation.conversation_id),
                 )
                 for item in page.items
             ),
