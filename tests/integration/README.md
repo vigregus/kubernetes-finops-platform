@@ -62,6 +62,7 @@ scripts/integration-messenger.sh
 | `password_recovery_check` | `AUTH-005`: сброс пароля отзывает сессии |
 | `realtime_receive_check` | `G2-005`: получение по WebSocket и отсев повтора |
 | `realtime_revoke_check` | `AUTH-003` realtime: отзыв рвёт живое соединение |
+| `receipts_check` | `G3-002`/`RCP-003…006`: монотонность, `read ≤ delivered ≤ last_seq`, отказ выше головы и по чужой беседе, живая гонка двух устройств |
 | `registration_check` | `AUTH-001`: самостоятельная регистрация |
 | `relay_check` | отправитель outbox: аренда, публикация, отметка |
 | `send_message_check` | `G2-004`: контракт маршрута и путь до Kafka |

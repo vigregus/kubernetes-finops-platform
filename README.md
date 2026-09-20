@@ -83,9 +83,9 @@ Current verified state:
   authenticated `POST`, Postgres commit, outbox, Kafka, Centrifugo, WebSocket —
   is proven live, including the gate's exit condition: a deliberately repeated
   event is seen by the recipient exactly once;
-- G3 (client consistency) has started with its contract and schema. The history
-  route gained `after_seq` plus a fixed sync boundary (`sync_to_seq` /
-  `through_seq`), so recovery converges on a snapshot instead of chasing a
+- G3 (client consistency) is under way, starting with its contract and schema.
+  The history route gained `after_seq` plus a fixed sync boundary (`sync_to_seq`
+  / `through_seq`), so recovery converges on a snapshot instead of chasing a
   moving head while the realtime channel carries part of the same range;
   delivery and read are now one receipt (`POST /conversations/{id}/receipts`)
   instead of a read-only marker — the old `PUT /read` is gone, and the break is
@@ -95,7 +95,14 @@ Current verified state:
   validated. The contract job is a required status check on `main`, behind a PR
   requirement that also binds administrators, and the workflow no longer filters
   by path on `pull_request` — a check that sometimes does not run cannot be a
-  merge condition. History paging, gap detection, reconnect with
+  merge condition. Reading is paged on both sides now — history with
+  `before_seq`/`after_seq` up to the fixed sync boundary, plus the conversation
+  list — and receipts are written: a device reports `delivered_seq`/`read_seq`,
+  the server answers with the state *after* applying it, both values only move
+  forward, and a number above the conversation head is rejected with `400
+  invalid_receipt` rather than silently clamped. The receipt is not fanned out
+  to the other participant: no event schema exists for it, and inventing one
+  would put an event without an owner on the wire. Gap detection, reconnect with
   `recovered=false`, unread counters, presence and the web client itself are
   still open.
 

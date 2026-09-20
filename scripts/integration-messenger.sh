@@ -51,8 +51,19 @@ for f in "$ROOT"/tests/integration/*.py; do
     args+=(--from-file="$f")
 done
 
-kubectl -n "$NS" create configmap "$CM" "${args[@]}" \
-    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+# create, а не `create --dry-run=client | apply`: apply дописывает в объект
+# аннотацию `kubectl.kubernetes.io/last-applied-configuration` со всем
+# содержимым ConfigMap, и её предел (262144 байта) меньше этого каталога —
+# на момент правки он занимал 297225 байт, а до неё запас составлял 577.
+# Предел выбирала именно аннотация, а не данные: тот же объект без неё
+# сервер принимает. Потолок теперь другой и выше — 1 МиБ на данные
+# ConfigMap, — но и он конечен, и упирается в него первым этот же каталог.
+#
+# apply здесь был бы нужен, лишь если бы кто-то читал last-applied: его не
+# читает никто, а `delete` перед `create` даёт ту же повторяемость после
+# прогона, убитого без trap.
+kubectl -n "$NS" delete configmap "$CM" --ignore-not-found >/dev/null
+kubectl -n "$NS" create configmap "$CM" "${args[@]}" >/dev/null
 
 # Учётные данные администратора Keycloak живут в своём namespace, а секреты
 # через границу namespace не видны. Поэтому на время проверки заводится
