@@ -23,6 +23,7 @@ from messenger.domain.ids import ConversationId, UserId, direct_key
 from messenger.domain.user import User
 from messenger.repositories import conversations, messages
 from messenger.services import authorization
+from messenger.services.unread import restore_lost_counts
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +100,28 @@ async def list_conversations(
     вызывается дважды, а не переписывается здесь своими словами. Негодный
     запрос не должен занимать соединение, поэтому обработчик зовёт её
     первым, до сюда дело доходит уже проверенным.
+
+    Дополнение страницы идёт **двумя** запросами на страницу, а не
+    запросом на беседу: и последнее сообщение, и счётчик непрочитанного
+    читаются пачкой по идентификаторам. Отдельный поход в базу на каждую
+    строку списка — это ровно то read amplification, ради устранения
+    которого проекция и заводится.
+
+    Счётчик берётся не «как есть»: `restore_lost_counts` читает проекцию
+    пачкой и **восстанавливает из источника истины** те строки, которых
+    в ней нет. Потеря проекции не должна менять существенный ответ
+    системы — производную и заводят ради права её потерять, — поэтому
+    на вопрос, на который источник истины отвечает, список отвечает,
+    а не сообщает «неизвестно». Дорогая половина (счёт по беседе)
+    достаётся только потерянным строкам, и случается она один раз
+    на потерю.
+
+    `get` без умолчания у обоих, но причины разные. У беседы без сообщений
+    последнего нет по существу. У счётчика отсутствие ключа теперь значит
+    не «проекция потеряна» (это лечит восстановление), а «источник истины
+    не даёт числа этому читателю» — он не в составе беседы. Подставить
+    вместо отсутствия ноль всё так же нельзя: `0` — уверенное «всё
+    прочитано», и оно не должно вставать на место ответа, которого нет.
     """
     validate_activity_cursors(
         before_activity_at=cursor.updated_at if cursor is not None else None,
@@ -111,22 +134,25 @@ async def list_conversations(
     page = await conversations.list_user_conversations(
         conn, user_id=viewer_id, cursor=cursor, limit=limit
     )
+    conversation_ids = [
+        item.conversation.conversation_id for item in page.items
+    ]
     latest = await messages.fetch_latest_by_conversation(
-        conn,
-        conversation_ids=[
-            item.conversation.conversation_id for item in page.items
-        ],
+        conn, conversation_ids=conversation_ids
+    )
+    counts = await restore_lost_counts(
+        conn, viewer_id=viewer_id, conversation_ids=conversation_ids
     )
     return ConversationListResult(
         page=ConversationPage(
             # `replace`, а не сборка заново: сущность и участники уже
             # проверены репозиторием, и второй сборкой их можно было бы
-            # только испортить. `get` без умолчания — у беседы без
-            # сообщений последнего нет, и это не ошибка.
+            # только испортить.
             items=tuple(
                 replace(
                     item,
                     last_message=latest.get(item.conversation.conversation_id),
+                    unread_count=counts.get(item.conversation.conversation_id),
                 )
                 for item in page.items
             ),

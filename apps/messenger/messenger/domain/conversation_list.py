@@ -40,6 +40,7 @@ from messenger.domain.history import (
 )
 from messenger.domain.ids import ConversationId
 from messenger.domain.message import Message
+from messenger.domain.unread import UnreadCount
 from messenger.domain.user import UserSummary
 
 # Переиспользуются, а не объявляются заново: `Limit` в контракте один на
@@ -86,11 +87,22 @@ class ConversationSummary:
     сообщений существует с первой же транзакции создания, и выдумывать
     ей сообщение-заглушку значило бы соврать клиенту о последнем событии
     в беседе.
+
+    `unread_count` необязателен по другой причине, и разницу стоит назвать:
+    это **производное** число, а не факт о беседе. Но производное — не
+    значит необязательное: у него есть источник истины, и потеря проекции
+    ответа не меняет — строку восстанавливает тот, кто её спрашивает
+    (`services/unread.restore_lost_counts`). Поэтому `None` здесь значит
+    не «проекция потеряна», а «источник истины не даёт числа этому
+    читателю»: он не в составе беседы. Подставить вместо этого `0`
+    по-прежнему нельзя — «всё прочитано» и «спросить не у кого» разные
+    ответы, и второй клиент обязан уметь отличить (`LIST-003`).
     """
 
     conversation: Conversation
     participants: tuple[UserSummary, ...]
     last_message: Message | None = None
+    unread_count: UnreadCount | None = None
 
 
 @dataclass(frozen=True, slots=True)

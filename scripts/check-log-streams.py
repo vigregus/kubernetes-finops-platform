@@ -102,6 +102,12 @@ EVENTS: dict[str, str] = {
     "realtime_cycle": APPLICATION,
     "realtime_delivery": APPLICATION,
     "realtime_duplicate": APPLICATION,
+    # Проекция непрочитанного. Два имени, а не одно: `unread_cycle`
+    # отвечает на «жив ли потребитель», `unread_event` — на «что стало
+    # с конкретным событием». Слить их значило бы потерять второе:
+    # исход события не виден по циклу, а цикл не виден по событию.
+    "unread_cycle": APPLICATION,
+    "unread_event": APPLICATION,
     # Обращения.
     "http_request": "access",
     # Доступ: кого пустили, кого нет и почему.

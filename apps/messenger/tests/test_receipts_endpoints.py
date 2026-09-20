@@ -25,6 +25,7 @@ from messenger.api.main import app
 from messenger.domain.errors import Reason, Visibility
 from messenger.domain.ids import ConversationSeq, UserId
 from messenger.domain.receipts import InvalidReceipt, ReadState
+from messenger.domain.unread import UnreadCount
 from messenger.domain.user import User
 from messenger.services import identity
 from messenger.services import receipts as service
@@ -121,6 +122,30 @@ def test_состояние_доезжает_в_форме_контракта(cl
     # он прочтёт как «сервер не знает».
     assert set(r.json()) == {"delivered_seq", "read_seq"}
     assert r.json() == {"delivered_seq": 5, "read_seq": 5}
+
+
+def test_пересчитанное_число_остаётся_внутри_процесса(client, monkeypatch):
+    """`CTR-002`: тело ответа квитанции этим гейтом не расширяется.
+
+    `SetReceiptsResult` получил поле для пересчёта, и соблазн отдать его
+    клиенту «заодно» понятен: клиент шлёт `read_seq` и очень хочет знать,
+    сколько осталось. Но контракт `POST /conversations/{id}/receipts`
+    не расширяется, и расширить его молча — ровно то, что ловит `CTR-002`.
+
+    Проверка ставит значение **в результат**, а не убирает его: сборщик
+    тела, взявший результат целиком (`dataclasses.asdict` и подобное),
+    выдаст лишний ключ именно здесь, и ни один другой тест файла этого
+    не заметит — всюду прочие результаты поля не имеют.
+    """
+    authenticated(monkeypatch)
+    отвечает(
+        monkeypatch,
+        service.SetReceiptsResult(state=_state(5, 5), unread_count=UnreadCount(2)),
+    )
+
+    r = client.post(URL, json={"read_seq": 5})
+    assert r.status_code == 200
+    assert set(r.json()) == {"delivered_seq", "read_seq"}
 
 
 def test_нулевое_состояние_доезжает(client, monkeypatch):

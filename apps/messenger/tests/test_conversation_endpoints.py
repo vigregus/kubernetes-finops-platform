@@ -25,6 +25,7 @@ from messenger.domain.ids import (
     UserId,
 )
 from messenger.domain.message import Message, MessageKind, MessagePayload
+from messenger.domain.unread import UnreadCount
 from messenger.domain.user import User, UserSummary
 from messenger.services import conversations as service
 from messenger.services import identity
@@ -272,8 +273,10 @@ def test_список_отдаёт_беседу_без_сообщения(client
     # Ключа нет вовсе — не «есть, но null»: у беседы без сообщений
     # последнего не существует, а контракт объявляет поле как `Message`.
     assert "last_message" not in body["items"][0]
-    # И это тоже утверждение, а не забывчивость: проекция непрочитанных —
-    # отдельная работа, и поля нет, пока её нет.
+    # Здесь отсутствие — тоже ответ, но другой: проекции нет, то есть
+    # «неизвестно». Не «ноль» и не «поля не бывает»: `G3-003` его отдаёт,
+    # и соседний тест это показывает. Ноль вместо неизвестного был бы
+    # уверенной ложью, и заметить её клиент не смог бы.
     assert "unread_count" not in body["items"][0]
 
 
@@ -321,6 +324,64 @@ def test_последнее_сообщение_отдаётся_полным_т�
         "edited_at": None,
         "deleted_at": None,
     }
+
+
+def test_счётчик_непрочитанного_доезжает_до_тела(client, monkeypatch):
+    """`UNR-002`: число, которое знает проекция, попадает в ответ списка.
+
+    Проверка нужна отдельно от сервисной: там число появляется в
+    `ConversationSummary`, и это ещё не значит, что сборщик тела его
+    передаёт — `_conversation_body` принимает добавки необязательными
+    и молча обошлась бы без новой. Именно так поле и потерялось бы:
+    всё зелено, числа нет.
+    """
+    authenticated(monkeypatch)
+    _список(
+        monkeypatch,
+        ConversationPage(
+            items=(
+                ConversationSummary(
+                    conversation=_summary(CONVERSATION_ID).conversation,
+                    participants=(UserSummary(user_id=ACTOR_ID, display_name="Аня"),),
+                    unread_count=UnreadCount(2),
+                ),
+            )
+        ),
+    )
+
+    body = client.get(
+        "/conversations", headers={"Authorization": "Bearer token"}
+    ).json()
+    assert body["items"][0]["unread_count"] == 2
+
+
+def test_ноль_непрочитанного_отдаётся_нулём(client, monkeypatch):
+    """Ронит `if unread_count:` в сборке тела.
+
+    Ноль — законное значение и самое частое: у прочитанного всё. Проверка
+    на ложность выбросила бы ключ ровно там, и клиент прочёл бы «всё
+    прочитано» как «неизвестно» — то есть счётчик исчез бы у аккуратного
+    пользователя, а у неаккуратного остался бы. Отдельный тест нужен
+    потому, что во всех прочих числа ненулевые.
+    """
+    authenticated(monkeypatch)
+    _список(
+        monkeypatch,
+        ConversationPage(
+            items=(
+                ConversationSummary(
+                    conversation=_summary(CONVERSATION_ID).conversation,
+                    participants=(UserSummary(user_id=ACTOR_ID, display_name="Аня"),),
+                    unread_count=UnreadCount(0),
+                ),
+            )
+        ),
+    )
+
+    body = client.get(
+        "/conversations", headers={"Authorization": "Bearer token"}
+    ).json()
+    assert body["items"][0]["unread_count"] == 0
 
 
 def test_продолжение_отдаётся_парой_а_не_одним_временем(client, monkeypatch):
