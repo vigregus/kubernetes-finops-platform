@@ -231,15 +231,20 @@ def _stub_page(
         return latest or {}
 
     async def _counts(*args, **kwargs):
-        позвали["projection"] = (
-            kwargs["user_id"],
+        # Подменяется **восстановление** счётчиков, а не чтение проекции:
+        # список зовёт `restore_lost_counts`, и подмена `fetch_projection`
+        # (её внутренностей) не покраснела бы, а перестала бы подменять
+        # что-либо — читающая половина пошла бы настоящим запросом
+        # в подставленное соединение.
+        позвали["restore"] = (
+            kwargs["viewer_id"],
             kwargs["conversation_ids"],
         )
         return counts or {}
 
     monkeypatch.setattr(service.conversations, "list_user_conversations", _page)
     monkeypatch.setattr(service.messages, "fetch_latest_by_conversation", _latest)
-    monkeypatch.setattr(service.unread, "fetch_projection", _counts)
+    monkeypatch.setattr(service, "restore_lost_counts", _counts)
     return позвали
 
 
@@ -262,24 +267,30 @@ def test_страница_собирается_из_трёх_выборок(monk
     assert позвали["latest_ids"] == [FIRST_ID, SECOND_ID]
     assert result.page.items[0].last_message == message
     assert result.page.items[1].last_message is None
-    # Проекция — тем же правилом и по **спрашивающему**: счётчик
+    # Счётчики — тем же правилом и по **спрашивающему**: число
     # принадлежит пользователю, а не беседе, и запрос «по беседам» без
     # `viewer_id` отдал бы чужие числа или потребовал бы второго похода
     # в базу на каждого участника.
-    assert позвали["projection"] == (ACTOR_ID, [FIRST_ID, SECOND_ID])
+    assert позвали["restore"] == (ACTOR_ID, [FIRST_ID, SECOND_ID])
     assert result.page.items[0].unread_count == 2
     assert result.page.items[1].unread_count is None
 
 
-def test_отсутствующая_строка_проекции_отличима_от_нуля(monkeypatch):
+def test_отсутствие_числа_у_источника_истины_не_превращается_в_ноль(monkeypatch):
     """Ронит подстановку нуля вместо отсутствия.
 
-    `0` — уверенный ответ «всё прочитано», отсутствие строки — «не знаю».
-    Подставить одно вместо другого здесь легко: `dict.get` с умолчанием
-    `UnreadCount(0)` выглядит заботой о типах, а на деле стирает различие,
-    которое клиент обязан видеть. Заметно это стало бы не сразу — только
-    у пользователя, чья проекция потеряна, и только как молча пропавший
-    признак непрочитанного.
+    `0` — уверенный ответ «всё прочитано», отсутствие числа — «спросить
+    не у кого». Подставить одно вместо другого здесь легко: `dict.get`
+    с умолчанием `UnreadCount(0)` выглядит заботой о типах, а на деле
+    стирает различие, которое клиент обязан видеть (`LIST-003`).
+
+    Отсутствие здесь значит **не** «проекция потеряна»: это лечится
+    восстановлением ниже по стеку (`restore_lost_counts`), и строка на
+    вопрос, на который источник истины отвечает, до сервиса не доедет.
+    Остаётся другой случай, ради которого поле и объявлено необязательным:
+    источник истины числа этому читателю не даёт вовсе. Обе причины
+    выглядят одинаково — ключа в словаре нет, — и обе обязаны доехать
+    до ответа отсутствием, а не нулём.
     """
     page = ConversationPage(items=(_summary(FIRST_ID), _summary(SECOND_ID)))
     _stub_page(monkeypatch, page, counts={FIRST_ID: UnreadCount(0)})
@@ -322,9 +333,9 @@ def test_конец_списка_не_даёт_курсора(monkeypatch):
 
 def test_пустая_страница_не_даёт_курсора(monkeypatch):
     # У человека без бесед ответ — пустой список, а не отказ. Курсора
-    # здесь нет и браться ему неоткуда: элементов нет вовсе. Проекция
-    # спрашивается с пустым списком, а не пропускается: ветка «нечего
-    # спрашивать» живёт в репозитории (`{}` без похода в базу), и второе
+    # здесь нет и браться ему неоткуда: элементов нет вовсе. Счётчики
+    # спрашиваются с пустым списком, а не пропускаются: ветка «нечего
+    # спрашивать» живёт ниже по стеку (`{}` без похода в базу), и второе
     # такое решение здесь разошлось бы с первым.
     позвали = _stub_page(monkeypatch, ConversationPage())
 
@@ -332,7 +343,7 @@ def test_пустая_страница_не_даёт_курсора(monkeypatch)
     assert result.page.items == () and not result.page.has_more
     assert result.next_cursor is None
     assert позвали["latest_ids"] == []
-    assert позвали["projection"] == (ACTOR_ID, [])
+    assert позвали["restore"] == (ACTOR_ID, [])
 
 
 def test_курсор_доезжает_до_репозитория_целиком(monkeypatch):

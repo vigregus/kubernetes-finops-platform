@@ -21,8 +21,9 @@ from messenger.domain.conversation_list import (
 from messenger.domain.errors import Reason
 from messenger.domain.ids import ConversationId, UserId, direct_key
 from messenger.domain.user import User
-from messenger.repositories import conversations, messages, unread
+from messenger.repositories import conversations, messages
 from messenger.services import authorization
+from messenger.services.unread import restore_lost_counts
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,11 +107,21 @@ async def list_conversations(
     строку списка — это ровно то read amplification, ради устранения
     которого проекция и заводится.
 
-    `get` без умолчания у обоих: у беседы без сообщений последнего нет,
-    а у пользователя, ни разу не получавшего событий, нет строки проекции.
-    Подставить вместо отсутствия ноль значило бы показать «всё прочитано»
-    тому, о ком мы просто ничего не знаем. Различие несёт
-    `ConversationSummary.unread_count` — `None` против нуля.
+    Счётчик берётся не «как есть»: `restore_lost_counts` читает проекцию
+    пачкой и **восстанавливает из источника истины** те строки, которых
+    в ней нет. Потеря проекции не должна менять существенный ответ
+    системы — производную и заводят ради права её потерять, — поэтому
+    на вопрос, на который источник истины отвечает, список отвечает,
+    а не сообщает «неизвестно». Дорогая половина (счёт по беседе)
+    достаётся только потерянным строкам, и случается она один раз
+    на потерю.
+
+    `get` без умолчания у обоих, но причины разные. У беседы без сообщений
+    последнего нет по существу. У счётчика отсутствие ключа теперь значит
+    не «проекция потеряна» (это лечит восстановление), а «источник истины
+    не даёт числа этому читателю» — он не в составе беседы. Подставить
+    вместо отсутствия ноль всё так же нельзя: `0` — уверенное «всё
+    прочитано», и оно не должно вставать на место ответа, которого нет.
     """
     validate_activity_cursors(
         before_activity_at=cursor.updated_at if cursor is not None else None,
@@ -129,8 +140,8 @@ async def list_conversations(
     latest = await messages.fetch_latest_by_conversation(
         conn, conversation_ids=conversation_ids
     )
-    counts = await unread.fetch_projection(
-        conn, user_id=viewer_id, conversation_ids=conversation_ids
+    counts = await restore_lost_counts(
+        conn, viewer_id=viewer_id, conversation_ids=conversation_ids
     )
     return ConversationListResult(
         page=ConversationPage(

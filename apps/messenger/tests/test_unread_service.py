@@ -6,6 +6,13 @@
 `test_событие_применяется_в_транзакции` ронится от удаления обёртки,
 потому что без неё замок чекпойнта отпускается сразу после чтения,
 и гонка с квитанцией снова открывается.
+
+Вторая половина файла — про чтение списка (`restore_lost_counts`), и это
+не другая тема: потеря проекции лечится ровно тем же чтением источника
+истины, что и разрыв номеров, а порядок «замок беседы, потом запись» —
+тот же, что у потребителя и у квитанции. Стенд у неё свой: читающий путь
+не спрашивает ни состава получателей, ни `read_states`, и общий фейк
+с ручками на оба пути скрыл бы, что спрашивается лишнее.
 """
 from __future__ import annotations
 
@@ -27,6 +34,8 @@ ANYA = UserId(uuid.UUID("11111111-1111-1111-1111-111111111111"))
 BORIS = UserId(uuid.UUID("22222222-2222-2222-2222-222222222222"))
 VIKA = UserId(uuid.UUID("55555555-5555-5555-5555-555555555555"))
 CONVERSATION = ConversationId(uuid.UUID("33333333-3333-3333-3333-333333333333"))
+OTHER = ConversationId(uuid.UUID("66666666-6666-6666-6666-666666666666"))
+THIRD = ConversationId(uuid.UUID("77777777-7777-7777-7777-777777777777"))
 MESSAGE = uuid.UUID("44444444-4444-4444-4444-444444444444")
 
 
@@ -431,3 +440,292 @@ def test_разрыв_не_прибавляет_единицу(monkeypatch):
     _apply(conn, conversation_seq=5)
 
     assert stand.deltas == []
+
+
+# ---------------------------------------------------------------------------
+# Восстановление потерянных строк при чтении списка
+# ---------------------------------------------------------------------------
+
+
+class RestoreStand:
+    """Что восстановление спросило и что записало.
+
+    Свой, а не общий `Stand`: у восстановления нет ни состава получателей,
+    ни `read_states`, ни предпроверки строк. Оно спрашивает ровно три вещи
+    — уцелевшие числа, чекпойнт беседы и её голову — и пишет две: число
+    читателя и, если голова ушла вперёд, чекпойнт. Общий стенд с восемью
+    ручками читался бы как «всё со всем», а проверяется здесь
+    **адресация**: какая беседа пересобрана, до какого номера и что
+    записано в чекпойнт.
+    """
+
+    def __init__(self) -> None:
+        self.projection: list[tuple[UserId, tuple[ConversationId, ...]]] = []
+        self.rebuilds: list[dict[str, object]] = []
+        self.offsets: list[tuple[ConversationId, int]] = []
+
+
+def _restore_stand(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    present: dict[ConversationId, int] | None = None,
+    watermarks: dict[ConversationId, int] | None = None,
+    heads: dict[ConversationId, int] | None = None,
+    rows: dict[ConversationId, dict[UserId, int]] | None = None,
+) -> tuple[Connection, RestoreStand]:
+    """Восстановление на подставленных источниках.
+
+    `heads` по умолчанию повторяет чекпойнты: обычный случай — потребитель
+    догнал поток. Беседа, которой нет в словаре голов, отвечает `None` —
+    это и есть «беседа исчезла». `rows` — то, что вернула бы пересборка
+    по беседе; читателя, которого в них нет, не будет и в ответе, потому
+    что живая пересборка отбирает участников по `conversation_members`.
+    """
+    conn = Connection()
+    stand = RestoreStand()
+    kept = present or {}
+    marks = watermarks or {}
+    ends = marks if heads is None else heads
+    rebuilt = rows or {}
+
+    async def _lock(conn_: Connection, *, conversation_id: ConversationId):
+        conn_.calls.append("lock_offsets")
+        return ConversationSeq(marks[conversation_id])
+
+    async def _projection(conn_: Connection, *, user_id, conversation_ids):
+        conn_.calls.append("fetch_projection")
+        stand.projection.append((user_id, tuple(conversation_ids)))
+        return {
+            conversation_id: UnreadCount(kept[conversation_id])
+            for conversation_id in conversation_ids
+            if conversation_id in kept
+        }
+
+    async def _head(conn_: Connection, *, conversation_id: ConversationId):
+        conn_.calls.append("fetch_last_seq")
+        if conversation_id not in ends:
+            return None
+        return ConversationSeq(ends[conversation_id])
+
+    async def _rebuild(
+        conn_: Connection, *, conversation_id, through_seq, user_ids=None
+    ):
+        conn_.calls.append("rebuild")
+        stand.rebuilds.append(
+            {
+                "conversation_id": conversation_id,
+                "through_seq": int(through_seq),
+                "user_ids": user_ids,
+            }
+        )
+        members = rebuilt.get(conversation_id, {})
+        if user_ids is None:
+            return {user: UnreadCount(count) for user, count in members.items()}
+        return {
+            user: UnreadCount(members[user]) for user in user_ids if user in members
+        }
+
+    async def _set(conn_: Connection, *, conversation_id, applied_through_seq):
+        conn_.calls.append("set_offsets")
+        stand.offsets.append((conversation_id, int(applied_through_seq)))
+        return applied_through_seq
+
+    monkeypatch.setattr(service, "lock_offsets", _lock)
+    monkeypatch.setattr(service, "fetch_projection", _projection)
+    monkeypatch.setattr(service.conversations, "fetch_last_seq", _head)
+    monkeypatch.setattr(service, "rebuild", _rebuild)
+    monkeypatch.setattr(service, "set_offsets", _set)
+    return conn, stand
+
+
+def _restore(conn: Connection, conversation_ids: list[ConversationId]):
+    return asyncio.run(
+        service.restore_lost_counts(
+            conn, viewer_id=ANYA, conversation_ids=conversation_ids
+        )
+    )
+
+
+def test_потерянная_строка_восстанавливается_чтением(monkeypatch):
+    """Ронит возврат проекции как есть.
+
+    Это и есть требование гейта: потеря проекции не должна менять
+    существенный ответ системы. Без восстановления список на вопрос
+    «сколько непрочитанного» ответил бы «неизвестно» ровно там, где
+    источник истины отвечает, — беседа молча потеряла бы признак, и
+    заметно это стало бы только в клиенте.
+    """
+    conn, stand = _restore_stand(
+        monkeypatch,
+        present={CONVERSATION: 2},
+        watermarks={CONVERSATION: 4, OTHER: 4},
+        rows={OTHER: {ANYA: 3, BORIS: 0}},
+    )
+
+    counts = _restore(conn, [CONVERSATION, OTHER])
+
+    # Проекция спрашивается пачкой по странице — тем же правилом, что
+    # и раньше: поход в базу на беседу был бы ровно тем read
+    # amplification, ради устранения которого проекция и заведена.
+    assert stand.projection == [(ANYA, (CONVERSATION, OTHER))]
+    assert counts[CONVERSATION] == 2
+    assert counts[OTHER] == 3
+
+
+def test_потерянная_строка_чинится_в_транзакции(monkeypatch):
+    """Ронит восстановление без транзакции.
+
+    Замок беседы без транзакции отпускается сразу после чтения, и между
+    пересборкой и записью чекпойнта помещается событие потребителя: оно
+    попадёт и в пересобранное число, и в приращение, которое применится
+    после. Транзакция здесь не про атомарность двух вставок, а про то,
+    что замок живёт до конца чтения источника истины.
+    """
+    conn, _ = _restore_stand(
+        monkeypatch,
+        watermarks={OTHER: 4},
+        rows={OTHER: {ANYA: 3}},
+    )
+
+    _restore(conn, [OTHER])
+
+    assert conn.transactions == 1
+
+
+def test_чекпойнт_объявляется_головой_беседы(monkeypatch):
+    """Ронит пересборку до чекпойнта и пропуск записи чекпойнта.
+
+    Число берётся из источника истины целиком до головы, и она же
+    объявляется применённой: `applied_through_seq` значит «до этого
+    номера проекция верна», после пересборки это верно до головы.
+    Не сдвинуть его значило бы оставить в потоке события, которые
+    потребитель применит второй раз, — их уже посчитала пересборка.
+    Обратная ошибка того же корня — считать до чекпойнта: числа бы
+    сошлись, а события между чекпойнтом и головой потерялись бы навсегда.
+    """
+    conn, stand = _restore_stand(
+        monkeypatch,
+        watermarks={OTHER: 4},
+        heads={OTHER: 9},
+        rows={OTHER: {ANYA: 5, BORIS: 1}},
+    )
+
+    counts = _restore(conn, [OTHER])
+
+    assert stand.rebuilds == [
+        {"conversation_id": OTHER, "through_seq": 9, "user_ids": None}
+    ]
+    assert stand.offsets == [(OTHER, 9)]
+    assert counts[OTHER] == 5
+
+
+def test_голова_не_ушла_вперёд_значит_одна_строка(monkeypatch):
+    """Ронит пересборку всей беседы и запись чекпойнта без нужды.
+
+    Когда голова не больше чекпойнта, число читателя известно и без
+    остальных: чинить нечего, объявлять нечего. Писать горячую строку
+    беседы значило бы платить новой её версией и работой автоочистке
+    за то, что и так верно, — а на странице из двадцати бесед это
+    двадцать таких записей на каждое открытие списка.
+    """
+    conn, stand = _restore_stand(
+        monkeypatch,
+        watermarks={OTHER: 9},
+        heads={OTHER: 9},
+        rows={OTHER: {ANYA: 7, BORIS: 4}},
+    )
+
+    counts = _restore(conn, [OTHER])
+
+    # Пересборка сужена до читателя, границы те же: числа до чекпойнта
+    # и до головы совпадают там, где голова не больше.
+    assert stand.rebuilds == [
+        {"conversation_id": OTHER, "through_seq": 9, "user_ids": (ANYA,)}
+    ]
+    assert stand.offsets == []
+    assert counts[OTHER] == 7
+
+
+def test_потерянные_беседы_обходятся_по_возрастанию(monkeypatch):
+    """Ронит обход потерянных в порядке страницы.
+
+    Порядок страницы у двух одновременных списков разный, а замки берутся
+    по ходу обхода: два списка с пересекающимися наборами бесед встали бы
+    навстречу друг другу. Взаимоблокировка при этом не «иногда» —
+    она тем вероятнее, чем больше общих бесед, то есть у активного
+    пользователя почти всегда.
+    """
+    page = [THIRD, OTHER, CONVERSATION]
+    conn, stand = _restore_stand(
+        monkeypatch,
+        watermarks={THIRD: 0, OTHER: 0, CONVERSATION: 0},
+        rows={THIRD: {ANYA: 1}, OTHER: {ANYA: 2}, CONVERSATION: {ANYA: 3}},
+    )
+
+    counts = _restore(conn, page)
+
+    assert [rebuild["conversation_id"] for rebuild in stand.rebuilds] == [
+        CONVERSATION,
+        OTHER,
+        THIRD,
+    ]
+    # Порядок в ответе — порядок вопроса: страница собирается по нему.
+    assert counts[THIRD] == 1 and counts[CONVERSATION] == 3
+
+
+def test_уцелевшая_проекция_не_пересобирается(monkeypatch):
+    """Ронит восстановление на каждом чтении.
+
+    Обычный путь обязан остаться чтением. Если пересборка пойдёт по всей
+    странице всегда, проекция перестанет что-либо экономить, и цена списка
+    станет ценой `COUNT` по каждой беседе — ровно то, ради отказа от чего
+    она и заведена.
+    """
+    conn, stand = _restore_stand(
+        monkeypatch,
+        present={CONVERSATION: 2, OTHER: 0},
+        watermarks={CONVERSATION: 9, OTHER: 9},
+    )
+
+    counts = _restore(conn, [CONVERSATION, OTHER])
+
+    # Журнал целиком: ни замка, ни головы, ни пересборки — только чтение.
+    assert conn.calls == ["fetch_projection"]
+    assert stand.rebuilds == [] and stand.offsets == []
+    assert counts == {CONVERSATION: 2, OTHER: 0}
+
+
+def test_отсутствие_числа_у_источника_истины_не_становится_нулём(monkeypatch):
+    """Ронит подстановку нуля вместо отсутствия.
+
+    Читателя нет в составе беседы, и источник истины числа ему не даёт.
+    Ноль здесь — уверенное «всё прочитано», то есть ложь, которую клиент
+    не отличит от правды; отсутствие ключа — «спросить не у кого», и оно
+    остаётся единственным случаем, когда ключа нет: потеря проекции
+    к нему больше не приводит. Восстановление при этом **состоялось** —
+    иначе проверка доказывала бы пропуск ремонта, а не ответ источника.
+    """
+    conn, stand = _restore_stand(
+        monkeypatch,
+        watermarks={OTHER: 4},
+        rows={OTHER: {BORIS: 0}},
+    )
+
+    counts = _restore(conn, [OTHER])
+
+    assert stand.rebuilds != []
+    assert OTHER not in counts
+
+
+def test_исчезнувшая_беседа_роняет_восстановление(monkeypatch):
+    """Ронит молчаливое восстановление не того числа.
+
+    Отсутствие головы у существующей беседы невозможно: строку чекпойнта
+    завела вставка выше, а она ссылается на беседу внешним ключом. Но
+    невозможное состояние обязано быть громким: ответ, посчитанный не по
+    тому, чего нет, от верного неотличим, и заметить его было бы нечем.
+    """
+    conn, _ = _restore_stand(monkeypatch, watermarks={OTHER: 4}, heads={})
+
+    with pytest.raises(RuntimeError):
+        _restore(conn, [OTHER])

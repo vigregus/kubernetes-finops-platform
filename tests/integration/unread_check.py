@@ -24,6 +24,16 @@
 отметки публикации у outbox (так выглядит смерть отправителя между
 публикацией и отметкой — техника `realtime_receive_check.py`).
 
+**Асимметрия у потери проекции такая: сносит её SQL, а чинит сервис.** Удалить
+строку нечем и не нужно — производная ровно затем и заведена, чтобы её
+можно было потерять. А вот спросить число есть чем: список спрашивает
+его у `messages` и `read_states`, и до вопроса восстанавливает потерянные
+строки. Поэтому обратная половина сценария идёт **через API**: вызов
+`restore_lost_counts` руками доказал бы работу функции, а не то, что до
+неё доходит список. Тот же путь закрывает начальную загрузку — беседу,
+чьи события ушли из Kafka по сроку хранения: потребитель её больше не
+увидит, и ждать события, которого не будет, нечем.
+
 **Ожидание считается своим SQL-ом, а не вызовом боевой функции.** Текст
 `ORACLE` написан здесь заново и повторяет требование, а не реализацию:
 вызов `recount_unread` или `rebuild` сделал бы проверку зелёной при любой
@@ -819,19 +829,100 @@ async def run() -> None:
                 " — единица здесь означала бы приращение вместо пересборки",
             )
 
-            # --- потерянная проекция в списке: отсутствие ключа, не ноль ---
+            # --- потерянная проекция: число восстанавливает сам список -----
+            # Прямой SQL здесь **удаляет**, а восстанавливает сервис.
+            # Разделение не формальное: удалить строку проекции нечем —
+            # её не удаляет ничто, в этом и смысл производной, — а спросить
+            # число есть чем, и это список. Поэтому и проверка идёт через
+            # API, а не вызовом `restore_lost_counts`: вызов доказал бы
+            # работу функции, а не то, что до неё доходит список.
+            #
+            # Голова беседы ещё не ушла вперёд чекпойнта (десятое применено),
+            # поэтому восстановление берёт готовое число и чекпойнт не
+            # двигает — объявлять нечего. Проверяются обе половины: ответ
+            # обязан содержать ключ с числом из источника истины, а строка
+            # проекции — появиться, иначе каждое чтение платило бы заново.
             async with pool.acquire() as conn:
                 await conn.execute(
                     "DELETE FROM unread_projection WHERE conversation_id = $1 AND user_id = $2",
                     conversation,
                     reader_id,
                 )
+            check(
+                "проекция удалена (её не удаляет ничто — она производная)",
+                await counter(pool, conversation_id=conversation, user_id=reader_id) is None,
+                "строка осталась",
+            )
+            lost_expected = await source_of_truth(
+                pool, conversation_id=conversation, user_id=reader_id
+            )
             items = await list_items(http, token=tokens["reader"], device=devices["reader"])
             row = item_of(items, conversation)
             check(
-                "потерянная проекция — отсутствие ключа, а не ноль",
-                row is not None and "unread_count" not in row,
-                str(row),
+                "потеря проекции не меняет ответ системы: список отдаёт число из источника истины",
+                row is not None
+                and row.get("unread_count") == lost_expected
+                and lost_expected == 4,
+                f"в ответе {row}, источник {lost_expected}",
+            )
+            check(
+                "восстановленное число записано в проекцию, а не посчитано на один ответ",
+                await counter(pool, conversation_id=conversation, user_id=reader_id)
+                == lost_expected,
+                f"в проекции {await counter(pool, conversation_id=conversation, user_id=reader_id)}",
+            )
+
+            # --- начальная загрузка: у беседы не осталось ни строки ---------
+            # Так выглядит беседа, чьи события ушли из Kafka по сроку
+            # хранения, а проекции для неё не заводилось никогда:
+            # `auto_offset_reset="earliest"` не делает поток вечным, и этих
+            # событий потребитель уже не увидит. Память о беседе стёрта
+            # целиком — ни числа, ни чекпойнта, — как если бы он её вовсе
+            # не касался.
+            #
+            # Ожидание берётся **до** потери, и это не перестраховка: оракул
+            # ограничивает счёт сверху чекпойнтом, а его сейчас не станет —
+            # `conversation_seq <= NULL` не пропустил бы ни одной строки,
+            # и ожидание вышло бы нулём, то есть совпало бы с неработающим
+            # восстановлением.
+            #
+            # Удаляется проекция всей беседы, а не одна строка читателя:
+            # беседа, которую потребитель не видел, не оставила строк
+            # никому.
+            bootstrap_expected = await source_of_truth(
+                pool, conversation_id=conversation, user_id=reader_id
+            )
+            top = await head(pool, conversation_id=conversation)
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM unread_projection WHERE conversation_id = $1", conversation
+                )
+                await conn.execute(
+                    "DELETE FROM unread_offsets WHERE conversation_id = $1", conversation
+                )
+            check(
+                "память о беседе стёрта целиком: ни строки проекции, ни чекпойнта",
+                await counter(pool, conversation_id=conversation, user_id=reader_id) is None
+                and await checkpoint(pool, conversation_id=conversation) is None,
+                f"проекция {await counter(pool, conversation_id=conversation, user_id=reader_id)},"
+                f" чекпойнт {await checkpoint(pool, conversation_id=conversation)}",
+            )
+            items = await list_items(http, token=tokens["reader"], device=devices["reader"])
+            row = item_of(items, conversation)
+            check(
+                "беседа без событий в Kafka: число появилось из источника истины, без потока",
+                row is not None and row.get("unread_count") == bootstrap_expected,
+                f"в ответе {row}, источник {bootstrap_expected}",
+            )
+            # Чекпойнт объявлен головой — тем же порядком, что чинит разрыв
+            # номеров: пересборка посчитала число до головы целиком, и не
+            # сдвинуть после неё чекпойнт значило бы оставить в потоке
+            # события, которые потребитель применит второй раз.
+            check(
+                "чекпойнт объявлен головой: уже посчитанное не применится второй раз",
+                await checkpoint(pool, conversation_id=conversation) == top,
+                f"чекпойнт {await checkpoint(pool, conversation_id=conversation)},"
+                f" голова {top}",
             )
 
             # --- надгробие и стирание --------------------------------------
