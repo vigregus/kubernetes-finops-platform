@@ -108,19 +108,23 @@ Current verified state:
   `event_id` journal, a receipt that recomputes the count but never beyond the
   consumer's checkpoint, and a conversation list that rebuilds a missing row
   from the source of truth — and it is deployed from the same digest as the
-  API and the other consumers, but its integration check has never run, so
-  gate G3-003 is *deployed*, not closed. Presence is written on a branch, not
-  yet in the cluster: online stays a server-side time predicate over the
-  connection registry (a 180 s window against a 120 s refresh cadence), so two
-  devices of one person count once and going offline happens by time rather
-  than by signal — Centrifugo proxies no disconnect, so the server never learns
-  about a closed tab — while `users.last_seen_at` is a durable mark written
-  when a connection is confirmed, in the same transaction as the refresh, and
-  therefore survives both the sweeper and the loss of the registry entirely.
-  Only that mark is exposed, as `UserSummary.last_seen_at`; online has no HTTP
-  path. Its integration check has not run either, so gate G3-004 is *written*,
-  not closed. Gap detection, reconnect with `recovered=false` and the web
-  client itself are still open.
+  API and the other consumers, and its integration check has run on that
+  digest: 64 assertions, no failures, so gate G3-003 is closed. Presence is
+  deployed too, and closed on the same digest with 22 assertions: online stays
+  a server-side time predicate over the connection registry (a 180 s window
+  against a 120 s refresh cadence), so two devices of one person count once and
+  going offline happens by time rather than by signal — Centrifugo proxies no
+  disconnect, so the server never learns about a closed tab — while
+  `users.last_seen_at` is a durable mark written when a connection is
+  confirmed, in the same transaction as the refresh, and therefore survives
+  both the sweeper and the loss of the registry entirely. That last claim was
+  checked against the real thing, not only in the integration pod: with two
+  connections open, restarting Centrifugo made the outgoing node close both
+  with `3001 shutdown`, the mark before and after matched character for
+  character, the person stayed online, and going offline happened only when the
+  window lapsed. Only that mark is exposed, as `UserSummary.last_seen_at`;
+  online has no HTTP path. Gap detection, reconnect with `recovered=false` and
+  the web client itself are still open.
 
 `make local-test` verifies contracts, authenticated Kafka ACLs, layer rules, the
 log event catalog, migration safety, lint, unit tests, migrations and the live
