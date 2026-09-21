@@ -1,13 +1,14 @@
 import type { ChatMessage, Conversation, CurrentUser, DeviceSession } from "./types"
 
+// Фикстура приведена к модели, а не наоборот: `handle` и `presence` из
+// `CurrentUser` ушли, потому что `/me` их не отдаёт, — и оставлять их здесь
+// значило бы держать у догадки законное место.
 export const currentUser: CurrentUser = {
   name: "David Miller",
-  handle: "@dmiller.signal",
   email: "david.miller@example.com",
   emailVerified: true,
   avatarUrl:
     "https://lh3.googleusercontent.com/aida-public/AB6AXuBt061pWtdxBlMqSkLbBb286z673SNeLN4BjrVxnSQ4MgTBsIiH1ZxPM5GAyk9xoC_RxKn_tIehLkK09ZWW0pJW9OGOmX7Jmt11Ujf0EQV8k_pH6jXnaRzyiqB8EHJvcYrLMYQHUiUo-8st-_nnUu_cxIcAjMOpbMdffaihKx3LAfN_OdqpPisRLmGJkY_7VoKFFzu9wsGnR6WvTkpADVIBqHheFMs1KvHfv7M2LOxTS1M--tY0pFJp",
-  presence: "online",
 }
 
 const annaAvatar =

@@ -68,11 +68,20 @@ export interface ChatMessage {
   failureReason?: string
 }
 
+/**
+ * Текущий пользователь — то, что о нём действительно известно.
+ *
+ * `handle` и `presence` из типа **удалены**, а не оставлены незаполненными:
+ * `GET /me` не отдаёт ни того, ни другого. Поле, которое никто не заполняет, —
+ * это приглашение заполнить его догадкой: `@handle` вывели бы из адреса, а
+ * `presence` — «на глазок», и интерфейс начал бы сообщать факты, которых сервер
+ * не сообщал. Домен прямо разделяет два `last_seen_at` (`03-v1-scope.md:77-83`)
+ * и отдаёт наружу отметку **без** признака «онлайн» (`README.md:78`).
+ * Единственный потребитель этих полей — подвал, и он их не рисует.
+ */
 export interface CurrentUser {
   name: string
-  handle: string
   avatarUrl?: string
-  presence: PresenceStatus
   emailVerified?: boolean
   email?: string
 }
