@@ -15,7 +15,16 @@ export interface Conversation {
   presence?: PresenceStatus
   lastSeenAt?: string
   lastMessagePreview: string
-  lastMessageTimestamp: string
+  /**
+   * Display-строка (`14:22`, `Yesterday`, `Sep 20`), а не ISO: компонент рисует
+   * поле безусловно, и прокинутый `created_at` уехал бы в список как есть.
+   *
+   * Необязательно: у беседы без `last_message` честного времени нет, и
+   * выдуманного «только что» не бывает. `undefined` в разметке рисуется
+   * пустотой — ровно то, что нужно.
+   */
+  lastMessageTimestamp?: string
+  /** Ключа нет — «неизвестно»; это не ноль и не «всё прочитано». */
   unreadCount?: number
   previewDeleted?: boolean
   /** names currently sending typing:start heartbeats (RT-001..004) */
