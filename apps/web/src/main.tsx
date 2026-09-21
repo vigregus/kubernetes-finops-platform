@@ -1,10 +1,80 @@
-import { StrictMode } from 'react'
-import { createRoot } from 'react-dom/client'
-import './index.css'
-import App from './App.tsx'
+import { StrictMode } from "react";
+import { createRoot } from "react-dom/client";
+import "./index.css";
+import App from "./App.tsx";
+import { createApiClient } from "./api/client";
+import { AuthApi, ConversationsApi } from "./api/generated";
+import { bootStateOf, completeLogin } from "./features/auth/callback";
+import { ensureDeviceId, loadDeviceId, saveDeviceId } from "./features/auth/deviceId";
+import { CALLBACK_PATH } from "./features/auth/session";
+import { createSessionState } from "./features/auth/sessionState";
 
-createRoot(document.getElementById('root')!).render(
+/**
+ * Роутера нет — и не будет: адрес ровно один, `/callback`, и различается он по
+ * `window.location.pathname`. SPA-fallback в nginx отдаёт `index.html` на любой
+ * неизвестный путь, поэтому «страница» здесь — это ветка в коде, а не маршрут.
+ */
+
+const client = createApiClient({
+  deviceId: () => loadDeviceId(window.localStorage),
+  saveDeviceId: (deviceId) => {
+    saveDeviceId(window.localStorage, deviceId);
+  },
+});
+
+const session = createSessionState();
+
+const authApi = new AuthApi(client.configuration);
+const conversationsApi = new ConversationsApi(client.configuration);
+
+/** Что грузит загрузка. `ready` ставится обоими, а не первым из них. */
+const bootstrapDeps = {
+  loadAccount: () => authApi.whoAmI(),
+  loadConversations: () => conversationsApi.listConversations(),
+};
+
+async function start(): Promise<void> {
+  // Идентификатор заводится **до** первого запроса — и до ветки: на `/callback`
+  // первым запросом идёт обмен, и он тоже обязан нести `X-Device-Id`, иначе
+  // сервер сочтёт устройство новым.
+  ensureDeviceId(window.localStorage);
+
+  if (window.location.pathname !== CALLBACK_PATH) {
+    await session.bootstrap(client, bootstrapDeps);
+    return;
+  }
+
+  const outcome = await completeLogin({
+    client,
+    store: window.sessionStorage,
+    origin: window.location.origin,
+    search: window.location.search,
+    deviceId: loadDeviceId(window.localStorage),
+  });
+
+  // Адрес очищается **всегда** и до загрузки. Не только ради красоты: `code` и
+  // `state` остались бы в истории браузера, и перезагрузка страницы повторила бы
+  // заход на callback. Незавершённый вход к этому моменту снят, поэтому повтор
+  // обмена не состоится — но показывать человеку адрес с чужим `code` незачем.
+  window.history.replaceState(null, "", "/");
+
+  if (outcome.kind !== "ok") {
+    // `401` и `503` обмена известны уже здесь; идти за ними в `/me` значило бы
+    // сходить туда за заведомым `401`.
+    session.set(bootStateOf(outcome));
+    return;
+  }
+
+  await session.bootstrap(client, bootstrapDeps);
+}
+
+createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <App />
   </StrictMode>,
-)
+);
+
+// Отклонение не глушится: `completeLogin` пробрасывает только те отказы,
+// которые состояниями не являются (неожиданный `4xx`), и тихо превращать их в
+// «что-то пошло не так» значило бы скрыть дефект.
+void start();

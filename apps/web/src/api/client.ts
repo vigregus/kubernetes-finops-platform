@@ -125,8 +125,19 @@ export interface ApiClient {
     readonly code: string;
     readonly codeVerifier: string;
     readonly redirectUri: string;
-    /** Идёт и заголовком, и телом: тело читается только этим вызовом. */
-    readonly deviceId: string;
+    /**
+     * Идёт и заголовком, и телом: тело читается только этим вызовом.
+     *
+     * Необязателен по контракту (`AuthorizationCode`, поле `device_id` —
+     * optional) и намеренно необязателен здесь. Отсутствие — не ошибка: его
+     * причина называется явно. `code_verifier` пережил хранилище, а
+     * идентификатор — нет (человек очистил `localStorage` между уходом на
+     * Keycloak и возвратом); сервер такую потерю переживает — чеканит новое
+     * устройство и возвращает его, — и клиент принимает его как canonical.
+     * Запрещать обмен из-за потерянной метки значило бы отказывать человеку в
+     * входе за то, что он почистил браузер.
+     */
+    readonly deviceId?: string;
   }) => Promise<LoginOutcome>;
   readonly refreshAccessToken: () => Promise<LoginOutcome>;
   readonly bootstrap: (deps: BootstrapDependencies) => Promise<BootState>;

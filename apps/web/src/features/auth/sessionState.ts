@@ -18,6 +18,17 @@ export interface SessionState {
   readonly subscribe: (listener: () => void) => () => void;
   /** Прогоняет bootstrap и сохраняет его исход. Исход же и возвращает. */
   readonly bootstrap: (client: ApiClient, deps: BootstrapDependencies) => Promise<BootState>;
+  /**
+   * Записывает состояние, добытое не загрузкой.
+   *
+   * Единственный такой случай — возврат из Keycloak: `401` и `503` callback
+   * известны **до** bootstrap, и запускать загрузку, чтобы узнать, что входа не
+   * было, значило бы сходить в `/me` за заведомым `401`. Тип принимает
+   * `BootState` целиком, а не пару исходов, намеренно: отдельный узкий тип
+   * позволил бы протащить сюда `ready` — состояние, которое ставит только
+   * данные.
+   */
+  readonly set: (next: BootState) => BootState;
 }
 
 export function createSessionState(initial: BootState = { kind: "bootstrapping" }): SessionState {
@@ -40,6 +51,7 @@ export function createSessionState(initial: BootState = { kind: "bootstrapping" 
         listeners.delete(listener);
       };
     },
+    set: apply,
     bootstrap: async (client: ApiClient, deps: BootstrapDependencies) =>
       apply(await client.bootstrap(deps)),
   };
