@@ -36,10 +36,13 @@ realtime-слоя (`IMPLEMENTATION-PLAN.md:512`). Требования — `PRS-
   строку раньше проверки. Ни одно утверждение не зависит от того, **кто**
   её снял: проверяются состояние после такта и то, что отметка от уборки
   не поехала, а не автор удаления.
-* Прогон короче каденции продления (`token_ttl_seconds`, 120 с), поэтому
-  внутри прогона `last_seen_at` остаётся временем подключения: продлить
-  соединение клиент за это время не успевает. Отсюда — право требовать
-  точного равенства отметки до и после уборки.
+* Окно живости (`ONLINE_WINDOW_SECONDS`) длиннее каденции продления
+  (`token_ttl_seconds`), поэтому отдельное запоздание продления не создаёт
+  ложный офлайн. Проверка на это не полагается: отсутствие продления во
+  время её выполнения — не её условие. Отметка и `refreshed_at` пишутся
+  одной транзакцией, поэтому отметка остаётся подтверждённой жизнью и в
+  том случае, если продление случится посреди прогона, — а читаются оба
+  числа одним запросом, чтобы не разъехаться между двумя снимками.
 * Продление Centrifugo шлёт сам, и на живом клиенте оно не наблюдается
   изнутри проверки. Доказательство того, что продление двигает отметку, —
   юнит (`tests/test_realtime.py`, «продление продлевает и отметку»);
@@ -82,9 +85,9 @@ WINDOW = timedelta(seconds=domain.ONLINE_WINDOW_SECONDS)
 # от предыдущего.
 PAST = timedelta(minutes=10)
 
-# Прогон между подключением и первым продлением. Продление Centrifugo
-# начинает через `token_ttl_seconds` (120 с), и всё, что проверка делает
-# до этого момента, видит отметку временем подключения.
+# Каденция продления Centrifugo: продлевать соединение он начинает через
+# `token_ttl_seconds` (120 с). Число нужно только для сверки с окном
+# живости — длительность прогона на него не опирается.
 REFRESH_CADENCE_SECONDS = 120.0
 
 failures: list[str] = []
@@ -184,12 +187,21 @@ async def last_seen(pool, *, user_id) -> datetime | None:
     )
 
 
-async def max_refreshed(pool, *, user_id):
-    """Наибольшее подтверждённое продление среди строк человека."""
-    return await pool.fetchval(
-        "SELECT max(refreshed_at) FROM realtime_connections WHERE user_id = $1",
+async def mark_and_refresh(pool, *, user_id):
+    """Отметка человека и наибольшее подтверждённое продление, одним снимком.
+
+    Два запроса подряд прочли бы два снимка, и продление, попавшее между
+    ними, развело бы числа на исправном продукте: отметка `13:00:00`,
+    продление `13:00:01`. Расходиться им не на чем — оба числа пишет одна
+    транзакция, — но только внутри одного снимка.
+    """
+    row = await pool.fetchrow(
+        "SELECT (SELECT last_seen_at FROM users WHERE user_id = $1) AS seen,"
+        " (SELECT max(refreshed_at) FROM realtime_connections"
+        "  WHERE user_id = $1) AS confirmed",
         user_id,
     )
+    return row["seen"], row["confirmed"]
 
 
 async def age(pool, *, client_id: str, delta: timedelta) -> None:
@@ -302,9 +314,9 @@ async def run() -> None:
             assets = (
                 ("окно живости короче сдвига, которым старятся соединения",
                  WINDOW < PAST),
-                ("прогон короче каденции продления, поэтому отметка внутри"
-                 " него остаётся временем подключения",
-                 domain.ONLINE_WINDOW_SECONDS < REFRESH_CADENCE_SECONDS),
+                ("окно живости длиннее каденции продления,"
+                 " поэтому живой клиент не мигает офлайн",
+                 domain.ONLINE_WINDOW_SECONDS > REFRESH_CADENCE_SECONDS),
             )
             for what, holds in assets:
                 check(what, holds)
@@ -390,8 +402,7 @@ async def run() -> None:
             # Проверяется здесь, пока ни одна строка ещё не снята: после
             # уборки `MAX(refreshed_at)` не может быть меньше отметки —
             # отметка переживает удаление строки, и это не расхождение.
-            confirmed = await max_refreshed(pool, user_id=owner_id)
-            seen = await last_seen(pool, user_id=owner_id)
+            seen, confirmed = await mark_and_refresh(pool, user_id=owner_id)
             check(
                 "отметка равна наибольшему подтверждённому продлению",
                 seen is not None and seen == confirmed,
@@ -412,12 +423,12 @@ async def run() -> None:
             )
 
             # --- инвариант владельца: уборка отметку не откатывает -------
-            before = await last_seen(pool, user_id=owner_id)
+            before, _ = await mark_and_refresh(pool, user_id=owner_id)
             async with pool.acquire() as conn:
                 # Тот же такт, что крутит воркер: уборка протухшего, счёт
                 # живого и счёт заведённых — одной транзакцией.
                 await presence_service.sweep(conn)
-            after = await last_seen(pool, user_id=owner_id)
+            after, confirmed_after = await mark_and_refresh(pool, user_id=owner_id)
             # Строка живого соединения обязана остаться: уборка удаляет
             # протухшее, и живое под её предикат не попадает. Осталось
             # ровно две проверки сразу — сколько протухших и сколько
@@ -435,9 +446,20 @@ async def run() -> None:
                 f"протухших осталось {left_stale}, всего строк у человека {left_rows}",
             )
             check(
-                "уборка не откатывает отметку назад и не ставит своё время",
-                after is not None and after == before,
+                "уборка не откатывает отметку назад",
+                after is not None and before is not None and after >= before,
                 f"до уборки {before}, после {after}",
+            )
+            # Разделено на два утверждения, чтобы ни одно из них не стало
+            # ложным от чужого продления: если оно случится между чтениями,
+            # отметка уйдёт вперёд — и это по-прежнему подтверждённая жизнь,
+            # а не время такта. Значение, которого здесь быть не должно, —
+            # отметка, не равная ни прежней, ни подтверждённой: время самого
+            # уборщика не подтверждено ничем.
+            check(
+                "уборка не ставит своё время: отметка осталась подтверждённой",
+                after == before or after == confirmed_after,
+                f"до уборки {before}, после {after}, подтверждено {confirmed_after}",
             )
             online = await online_users(pool)
             check(
