@@ -125,6 +125,162 @@ jobs:
         run: |
           docker inspect --format 'digest {{.Id}}' messenger-api:ci
 
+  web:
+    name: CTR-004 — клиент из контракта, сборка и образ
+    # Фильтра по путям у этого джоба нет — и здесь это записано ещё раз,
+    # потому что соблазн велик: он самый долгий. Проверка, которая иногда не
+    # выполняется, не может быть условием слияния (см. шапку файла).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Нужна история целиком: render-regression сравнивает вывод с базой
+          # PR (B25), а на копии `fetch-depth: 1` базового коммита просто нет.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Питон-зависимости проверок
+        run: pip install --quiet pyyaml
+
+      - name: Helm для рендера чарта
+        # Явно, а не «на раннере он есть»: render-regression обязан падать на
+        # своей причине, а не на отсутствии инструмента. Версия закреплена —
+        # проверка, меняющая вердикт от обновления инструмента, ничего не
+        # значит.
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+
+      - name: Мажор Node — из того же файла, где лежит digest образа
+        # Второй константы в этом workflow нет намеренно (B32): setup-node с
+        # одним мажором и node@$NODE_DIGEST в образе с другим дают разные
+        # результаты одной и той же сборки. Мажор читается оттуда же, где
+        # лежит digest, — обновление базового образа тянет за собой CI.
+        id: nodelock
+        run: |
+          LOCK=apps/web/base-image.lock
+          MAJOR="$(grep '^NODE_MAJOR=' "$LOCK" | cut -d= -f2)"
+          case "$MAJOR" in
+            [0-9]*) ;;
+            *) echo "в $LOCK нет NODE_MAJOR: ${MAJOR:-пусто}" >&2; exit 1 ;;
+          esac
+          echo "major=$MAJOR" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.nodelock.outputs.major }}
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Фактический мажор совпал с закреплённым
+        # Инвариант не записан комментарием, а исполняется. Без этого шага
+        # расхождение не видно ни здесь, ни в образе: tsc, vitest и
+        # минификация Vite расходятся молча.
+        run: |
+          ACTUAL="$(node -p 'process.versions.node.split(".")[0]')"
+          test "$ACTUAL" = "${{ steps.nodelock.outputs.major }}" || {
+            echo "мажор Node разошёлся: фактический $ACTUAL," \
+                 "в base-image.lock ${{ steps.nodelock.outputs.major }}" >&2
+            exit 1
+          }
+
+      - name: Зависимости
+        working-directory: apps/web
+        run: npm ci
+
+      - name: Браузер для обоих прогонов
+        # `npm ci` браузеры не скачивает, а Chromium нужен не только спеке:
+        # @vitest/browser-playwright гоняет его и в модульных прогонах
+        # Storybook. Один шаг на джоб, до обоих прогонов.
+        working-directory: apps/web
+        run: npx playwright install --with-deps chromium
+
+      - name: Клиент из контракта
+        working-directory: apps/web
+        run: npm run api:generate
+
+      - name: Сборка
+        # Здесь же компилируются утверждения на форму сгенерированных типов:
+        # они типовые, и падает на них `tsc -b`, а не vitest. Если красный
+        # прогон искать в выводе тестов, его там не найдётся — это сказано
+        # явно, чтобы «красного не было» не смешалось с «искали не там».
+        working-directory: apps/web
+        run: npm run build:app
+
+      - name: Модульные тесты
+        # Число собранных тестов печатает сам vitest, и оно обязано быть
+        # ненулевым: прогон, не собравший ни одного `*.test.ts`, неотличим от
+        # отсутствия дефекта, а весь mutation-подход гейта стоит на том, что
+        # красный прогон действительно красный. Ноль файлов vitest завершает
+        # ненулевым кодом — то есть это исполняется, а не подразумевается.
+        working-directory: apps/web
+        run: npm test
+
+      - name: Линтер
+        working-directory: apps/web
+        run: npm run lint
+
+      - name: Презентационный слой
+        # Собирается и в PR: правка рантайма, сломавшая stories, — регрессия
+        # дизайна, а не «доработка».
+        working-directory: apps/web
+        run: npm run build-storybook
+
+      - name: Production-путь без фикстур
+        # Граф импортов от `main.tsx` не достигает ни фикстур, ни закрытого
+        # списка. Статически, а не прогоном: фикстура, до которой не дошло
+        # исполнение, всё равно остаётся в бандле.
+        run: python3 scripts/check-web-purge.py
+
+      - name: Окружение, скрейпы и образы шести нагрузок
+        run: python3 scripts/check-chart-env.py
+
+      - name: Общий шаблон не изменил вывод пяти работающих
+        # База — неподвижный SHA базовой ветки PR, а не `origin/main`: он
+        # движется, и сравнение с ним краснело бы от чужого слияния и зеленело
+        # от своего. На push в main базы PR нет, и берётся предыдущий коммит —
+        # так же, как в джобе `contracts`.
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || 'HEAD~1' }}
+        run: |
+          echo "база сравнения: $BASE_SHA"
+          python3 scripts/check-chart-render.py
+
+      - name: Дымовая сборка образа
+        # Собирается, но не публикуется: ловит сломанный Dockerfile до
+        # слияния и никуда ничего не отправляет. Тот же путь, что у конвейера
+        # публикации, — scripts/build-web.sh и три `--build-arg` из
+        # base-image.lock.
+        run: IMAGE=messenger-web TAG=ci bash scripts/build-web.sh
+
+      - name: Образ запускается под uid 10001 и корнем только для чтения
+        # Те же флаги, что у чарта (runAsNonRoot, readOnlyRootFilesystem,
+        # tmp emptyDir в /tmp). Собранный образ, который не стартует в
+        # кластере, — обычный способ узнать об этом только на выкатке.
+        run: |
+          docker run -d --name web \
+            --read-only --tmpfs /tmp --user 10001 \
+            -p 8080:8080 messenger-web:ci
+          for _ in $(seq 1 30); do
+            curl -sf http://localhost:8080/healthz >/dev/null && break
+            sleep 1
+          done
+
+          test "$(docker exec web id -u)" = "10001" \
+            || { echo "контейнер работает не под 10001" >&2; exit 1; }
+
+          # /healthz отвечает сам nginx статическим ответом — на него смотрят
+          # все три пробы пода, и ни одна не ходит в /api (B30).
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/healthz)" = "200"
+          # SPA-fallback: неизвестный путь отдаёт index.html, иначе
+          # возврат из Keycloak на /callback даёт 404.
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/callback)" = "200"
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/)" = "200"
+          echo "образ отвечает: / , /callback , /healthz"
+
   migrations:
     name: Миграции применяются с нуля
     runs-on: ubuntu-latest
