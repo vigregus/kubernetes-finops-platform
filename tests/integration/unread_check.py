@@ -75,6 +75,16 @@
   стал наблюдаемым, нужна вторая запись в ту же строку — а она и есть
   новая версия. Свойство закрыто юнитом (`test_unread_service.py`,
   «повтор не пишет версию строки смещений»).
+* В сценарии `исчезнувшая беседа` отравленная запись приходит в партицию
+  живой беседы: её ключ переставлен **затем, чтобы порядок двух записей
+  был доказуем** (записи одной партиции выдаются по смещениям). Потребитель
+  ключ не читает, поэтому применение от перестановки не меняется. Границы
+  у этого приёма две, и обе названы: инвариант «все события беседы в одной
+  партиции» не нарушается (у исчезнувшей беседы событий больше нет, а тело
+  переставленной записи живой беседе не принадлежит), а **красный прогон
+  оставляет отравленную запись в потоке** — снять её оттуда нечем, и
+  лечится она выкаткой исправленного образа. Краснота здесь не грязь
+  проверки, а ровно тот след, ради устранения которого она написана.
 """
 from __future__ import annotations
 
@@ -85,6 +95,7 @@ import sys
 import time
 import uuid
 
+import asyncpg
 import httpx
 from login_check import API, ORIGIN, admin_token, create_user
 from realtime_revoke_check import _auth_headers, _login
@@ -322,18 +333,48 @@ async def receipt(
 
 # --- гонка квитанции и потребителя -------------------------------------------
 
-# Ожидание блокировки наблюдается, а не выдерживается паузой. Считаются
-# неполученные блокировки на **транзакцию держателя**: идентификатор
-# процесса на такой вопрос не отвечает — перед базой PgBouncer в режиме
-# транзакций, и idle-клиенты делят одно серверное соединение, — а номер
-# транзакции от того, кто спрашивает, не зависит. Разбор целиком —
-# в `receipts_check.py`, там же эта пара запросов и заведена.
+# Ожидание блокировки наблюдается, а не выдерживается паузой, и считается
+# оно по **всей очереди за строкой**, а не по числу ждущих её транзакцию.
+# Формула составная, и вот почему — обе половины сняты разбором на живой
+# базе, а не выведены из чтения документации.
+#
+# Очередь выглядит по-разному в зависимости от того, что с строкой делают.
+# Если строка уже лежит и держатель занял её `FOR UPDATE`, первый ждущий
+# встаёт на транзакцию держателя (`locktype='transactionid'`, `granted=false`)
+# и сам при этом владеет кортежем, а каждый следующий ждёт **кортеж**
+# первого и виден только строкой `locktype='tuple'`. Если же строку вставили
+# и ещё не закоммитили, кортежа не ждёт никто: все ждут транзакцию, и
+# кортежных строк нет вовсе.
+#
+# Отсюда обе половины: кортеж берётся у всякого, кто его держит или ждёт,
+# а ожидание транзакции добавляется тем же счётом по номеру процесса —
+# поэтому двойного счёта первого ждущего не будет. На выходе — число
+# ждущих: держателя в нём нет, у него ни кортежа этой строки, ни ожидания.
+# Одной половины мало в обе стороны: по транзакции очередь упирается
+# в единицу, сколько бы ждущих ни стояло, а по кортежу видно ноль там,
+# где строку вставили и держат.
+#
+# Номер процесса, а не ожидаемая единица измерения, здесь выбран потому,
+# что перед базой PgBouncer в режиме транзакций: idle-клиенты делят одно
+# серверное соединение, и `application_name` до сервера доходит не всегда.
+# Номер транзакции от того, кто спрашивает, не зависит, и это второй
+# ключ формулы. Разбор целиком — в `receipts_check.py`, там же эта пара
+# запросов и заведена.
 WAITING = """
-SELECT count(*)
-  FROM pg_locks
- WHERE locktype = 'transactionid'
-   AND NOT granted
-   AND transactionid::text::bigint = $1
+SELECT count(DISTINCT l.pid)
+  FROM pg_locks l
+  JOIN unread_offsets u ON u.conversation_id = $1
+ WHERE (
+         l.locktype = 'tuple'
+     AND l.relation = 'unread_offsets'::regclass
+     AND l.page  = (u.ctid::text::point)[0]::int
+     AND l.tuple = (u.ctid::text::point)[1]::int
+       )
+    OR (
+         l.locktype = 'transactionid'
+     AND NOT l.granted
+     AND l.transactionid::text::bigint = $2
+       )
 """
 
 CURRENT_XID = "SELECT pg_current_xact_id()::text::bigint % 4294967296"
@@ -367,33 +408,37 @@ FIRST_APPROACH_SECONDS = 45.0
 RETURN_BUDGET_SECONDS = 8.0
 
 
-async def blocked_count(conn, *, xid: int, expected: int, deadline: float) -> bool:
-    """Ждёт, пока за транзакцией встанет `expected` ждущих, до предела.
+async def blocked_count(
+    conn, *, conversation_id, xid: int, expected: int, deadline: float
+) -> bool:
+    """Ждёт, пока за строкой беседы встанет `expected` ждущих, до предела.
 
     Предел передаётся моментом, а не длительностью: две последовательные
     паузы сложились бы, и держатель продержал бы строку вдвое дольше
     отведённого ему.
     """
     while time.monotonic() < deadline:
-        if await conn.fetchval(WAITING, xid) >= expected:
+        if await conn.fetchval(WAITING, conversation_id, xid) >= expected:
             return True
         await asyncio.sleep(0.02)
     return False
 
 
-async def waiting(conn, *, xid: int) -> int:
-    """Сколько транзакций ждут замков этой транзакции.
+async def waiting(conn, *, conversation_id, xid: int) -> int:
+    """Сколько клиентов ждут строку чекпойнта этой беседы.
 
-    Считаются неполученные блокировки на **транзакцию держателя**: номер
-    процесса на этот вопрос не отвечает — перед базой PgBouncer в режиме
-    транзакций, и `application_name` до сервера не доходит, — а номер
-    транзакции от того, кто спрашивает, не зависит.
+    Считается очередь за **строкой**, а не число ожиданий транзакции
+    держателя: за `unread_offsets` встают оба устройства квитанции, и то,
+    каким из двух способов каждое из них видно в `pg_locks`, зависит от
+    того, что с строкой делают. Разбор — над `WAITING`.
     """
-    return await conn.fetchval(WAITING, xid)
+    return await conn.fetchval(WAITING, conversation_id, xid)
 
 
-async def waiting_for(conn, *, xid: int, seconds: float) -> float | None:
-    """Ждёт, пока за транзакцией встанет хоть одна, и возвращает момент.
+async def waiting_for(
+    conn, *, conversation_id, xid: int, seconds: float
+) -> float | None:
+    """Ждёт, пока за строкой встанет хоть один, и возвращает момент.
 
     Момент, а не признак: по расстоянию между обрывом и следующим
     подходом проверяется, что вернулся живой цикл, а не контейнер,
@@ -401,14 +446,16 @@ async def waiting_for(conn, *, xid: int, seconds: float) -> float | None:
     """
     deadline = time.monotonic() + seconds
     while True:
-        if await waiting(conn, xid=xid) >= 1:
+        if await waiting(conn, conversation_id=conversation_id, xid=xid) >= 1:
             return time.monotonic()
         if time.monotonic() >= deadline:
             return None
         await asyncio.sleep(0.05)
 
 
-async def waiting_gone(conn, *, xid: int, seconds: float) -> float | None:
+async def waiting_gone(
+    conn, *, conversation_id, xid: int, seconds: float
+) -> float | None:
     """Ждёт, пока ждущих не останется вовсе, и возвращает момент.
 
     Именно ноль, а не «меньше прежнего»: попытка, оборванная по пределу
@@ -417,7 +464,7 @@ async def waiting_gone(conn, *, xid: int, seconds: float) -> float | None:
     """
     deadline = time.monotonic() + seconds
     while True:
-        if await waiting(conn, xid=xid) == 0:
+        if await waiting(conn, conversation_id=conversation_id, xid=xid) == 0:
             return time.monotonic()
         if time.monotonic() >= deadline:
             return None
@@ -504,7 +551,13 @@ async def run_race(
                     read=read,
                 )
             )
-            queued = await blocked_count(holder_conn, xid=xid, expected=1, deadline=deadline)
+            queued = await blocked_count(
+                holder_conn,
+                conversation_id=conversation_id,
+                xid=xid,
+                expected=1,
+                deadline=deadline,
+            )
             if not queued:
                 check(
                     f"{label}: квитанция встала за строкой чекпойнта",
@@ -513,7 +566,11 @@ async def run_race(
                 )
             await send_new()
             both = queued and await blocked_count(
-                holder_conn, xid=xid, expected=2, deadline=deadline
+                holder_conn,
+                conversation_id=conversation_id,
+                xid=xid,
+                expected=2,
+                deadline=deadline,
             )
             check(
                 f"{label}: потребитель встал за той же строкой",
@@ -620,7 +677,10 @@ async def run_failure_retry(pool, *, conversation_id, send_new, label: str) -> N
             # до того, как строка занята, и обрывать было бы нечего.
             await send_new()
             approach = await waiting_for(
-                holder_conn, xid=xid, seconds=FIRST_APPROACH_SECONDS
+                holder_conn,
+                conversation_id=conversation_id,
+                xid=xid,
+                seconds=FIRST_APPROACH_SECONDS,
             )
             check(
                 f"{label}: потребитель подошёл к занятой строке чекпойнта",
@@ -634,7 +694,10 @@ async def run_failure_retry(pool, *, conversation_id, send_new, label: str) -> N
             # Запас сверх предела команды: он отсчитывается с момента, когда
             # запрос дошёл до сервера, а ждущий наблюдался до этого.
             broke = await waiting_gone(
-                holder_conn, xid=xid, seconds=COMMAND_TIMEOUT_SECONDS + 5.0
+                holder_conn,
+                conversation_id=conversation_id,
+                xid=xid,
+                seconds=COMMAND_TIMEOUT_SECONDS + 5.0,
             )
             check(
                 f"{label}: попытка потребителя оборвана на пределе запроса",
@@ -646,7 +709,10 @@ async def run_failure_retry(pool, *, conversation_id, send_new, label: str) -> N
                 return
 
             returned = await waiting_for(
-                holder_conn, xid=xid, seconds=RETURN_BUDGET_SECONDS
+                holder_conn,
+                conversation_id=conversation_id,
+                xid=xid,
+                seconds=RETURN_BUDGET_SECONDS,
             )
             check(
                 f"{label}: та же запись вернулась к потребителю без перезапуска пода",
@@ -671,6 +737,216 @@ async def run_failure_retry(pool, *, conversation_id, send_new, label: str) -> N
                 # значило бы проверять таймаут вместо возврата, а брошенная
                 # транзакция держала бы её и после проверки.
                 await holder.rollback()
+
+
+# --- событие беседы, которой уже нет ------------------------------------------
+
+
+async def run_vanished_conversation(
+    pool,
+    *,
+    http,
+    token: str,
+    device: uuid.UUID,
+    participant_id: UserId,
+    live: ConversationId,
+    live_sends,
+    reader_id: UserId,
+    label: str,
+) -> None:
+    """Событие беседы, удалённой до его доставки.
+
+    Это та находка, ради которой правка делалась. Живой прогон показал
+    потребителя, вставшего **навсегда** на `message.created` удалённой
+    беседы: `unread_offsets` вставлялась и падала на внешнем ключе
+    (`ForeignKeyViolationError`, 749 отказов за 15 ч), смещение не
+    фиксировалось, пачка возвращалась в поток и упиралась в ту же запись —
+    ни одно следующее событие не применялось уже никогда. Перезапуск пода
+    не помогал: зафиксированное смещение группы стоит перед отравленной
+    записью.
+
+    **Путь сообщения настоящий до конца.** Сообщение уходит в API, его
+    публикует боевой отправитель outbox, применяет развёрнутый потребитель
+    `consumer-unread`. Не подделывается ни запись, ни её тело: тело
+    собирает сервис, и оно остаётся тем же — правится только момент
+    доставки.
+
+    **Доставка откладывается снятием отметки об отправке.** Запись outbox
+    уже опубликована и уже применена — снимается `published_at`, и
+    настоящий отправитель публикует её второй раз (техника `CONS-003` выше
+    и `realtime_receive_check.py`). Между двумя публикациями беседа
+    удаляется целиком, поэтому второе событие приходит потребителю
+    о беседе, которой нет.
+
+    **Удаление и снятие отметки — одна транзакция, и это несущее
+    условие.** Сними отметку раньше удаления — отправитель успел бы
+    опубликовать запись до него, и потребитель применил бы её к живой
+    беседе. Проверка осталась бы зелёной, ничего не доказав: окно, в
+    котором запись уже в потоке, а беседа ещё есть, обязано быть
+    недостижимым, и транзакция его убирает — отправитель видит снятую
+    отметку только после фиксации удаления.
+
+    **Ключ отравленной записи переставлен на живую беседу, и это про
+    порядок, а не про смысл.** Потребитель ключ не читает вовсе — адаптер
+    отдаёт ему тело (`adapters/kafka.py`), — поэтому применение записи от
+    перестановки не меняется. Меняется порядок: записи одной партиции
+    выдаются по смещениям, и только так доказуемо «живая запись лежит
+    позади отравленной». Порядок нужен потому, что наблюдать здесь можно
+    ровно одно: **потребитель пошёл дальше**. У отравленной записи
+    применять нечего — беседы нет, и правильное поведение не пишет
+    ничего, — а вставший потребитель не применяет ничего после неё.
+    Отсюда и устройство: живое сообщение уходит в ту же партицию следом.
+
+    **Живое событие уходит после отметки о повторной отправке.** Отметку
+    ставит отправитель после подтверждения брокера
+    (`adapters/kafka.py::Publisher.publish`), поэтому к моменту отправки
+    живая запись в потоке позже отравленной, и дойти до неё, не пройдя
+    отравленную, потребитель не может. «Живое событие применено» и
+    означает «на отравленной он не встал». На сломанном коде то же
+    утверждение краснеет: пачка возвращается на отравленную запись, и
+    живая не применяется никогда.
+
+    **Инвариант партиционирования при этом цел.** «Все события беседы
+    лежат в одной партиции» — про события беседы; у отравленной беседы
+    событий больше нет, а тело переставленной записи живой беседе не
+    принадлежит. Порядок записей живой беседы тоже не страдает: чужая
+    запись встаёт между ними, не меняя их взаимного порядка.
+
+    **Красный прогон оставляет потребителя вставшим, и это не побочный
+    эффект, а сам дефект.** Отравленная запись остаётся в потоке — снять
+    её оттуда нечем, — и лечится она только выкаткой исправленного
+    образа. Названо, чтобы красноту не приняли за грязь проверки:
+    зелёный прогон следов не оставляет, а красный оставляет ровно тот
+    след, ради устранения которого проверка написана.
+    """
+    doomed_conversation = await conversation_with(
+        http, token=token, device=device, participant_id=participant_id
+    )
+    doomed_message = await send(
+        http,
+        token=token,
+        device=device,
+        conversation_id=doomed_conversation,
+        text="сообщение, которое беседа не переживёт",
+    )
+    # Обычный путь доказан **до** вмешательства: событие применено,
+    # чекпойнт сдвинут, проекция получателя записана. Без этого «после
+    # удаления» не отличалось бы от «и не было никогда», а удаление — от
+    # удаления беседы, в которой ничего не происходило.
+    await until(
+        f"{label}: событие исчезающей беседы применено",
+        lambda: checkpoint(pool, conversation_id=doomed_conversation),
+        expected=1,
+    )
+    doomed_count = await counter(
+        pool, conversation_id=doomed_conversation, user_id=participant_id
+    )
+    check(
+        f"{label}: проекция исчезающей беседы заведена",
+        doomed_count == 1,
+        str(doomed_count),
+    )
+
+    live_checkpoint = await checkpoint(pool, conversation_id=live)
+    live_count = await counter(pool, conversation_id=live, user_id=reader_id)
+    if live_checkpoint is None or live_count is None:
+        # Живая беседа обязана быть применённой и учтённой до этого места —
+        # все сценарии выше это утверждают. Отсутствие любой из строк
+        # означало бы, что сломалось раньше, а продолжать нечем: ожидать
+        # «на единицу больше неизвестного» не получится.
+        check(
+            f"{label}: живая беседа учтена до опыта",
+            False,
+            f"чекпойнт {live_checkpoint}, проекция {live_count}",
+        )
+        return
+
+    try:
+        async with pool.acquire() as conn:
+            try:
+                async with conn.transaction():
+                    dropped = await conn.execute(
+                        """
+                        UPDATE outbox
+                           SET published_at = NULL,
+                               lease_owner = NULL,
+                               lease_until = NULL,
+                               partition_key = $2
+                         WHERE aggregate_id = $1 AND event_type = 'message.created'
+                        """,
+                        doomed_message,
+                        str(live),
+                    )
+                    # Порядок обратен созданию: `read_states` и `messages`
+                    # ссылаются на беседу. Запись outbox не удаляется — она
+                    # как раз и возвращается в поток.
+                    await conn.execute(
+                        "DELETE FROM read_states WHERE conversation_id = $1",
+                        doomed_conversation,
+                    )
+                    await conn.execute(
+                        "DELETE FROM messages WHERE conversation_id = $1",
+                        doomed_conversation,
+                    )
+                    await conn.execute(
+                        "DELETE FROM conversation_members WHERE conversation_id = $1",
+                        doomed_conversation,
+                    )
+                    await conn.execute(
+                        "DELETE FROM conversations WHERE conversation_id = $1",
+                        doomed_conversation,
+                    )
+            except asyncpg.exceptions.ForeignKeyViolationError as exc:
+                # Каскада нет — и дальше идти нечем. Удаление беседы здесь
+                # предусловие, а не утверждение: сам инвариант («производные
+                # уходят вместе с беседой») проверяется уборкой, у которой
+                # для него есть числа до и после. Печатается своим
+                # утверждением, а не трейсбеком.
+                check(
+                    f"{label}: беседа удалена вместе с производными",
+                    False,
+                    f"беседа не удалилась: {type(exc).__name__}:"
+                    f" {str(exc).splitlines()[0]}; каскад объявлен миграцией 0011",
+                )
+                return
+
+        check(
+            f"{label}: отравленная запись найдена в outbox",
+            dropped.endswith("1"),
+            dropped,
+        )
+        await until(
+            f"{label}: отравленная запись ушла в поток второй раз",
+            lambda: pool.fetchval(
+                "SELECT count(*) FROM outbox"
+                " WHERE aggregate_id = $1 AND event_type = 'message.created'"
+                "   AND published_at IS NOT NULL",
+                doomed_message,
+            ),
+            expected=1,
+        )
+
+        await live_sends("сообщение в живой беседе после исчезнувшей")
+        await until(
+            f"{label}: живая беседа применила событие позади отравленного",
+            lambda: checkpoint(pool, conversation_id=live),
+            expected=live_checkpoint + 1,
+        )
+        live_now = await counter(pool, conversation_id=live, user_id=reader_id)
+        check(
+            f"{label}: живое событие дошло и до проекции",
+            live_now == live_count + 1,
+            f"проекция {live_now}, было {live_count}",
+        )
+    finally:
+        # Записи outbox убираются за собой всегда: оставленная строка
+        # с переставленным ключом легла бы в партицию живой беседы и
+        # попалась бы на глаза чужой уборке. Отравленную запись в Kafka
+        # этим не снять — снять её оттуда нечем (см. докстринг).
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM outbox WHERE aggregate_id = $1", doomed_message
+            )
 
 
 # --- прогон ------------------------------------------------------------------
@@ -1307,6 +1583,23 @@ async def run() -> None:
                 f"проекция {await counter(pool, conversation_id=conversation, user_id=reader_id)},"
                 f" источник {await source_of_truth(pool, conversation_id=conversation, user_id=reader_id)}",
             )
+
+            # --- событие беседы, которой уже нет --------------------------
+            # Последним, и это не порядок ради порядка: отравленная запись
+            # уходит в партицию живой беседы, а сам опыт сдвигает её
+            # чекпойнт. Числа всех сценариев выше к этому моменту уже
+            # утверждены, поэтому сдвиг ничего не стирает.
+            await run_vanished_conversation(
+                pool,
+                http=http,
+                token=tokens["reader"],
+                device=devices["reader"],
+                participant_id=outsider_id,
+                live=conversation,
+                live_sends=our_sends,
+                reader_id=reader_id,
+                label="исчезнувшая беседа",
+            )
         finally:
             # Потребитель обязан догнать до уборки: неприменённое событие
             # после удаления беседы сошлётся на неё внешним ключом, и
@@ -1323,17 +1616,38 @@ async def run() -> None:
                     expected=await head(pool, conversation_id=conversation_id),
                 )
             async with pool.acquire() as conn:
-                # Порядок обратен созданию: проекция и чекпойнт ссылаются
-                # на беседу и пользователя без каскада, а сессии ссылаются
+                # Производные непрочитанного удаляются **не здесь**, и это
+                # проверяемое утверждение, а не пропуск. Каскад объявлен
+                # миграцией `0011`, и проверка его — то, ради чего абзац
+                # вообще существует: отвались каскад, беседа не удалилась бы
+                # вовсе (`ForeignKeyViolationError` на `unread_projection`),
+                # а сработай он наполовину — числа после удаления оказались
+                # бы не нулями. Ни одна из четырёх чужих проверок про новую
+                # производную при этом не знает, и знать не должна.
+                #
+                # Given: беседа, её строка чекпойнта и её строки проекции.
+                # When: беседа удаляется.
+                # Then: обе производные исчезли вместе с ней.
+                #
+                # Числа снимаются **до** удаления: после него ноль вышел бы
+                # и без каскада — от несуществующей беседы, — и проверка
+                # доказывала бы пустоту вместо каскада. Поэтому же берётся
+                # и предусловие: строки обязаны быть, иначе удалять нечего.
+                derived = (
+                    """
+                    SELECT
+                        (SELECT count(*) FROM unread_offsets
+                          WHERE conversation_id = ANY($1::uuid[])) AS offsets,
+                        (SELECT count(*) FROM unread_projection
+                          WHERE conversation_id = ANY($1::uuid[])) AS projection
+                    """,
+                    conversations,
+                )
+                before = await conn.fetchrow(*derived)
+
+                # Порядок обратен созданию: `read_states` ссылается на
+                # беседу и пользователя без каскада, а сессии ссылаются
                 # на устройства.
-                await conn.execute(
-                    "DELETE FROM unread_projection WHERE conversation_id = ANY($1::uuid[])",
-                    conversations,
-                )
-                await conn.execute(
-                    "DELETE FROM unread_offsets WHERE conversation_id = ANY($1::uuid[])",
-                    conversations,
-                )
                 await conn.execute(
                     "DELETE FROM read_states WHERE conversation_id = ANY($1::uuid[])",
                     conversations,
@@ -1350,51 +1664,80 @@ async def run() -> None:
                     "DELETE FROM conversation_members WHERE conversation_id = ANY($1::uuid[])",
                     conversations,
                 )
-                await conn.execute(
-                    "DELETE FROM conversations WHERE conversation_id = ANY($1::uuid[])",
-                    conversations,
-                )
-                await conn.execute(
-                    "DELETE FROM sessions WHERE user_id IN"
-                    " (SELECT user_id FROM users WHERE external_id = ANY($1::text[]))",
-                    list(external_ids.values()),
-                )
-                await conn.execute(
-                    "DELETE FROM devices WHERE user_id IN"
-                    " (SELECT user_id FROM users WHERE external_id = ANY($1::text[]))",
-                    list(external_ids.values()),
-                )
-                await conn.execute(
-                    "DELETE FROM users WHERE external_id = ANY($1::text[])",
-                    list(external_ids.values()),
-                )
-            leftovers = await pool.fetchrow(
-                """
-                SELECT
-                    (SELECT count(*) FROM users WHERE external_id = ANY($1::text[]))
-                        AS users,
-                    (SELECT count(*) FROM conversations WHERE conversation_id = ANY($2::uuid[]))
-                        AS conversations,
-                    (SELECT count(*) FROM messages WHERE conversation_id = ANY($2::uuid[]))
-                        AS messages,
-                    (SELECT count(*) FROM read_states WHERE conversation_id = ANY($2::uuid[]))
-                        AS read_states,
-                    (SELECT count(*) FROM unread_offsets WHERE conversation_id = ANY($2::uuid[]))
-                        AS offsets,
-                    (SELECT count(*) FROM unread_projection
-                      WHERE conversation_id = ANY($2::uuid[])) AS projection,
-                    (SELECT count(*) FROM outbox WHERE partition_key = ANY($3::text[]))
-                        AS outbox_events
-                """,
-                list(external_ids.values()),
-                conversations,
-                [str(item) for item in conversations],
-            )
-            check(
-                "после проверки в базе не осталось следов",
-                all(value == 0 for value in leftovers.values()),
-                str(dict(leftovers)),
-            )
+                try:
+                    await conn.execute(
+                        "DELETE FROM conversations WHERE conversation_id = ANY($1::uuid[])",
+                        conversations,
+                    )
+                except asyncpg.exceptions.ForeignKeyViolationError as exc:
+                    # Каскада нет, и беседа не удаляется вовсе: производная
+                    # держит её ключом. Печатается **своим** утверждением,
+                    # а не трейсбеком, — иначе краснота приходила бы
+                    # из уборки и не называла бы нарушенный инвариант,
+                    # а разбирать её пришлось бы по стеку.
+                    check(
+                        "производные непрочитанного ушли вместе с беседой",
+                        False,
+                        f"беседа не удалилась: {type(exc).__name__}:"
+                        f" {str(exc).splitlines()[0]}; каскад объявлен миграцией 0011",
+                    )
+                else:
+                    after = await conn.fetchrow(*derived)
+                    check(
+                        "производные непрочитанного ушли вместе с беседой",
+                        before["offsets"] > 0
+                        and before["projection"] > 0
+                        and after["offsets"] == 0
+                        and after["projection"] == 0,
+                        f"до удаления {dict(before)}, после {dict(after)};"
+                        " каскад объявлен миграцией 0011",
+                    )
+                    # Остальная уборка — только вслед за удавшейся беседой.
+                    # Без каскада пользователя тоже не удалить: проекция
+                    # ссылается и на него, и каскада по `user_id` нет
+                    # намеренно. Упасть здесь значило бы закрыть красноту
+                    # трейсбеком поверх уже названного нарушения.
+                    await conn.execute(
+                        "DELETE FROM sessions WHERE user_id IN"
+                        " (SELECT user_id FROM users WHERE external_id = ANY($1::text[]))",
+                        list(external_ids.values()),
+                    )
+                    await conn.execute(
+                        "DELETE FROM devices WHERE user_id IN"
+                        " (SELECT user_id FROM users WHERE external_id = ANY($1::text[]))",
+                        list(external_ids.values()),
+                    )
+                    await conn.execute(
+                        "DELETE FROM users WHERE external_id = ANY($1::text[])",
+                        list(external_ids.values()),
+                    )
+                    leftovers = await conn.fetchrow(
+                        """
+                        SELECT
+                            (SELECT count(*) FROM users WHERE external_id = ANY($1::text[]))
+                                AS users,
+                            (SELECT count(*) FROM conversations
+                              WHERE conversation_id = ANY($2::uuid[])) AS conversations,
+                            (SELECT count(*) FROM messages
+                              WHERE conversation_id = ANY($2::uuid[])) AS messages,
+                            (SELECT count(*) FROM read_states
+                              WHERE conversation_id = ANY($2::uuid[])) AS read_states,
+                            (SELECT count(*) FROM unread_offsets
+                              WHERE conversation_id = ANY($2::uuid[])) AS offsets,
+                            (SELECT count(*) FROM unread_projection
+                              WHERE conversation_id = ANY($2::uuid[])) AS projection,
+                            (SELECT count(*) FROM outbox WHERE partition_key = ANY($3::text[]))
+                                AS outbox_events
+                        """,
+                        list(external_ids.values()),
+                        conversations,
+                        [str(item) for item in conversations],
+                    )
+                    check(
+                        "после проверки в базе не осталось следов",
+                        all(value == 0 for value in leftovers.values()),
+                        str(dict(leftovers)),
+                    )
             await pool.close()
             for external_id in external_ids.values():
                 await http.delete(

@@ -169,9 +169,25 @@ def pair(result) -> tuple[int, int] | None:
 
 # --- гонка A: детерминированная ---------------------------------------------
 
-# Ожидание блокировки наблюдается, а не выдерживается паузой. Считаются
-# неполученные блокировки на **транзакцию держателя** — и это не способ
-# из многих, а единственный работающий здесь.
+# Ожидание блокировки наблюдается, а не выдерживается паузой, и считается
+# оно по **всей очереди за строкой чекпойнта беседы**, а не по числу
+# ждущих её транзакцию.
+#
+# Так было не всегда, и перемена — следствие `G3-003`, а не вкуса. Пока
+# квитанция писала одну строку `read_states`, наблюдения за транзакцией
+# держателя хватало: оба устройства вставали на неё и были видны обеими
+# записями. Теперь квитанция первой занимает строку `unread_offsets`
+# беседы и держит её до конца транзакции, поэтому сериализуются устройства
+# **на ней**, а форма очереди зависит от того, что с строкой делают.
+#
+# Если строка уже лежит и держатель занял её `FOR UPDATE`, первый ждущий
+# встаёт на транзакцию держателя (`locktype='transactionid'`,
+# `granted=false`) и сам владеет кортежем, а каждый следующий ждёт кортеж
+# первого и виден только строкой `locktype='tuple'`. Если же строку
+# вставили и не закоммитили, кортежа не ждёт никто: все ждут транзакцию,
+# и кортежных строк нет вовсе. Отсюда обе половины формулы ниже, снятые
+# разбором на живой базе; счёт по номеру процесса не даёт посчитать
+# первого ждущего дважды. Разбор целиком — в `unread_check.py`.
 #
 # Идентификатор процесса на такой вопрос не отвечает вовсе: `DATABASE_HOST`
 # по умолчанию — PgBouncer в режиме транзакций, и idle-клиенты делят одно
@@ -185,20 +201,31 @@ def pair(result) -> tuple[int, int] | None:
 # 64-битный `xid8`, тогда как в колонке лежит 32-битный `xid`. Отсюда
 # сравнение по числу и модуль.
 WAITING = """
-SELECT count(*)
-  FROM pg_locks
- WHERE locktype = 'transactionid'
-   AND NOT granted
-   AND transactionid::text::bigint = $1
+SELECT count(DISTINCT l.pid)
+  FROM pg_locks l
+  JOIN unread_offsets u ON u.conversation_id = $1
+ WHERE (
+         l.locktype = 'tuple'
+     AND l.relation = 'unread_offsets'::regclass
+     AND l.page  = (u.ctid::text::point)[0]::int
+     AND l.tuple = (u.ctid::text::point)[1]::int
+       )
+    OR (
+         l.locktype = 'transactionid'
+     AND NOT l.granted
+     AND l.transactionid::text::bigint = $2
+       )
 """
 
 CURRENT_XID = "SELECT pg_current_xact_id()::text::bigint % 4294967296"
 
 
-async def wait_until_blocked(holder, *, xid: int, expected: int, seconds: float = 10.0) -> bool:
+async def wait_until_blocked(
+    holder, *, conversation_id, xid: int, expected: int, seconds: float = 10.0
+) -> bool:
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
-        if await holder.fetchval(WAITING, xid) >= expected:
+        if await holder.fetchval(WAITING, conversation_id, xid) >= expected:
             return True
         await asyncio.sleep(0.02)
     return False
@@ -207,12 +234,27 @@ async def wait_until_blocked(holder, *, xid: int, expected: int, seconds: float 
 async def run_race_a(
     pool, *, label: str, conversation_id, viewer, first, second
 ) -> None:
-    """Два устройства за одной строкой, которую до них держит третье.
+    """Два устройства за строкой, которую до них держит третье.
+
+    Строка — **чекпойнт беседы**, а не `read_states`, и это следствие
+    `G3-003`: квитанция с этого гейта первой занимает `unread_offsets`
+    беседы и держит её до конца транзакции, поэтому устройства
+    выстраиваются на ней. Проверка стережёт ту точку сериализации,
+    которая есть, а не ту, что была до появления второй записываемой
+    строки: держатель, занявший `read_states`, не остановил бы никого,
+    и гонка стала бы пустой.
+
+    Из той же перемены следует и то, что применения устройств теперь
+    упорядочены, а не конкурентны: пока первое проходит пересчёт, строка
+    беседы занята им, и второе ждёт. Утверждения ниже от этого не слабеют —
+    они и раньше не требовали одновременности, — но и не усиливаются:
+    гонка доказывает, что очередь за строкой существует и что последовательные
+    применения не теряют присланного.
 
     Порядок постановки задач задаётся параметрами: в одном прогоне первым
-    в `upsert` уходит большее значение, в другом — меньшее. Второе
-    устройство стартует только после того, как первое встало в блокировку,
-    — иначе «в обоих порядках» зависело бы от того, кого раньше разбудил
+    уходит большее значение, в другом — меньшее. Второе устройство
+    стартует только после того, как первое встало в блокировку, — иначе
+    «в обоих порядках» зависело бы от того, кого раньше разбудил
     планировщик, и второй прогон повторял бы первый.
 
     Смотрит за ожиданием **сам держатель**: его транзакция — то, чего ждут,
@@ -246,16 +288,23 @@ async def run_race_a(
         # стоит на пути успеха, а не отказа.
         awaiting = False
         try:
+            # Пара операторов — та же, что у потребителя и у квитанции:
+            # `DO NOTHING` не пишет версию строки, а `FOR UPDATE` даёт
+            # ровно тот замок, за которым встанут устройства. Строки может
+            # и не быть — тогда её создаст вставка держателя, и устройства
+            # будут ждать его транзакцию; наблюдатель видит и этот случай.
             await holder_conn.execute(
                 """
-                INSERT INTO read_states (
-                    conversation_id, user_id,
-                    last_delivered_seq, last_read_seq, updated_at
-                )
-                VALUES ($1, $2, 0, 0, now())
+                INSERT INTO unread_offsets (conversation_id, applied_through_seq)
+                VALUES ($1, 0)
+                ON CONFLICT (conversation_id) DO NOTHING
                 """,
                 conversation_id,
-                viewer.user_id,
+            )
+            await holder_conn.fetchval(
+                "SELECT applied_through_seq FROM unread_offsets"
+                " WHERE conversation_id = $1 FOR UPDATE",
+                conversation_id,
             )
             # Номер снимается после вставки: до неё транзакции может ещё
             # не быть, и `pg_current_xact_id()` вернул бы NULL.
@@ -271,13 +320,21 @@ async def run_race_a(
                 )
 
             tasks.append(asyncio.create_task(device(first_conn, first)))
-            started = await wait_until_blocked(holder_conn, xid=xid, expected=1)
+            started = await wait_until_blocked(
+                holder_conn,
+                conversation_id=conversation_id,
+                xid=xid,
+                expected=1,
+            )
             tasks.append(asyncio.create_task(device(second_conn, second)))
             both = started and await wait_until_blocked(
-                holder_conn, xid=xid, expected=2
+                holder_conn,
+                conversation_id=conversation_id,
+                xid=xid,
+                expected=2,
             )
             check(
-                f"{label}: оба устройства стоят в upsert до коммита держателя",
+                f"{label}: оба устройства стоят за строкой чекпойнта до коммита держателя",
                 both,
                 "блокировка не наблюдалась — гонка не состоялась",
             )
