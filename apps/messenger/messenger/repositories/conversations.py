@@ -61,7 +61,8 @@ _SELECT = """
     SELECT c.conversation_id, c.type, c.direct_key, c.last_seq,
            c.created_at, c.updated_at,
            participants.ids   AS participant_ids,
-           participants.names AS participant_names
+           participants.names AS participant_names,
+           participants.seen  AS participant_last_seen
       FROM conversation_members cm
       JOIN conversations c ON c.conversation_id = cm.conversation_id
       LEFT JOIN LATERAL (
@@ -72,7 +73,21 @@ _SELECT = """
                  COALESCE(
                      array_agg(u.display_name ORDER BY cm2.joined_at, cm2.user_id),
                      ARRAY[]::text[]
-                 ) AS names
+                 ) AS names,
+                 -- Отметка «был в сети» едет с участником, а не отдельным
+                 -- запросом: роли участников уже соединены здесь, и второй
+                 -- поход в базу за той же колонкой тех же строк был бы
+                 -- лишним кругом ровно на том маршруте, ради цены которого
+                 -- всё остальное здесь и сведено к двум запросам.
+                 --
+                 -- `array_agg` сохраняет NULL-элементы (`COALESCE` нужен
+                 -- только против NULL-массива у беседы без участников),
+                 -- поэтому `zip(..., strict=True)` в `_to_summary` не
+                 -- собьётся на человеке, который ни разу не был в сети.
+                 COALESCE(
+                     array_agg(u.last_seen_at ORDER BY cm2.joined_at, cm2.user_id),
+                     ARRAY[]::timestamptz[]
+                 ) AS seen
             FROM conversation_members cm2
             JOIN users u ON u.user_id = cm2.user_id
            WHERE cm2.conversation_id = c.conversation_id
@@ -113,14 +128,24 @@ def _to_summary(row: asyncpg.Record) -> ConversationSummary:
 
     `zip(..., strict=True)` — страховка от расхождения длин массивов:
     молча укороченный список участников выглядел бы как беседа, из
-    которой кто-то вышел, а не как испорченный запрос.
+    которой кто-то вышел, а не как испорченный запрос. Три массива
+    собираются одним подзапросом с одной сортировкой, поэтому расхождение
+    возможно только при испорченном запросе — и тогда лучше отказ, чем
+    участник не с тем временем.
     """
     return ConversationSummary(
         conversation=_to_conversation(row),
         participants=tuple(
-            UserSummary(user_id=UserId(user_id), display_name=display_name)
-            for user_id, display_name in zip(
-                row["participant_ids"], row["participant_names"], strict=True
+            UserSummary(
+                user_id=UserId(user_id),
+                display_name=display_name,
+                last_seen_at=last_seen_at,
+            )
+            for user_id, display_name, last_seen_at in zip(
+                row["participant_ids"],
+                row["participant_names"],
+                row["participant_last_seen"],
+                strict=True,
             )
         ),
     )

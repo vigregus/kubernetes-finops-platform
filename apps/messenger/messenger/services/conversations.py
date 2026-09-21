@@ -20,8 +20,8 @@ from messenger.domain.conversation_list import (
 )
 from messenger.domain.errors import Reason
 from messenger.domain.ids import ConversationId, UserId, direct_key
-from messenger.domain.user import User
-from messenger.repositories import conversations, messages
+from messenger.domain.user import User, UserSummary
+from messenger.repositories import conversations, messages, users
 from messenger.services import authorization
 from messenger.services.unread import restore_lost_counts
 
@@ -164,7 +164,12 @@ async def list_conversations(
 @dataclass(frozen=True, slots=True)
 class CreateDirectResult:
     conversation: Conversation | None = None
-    participants: tuple[User, ...] = field(default_factory=tuple)
+    # `UserSummary`, а не `User`: ответ на создание и ответ на список
+    # собираются одной функцией (`api/main._user_summary`), и участник
+    # в них обязан быть одного типа. Разойдись они — один и тот же человек
+    # выглядел бы по-разному в зависимости от того, каким маршрутом его
+    # получили, и заметил бы это клиент, а не сервер.
+    participants: tuple[UserSummary, ...] = field(default_factory=tuple)
     created: bool = False
     rejection: Reason | None = None
 
@@ -200,10 +205,25 @@ async def create_direct(
             direct_key=key,
         )
         conversation = ensured.conversation
+        # Отметки «был в сети» участников — пачкой и в той же транзакции.
+        # Маршрут создания отдаёт тех же участников, что и список, и
+        # оставить его без отметок значило бы завести два разных ответа
+        # об одном человеке: список — с временем, создание — без.
+        seen = await users.fetch_last_seen_at(
+            conn, user_ids=(actor.user_id, participant.user_id)
+        )
+        participants = tuple(
+            UserSummary(
+                user_id=member.user_id,
+                display_name=member.display_name,
+                last_seen_at=seen.get(member.user_id),
+            )
+            for member in (actor, participant)
+        )
         if not ensured.created:
             return CreateDirectResult(
                 conversation=conversation,
-                participants=(actor, participant),
+                participants=participants,
                 created=False,
             )
 
@@ -219,6 +239,6 @@ async def create_direct(
         )
         return CreateDirectResult(
             conversation=conversation,
-            participants=(actor, participant),
+            participants=participants,
             created=True,
         )

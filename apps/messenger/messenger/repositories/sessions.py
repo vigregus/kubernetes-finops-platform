@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import asyncpg
 
@@ -287,36 +287,41 @@ async def register_realtime_connection(
     Блокировка строки согласована с отзывом в сервисе: либо соединение
     попадёт в реестр раньше отзыва и будет разорвано, либо увидит уже
     отозванную строку и Centrifugo не примет его вовсе.
+
+    Транзакции здесь нет: ею владеет вызывающий (`services/realtime.py`),
+    а соединение регистрируется вместе с отметкой «был в сети», и оба
+    значения обязаны прийти из одного `now()`. Собственная транзакция
+    репозитория дала бы вложенную — лишний `SAVEPOINT` на каждом
+    подключении и две границы там, где нужна одна.
     """
-    async with conn.transaction():
-        row = await conn.fetchrow(
-            """
-            SELECT session_id
-              FROM sessions
-             WHERE session_id = $1
-               AND user_id = $2
-               AND revoked_at IS NULL
-               AND expires_at > now()
-             FOR UPDATE
-            """,
-            session_id,
-            user_id,
-        )
-        if row is None:
-            return False
-        await conn.execute(
-            """
-            INSERT INTO realtime_connections (client_id, session_id, user_id)
-            VALUES ($1, $2, $3)
-            ON CONFLICT (client_id) DO UPDATE
-               SET refreshed_at = now()
-             WHERE realtime_connections.session_id = EXCLUDED.session_id
-               AND realtime_connections.user_id = EXCLUDED.user_id
-            """,
-            client_id,
-            session_id,
-            user_id,
-        )
+    row = await conn.fetchrow(
+        """
+        SELECT session_id
+          FROM sessions
+         WHERE session_id = $1
+           AND user_id = $2
+           AND revoked_at IS NULL
+           AND expires_at > now()
+         FOR UPDATE
+        """,
+        session_id,
+        user_id,
+    )
+    if row is None:
+        return False
+    await conn.execute(
+        """
+        INSERT INTO realtime_connections (client_id, session_id, user_id)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (client_id) DO UPDATE
+           SET refreshed_at = now()
+         WHERE realtime_connections.session_id = EXCLUDED.session_id
+           AND realtime_connections.user_id = EXCLUDED.user_id
+        """,
+        client_id,
+        session_id,
+        user_id,
+    )
     return True
 
 
@@ -347,6 +352,63 @@ async def refresh_realtime_connection(
         user_id,
     )
     return row is not None
+
+
+async def count_online_users(
+    conn: asyncpg.Connection, *, window: timedelta
+) -> int:
+    """Сколько пользователей в сети. Агрегат по пользователю, не по соединению.
+
+    `DISTINCT user_id` здесь — не оптимизация, а само правило: у одного
+    человека может быть открыто несколько вкладок и два устройства, и
+    «в сети» он от этого не перестаёт быть одним. Считать строки значило бы
+    отвечать на вопрос «сколько соединений», которого никто не задавал
+    (`PRS-001`).
+
+    Граница берётся в Postgres, а окно передаётся длительностью: `now()`
+    сервера и часы пода — разные часы, и граница, посчитанная в Python,
+    разошлась бы с `refreshed_at`, записанным тем же сервером.
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT count(DISTINCT user_id) AS online
+          FROM realtime_connections
+         WHERE refreshed_at >= now() - $1::interval
+        """,
+        window,
+    )
+    return int(row["online"]) if row is not None else 0
+
+
+async def delete_stale_realtime_connections(
+    conn: asyncpg.Connection, *, window: timedelta
+) -> int:
+    """Убирает соединения, не продлевавшиеся дольше окна. Возвращает число.
+
+    Уборка нужна не ради места: `realtime_connections` — реестр **живых**
+    соединений, а строки в нём до сих пор не заканчивались ничем. Клиент,
+    закрывший вкладку, оставляет строку навсегда — о разрыве Centrifugo
+    не сообщает, — и без уборки таблица росла бы на каждую вкладку, когда
+    либо открытую, а присутствие пришлось бы считать по кладбищу.
+
+    Предикат — только по свежести строки, и удаляются именно протухшие:
+    заранее выбранные `client_id` разошлись бы с продлением, случившимся
+    между выбором и удалением. Здесь этого не может быть по построению:
+    `DELETE` перепроверяет условие после чужой фиксации (READ COMMITTED),
+    поэтому продлившееся соединение под уборку не попадает.
+
+    Число удалённых возвращается ради журнала и метрики: «уборка не
+    находит ничего» и «уборка не работает» различимы только по нему.
+    """
+    rows = await conn.fetch(
+        """
+        DELETE FROM realtime_connections
+         WHERE refreshed_at < now() - $1::interval
+        RETURNING client_id
+        """,
+        window,
+    )
+    return len(rows)
 
 
 async def revoke_user_sessions(

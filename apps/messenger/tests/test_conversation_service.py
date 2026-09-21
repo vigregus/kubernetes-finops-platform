@@ -72,6 +72,24 @@ def _user(user_id: UserId, *, verified: bool = True, deleted: bool = False) -> U
     )
 
 
+def _отметки(
+    monkeypatch, seen: dict[UserId, datetime] | None = None
+) -> list[UserId]:
+    """Подменяет чтение отметок «был в сети»: проверяется вызов, не SQL.
+
+    Заодно становится видно, что запрос идёт **пачкой** по обоим участникам:
+    по одному это были бы два обращения к базе вместо одного.
+    """
+    asked: list[UserId] = []
+
+    async def _fetch(conn, *, user_ids):
+        asked.extend(user_ids)
+        return dict(seen or {})
+
+    monkeypatch.setattr(service.users, "fetch_last_seen_at", _fetch)
+    return asked
+
+
 def _conversation() -> Conversation:
     return Conversation(
         conversation_id=ConversationId(uuid.uuid4()),
@@ -148,6 +166,7 @@ def test_первый_запрос_атомарно_создаёт_беседу_
     monkeypatch.setattr(service.authorization, "authorize", _allow)
     monkeypatch.setattr(service.conversations, "ensure_direct_conversation", _ensure)
     monkeypatch.setattr(service.conversations, "add_member", _add)
+    asked = _отметки(monkeypatch, {OTHER_ID: NOW})
 
     result = asyncio.run(
         service.create_direct(conn, actor=_user(ACTOR_ID), participant_id=OTHER_ID)
@@ -155,6 +174,13 @@ def test_первый_запрос_атомарно_создаёт_беседу_
     assert result.ok and result.created and result.conversation == expected
     assert members == [ACTOR_ID, OTHER_ID]
     assert conn.tx.entered and conn.tx.exited
+    # Отметки читаются одной пачкой на обоих участников и в той же
+    # транзакции: ответ на создание обязан не отличаться от ответа списка.
+    assert asked == [ACTOR_ID, OTHER_ID]
+    assert [(user.user_id, user.last_seen_at) for user in result.participants] == [
+        (ACTOR_ID, None),
+        (OTHER_ID, NOW),
+    ]
 
 
 def test_последовательный_повтор_возвращает_существующую(monkeypatch):
@@ -172,12 +198,14 @@ def test_последовательный_повтор_возвращает_су
     monkeypatch.setattr(service.authorization, "authorize", _allow)
     monkeypatch.setattr(service.conversations, "ensure_direct_conversation", _ensure)
     monkeypatch.setattr(service.conversations, "add_member", _не_добавлять)
+    asked = _отметки(monkeypatch)
 
     result = asyncio.run(
         service.create_direct(Connection(), actor=_user(ACTOR_ID), participant_id=OTHER_ID)
     )
     assert result.ok and not result.created and result.conversation == expected
     assert [user.user_id for user in result.participants] == [ACTOR_ID, OTHER_ID]
+    assert asked == [ACTOR_ID, OTHER_ID]
 
 
 # --- список бесед ----------------------------------------------------------

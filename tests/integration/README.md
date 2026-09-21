@@ -60,6 +60,7 @@ scripts/integration-messenger.sh
 | `logout_all_check` | `AUTH-003`: «выйти везде» закрывает все входы |
 | `messages_check` | `G2-002`: сообщение и два события outbox одним коммитом |
 | `password_recovery_check` | `AUTH-005`: сброс пароля отзывает сессии |
+| `presence_check` | `G3-004`/`PRS-001…003`: два устройства одного человека — один онлайн, офлайн по времени без сигнала, «был в сети» переживает потерю реестра соединений |
 | `realtime_receive_check` | `G2-005`: получение по WebSocket и отсев повтора |
 | `realtime_revoke_check` | `AUTH-003` realtime: отзыв рвёт живое соединение |
 | `receipts_check` | `G3-002`/`RCP-003…006`: монотонность, `read ≤ delivered ≤ last_seq`, отказ выше головы и по чужой беседе, живая гонка двух устройств |
