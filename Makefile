@@ -32,11 +32,14 @@ MESSENGER_APPS  := messenger-secrets messenger-postgres messenger-redis \
 PYTHON ?= python3.12
 PYTHON_VERSION = (3, 12)
 
-.PHONY: help bootstrap local-up local-test local-down contracts kafka-security layers sql venv lint unit web-check migrate smoke integration send-message status
+.PHONY: help bootstrap local-up local-test local-down contracts kafka-security layers sql venv lint unit web-check web-e2e web-e2e-fixture migrate smoke integration send-message status
 
 help:
-	@grep -E '^[a-z-]+:.*?## .*$$' $(MAKEFILE_LIST) \
-		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
+	@# Класс символов включает цифры: имя `web-e2e` без них не опознаётся вовсе,
+	@# и цель молча исчезает из справки — то есть «её нет» неотличимо от «о ней
+	@# забыли». Ширина колонки выбрана по самому длинному имени в файле.
+	@grep -E '^[a-z0-9-]+:.*?## .*$$' $(MAKEFILE_LIST) \
+		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 
 # ---------------------------------------------------------------------------
 
@@ -189,6 +192,18 @@ web-check: ## Веб: клиент из контракта, сборка, лин
 	@# отсутствие неотличимо от присутствия.
 	@echo "· веб: production-путь без фикстур"
 	@python3 scripts/check-web-purge.py
+
+web-e2e: ## Веб: браузерная приёмка против стенда (единственный вход)
+	@# Один процесс, а не два. Пароль фикстуры живёт только в окружении, и
+	@# второй `make` его не унаследует, а `finally` первого закончится раньше
+	@# теста. Поэтому оркестратор ровно один, и `playwright test` — его
+	@# дочерний процесс. Ниже нет ни `export`, ни второго вызова: всё внутри.
+	@scripts/web-e2e-fixture.sh
+
+web-e2e-fixture: ## Веб: завести фикстуры приёмки и показать их состояние (диагностика)
+	@# Диагностическая цель. Обязательным шагом приёмки не является: она
+	@# запускает только проект `fixture`, а спека в неё не входит.
+	@E2E_FIXTURE_ONLY=1 scripts/web-e2e-fixture.sh
 
 migrate: ## Применить миграции к локальной базе
 	@echo "· миграции"
