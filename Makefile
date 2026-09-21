@@ -32,7 +32,7 @@ MESSENGER_APPS  := messenger-secrets messenger-postgres messenger-redis \
 PYTHON ?= python3.12
 PYTHON_VERSION = (3, 12)
 
-.PHONY: help bootstrap local-up local-test local-down contracts kafka-security layers sql venv lint unit web-check web-e2e web-e2e-fixture migrate smoke integration send-message status
+.PHONY: help bootstrap local-up local-test local-down contracts kafka-security layers sql venv lint unit web-check chart-env chart-render web-e2e web-e2e-fixture migrate smoke integration send-message status
 
 help:
 	@# Класс символов включает цифры: имя `web-e2e` без них не опознаётся вовсе,
@@ -192,6 +192,27 @@ web-check: ## Веб: клиент из контракта, сборка, лин
 	@# отсутствие неотличимо от присутствия.
 	@echo "· веб: production-путь без фикстур"
 	@python3 scripts/check-web-purge.py
+	@# Сборка образа не проверяется запуском — проверяется чтением файла.
+	@# `npm run build` внутри Node-стадии не медленный, а невозможный: демона
+	@# там нет. Статическая проверка называет это прямо, а попытка поймать
+	@# это сборкой ловила бы не ту ошибку.
+	@echo "· веб: Dockerfile и контекст сборки"
+	@python3 scripts/check-web-dockerfile.py
+
+chart-env: ## Чарт: переменные, скрейпы и образы шести нагрузок
+	@# Читает и значения признаков в values, и результат рендера: одного
+	@# рендера мало — случайно совпавшее отсутствие неотличимо от
+	@# выполненного признака, а снятие `metrics: true` у фоновой нагрузки
+	@# не покраснело бы вовсе.
+	@python3 scripts/check-chart-env.py
+
+chart-render: ## Чарт: шаблон не изменил вывод пяти работающих (BASE_SHA=<sha>)
+	@# База обязательна и передаётся явно: значения по умолчанию у неё нет
+	@# намеренно. `origin/main` подвижен — сравнение с ним краснело бы от
+	@# чужого слияния и зеленело от своего, а на checkout'е с `fetch-depth: 1`
+	@# его могло бы просто не найтись. В CI сюда придёт
+	@# `github.event.pull_request.base.sha`.
+	@BASE_SHA="$(BASE_SHA)" python3 scripts/check-chart-render.py
 
 web-e2e: ## Веб: браузерная приёмка против стенда (единственный вход)
 	@# Один процесс, а не два. Пароль фикстуры живёт только в окружении, и
