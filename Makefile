@@ -32,7 +32,7 @@ MESSENGER_APPS  := messenger-secrets messenger-postgres messenger-redis \
 PYTHON ?= python3.12
 PYTHON_VERSION = (3, 12)
 
-.PHONY: help bootstrap local-up local-test local-down contracts kafka-security layers sql venv lint unit migrate smoke integration send-message status
+.PHONY: help bootstrap local-up local-test local-down contracts kafka-security layers sql venv lint unit web-check migrate smoke integration send-message status
 
 help:
 	@grep -E '^[a-z-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -163,6 +163,25 @@ venv: ## Окружение для проверок; создаётся само
 unit: venv ## Модульные тесты, без базы и сети
 	@echo "· модульные тесты"
 	@cd apps/messenger && .venv/bin/python -m pytest tests -q
+
+web-check: ## Веб: клиент из контракта, сборка, линтер, модульные тесты
+	@# Порядок здесь не случаен: генерация идёт первой, потому что без неё
+	@# `tsc -b` собирает дерево, которого ещё нет (каталог клиента чистится
+	@# генератором), а тесты проверяли бы клиент от прежнего контракта.
+	@#
+	@# Число собранных unit-тестов печатается и обязано быть ненулевым:
+	@# конфигурация с `projects` сама тестов не запускает, и «зелёный» прогон,
+	@# не собравший ни одного `*.test.ts`, неотличим от отсутствия дефекта.
+	@echo "· веб: клиент из контракта"
+	@cd apps/web && npm run api:generate
+	@echo "· веб: сборка"
+	@cd apps/web && npm run build:app
+	@echo "· веб: линтер"
+	@cd apps/web && npm run lint
+	@echo "· веб: модульные тесты"
+	@cd apps/web && npm test
+	@echo "· веб: презентационный слой"
+	@cd apps/web && npm run build-storybook
 
 migrate: ## Применить миграции к локальной базе
 	@echo "· миграции"

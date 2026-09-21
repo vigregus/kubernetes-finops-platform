@@ -1,0 +1,48 @@
+# Конфигурация генератора клиента. Один файл на обе сборки — хостовую
+# (scripts/generate-web-client.sh) и внутриобразную (стадия `codegen`
+# apps/web/Dockerfile). Один digest генератора ещё не означает один клиент:
+# параметры, розданные по двум местам, дают два разных клиента из одного
+# контракта, и расхождение выясняется в браузере, а не в сборке (CTR-004).
+
+generatorName: typescript-fetch
+
+additionalProperties:
+  modelPropertyNaming: camelCase
+  paramNaming: camelCase
+
+# `date-time` в клиенте — строка, а не объект `Date`.
+#
+# Умолчание отдаёт нативный `Date`: `format: date-time` становится объектом.
+# Тогда `Message.created_at` в клиенте — `Date`, а display-строка собирается
+# из объекта там, где тип обещает строку: `tsc` пропускает, в списке
+# оказывается `Invalid Date`. `string` оставляет wire-значение как есть.
+#
+# Механизм назван точно, потому что «очевидный» здесь не работает.
+# У `typescript-fetch` НЕТ опции `dateLibrary` — её нет в списке
+# `config-help -g typescript-fetch` у закреплённого digest'а. Полный список
+# его опций: allowUnicodeIdentifiers, disallowAdditionalPropertiesIfNotPresent,
+# ensureUniqueParams, enumNameSuffix, enumPropertyNaming,
+# enumPropertyNamingReplaceSpecialChar, enumUnknownDefaultCase, fileNaming,
+# importFileExtension, legacyDiscriminatorBehavior, licenseName,
+# modelPropertyNaming, npmName, npmRepository, npmVersion,
+# nullSafeAdditionalProps, paramNaming, prefixParameterInterfaces,
+# prependFormOrBodyParameters, sagasAndRecords, snapshot,
+# sortModelPropertiesByRequiredFlag, sortParamsByRequiredFlag, stringEnums,
+# supportsES6, useSingleRequestParameter, useSquareBracketsInArrayNames,
+# validationAttributes, withInterfaces, withoutRuntimeChecks.
+# Строка `dateLibrary: string` в этом файле была бы молчаливой пустышкой:
+# неизвестные ключи генератор игнорирует, и поле осталось бы `Date` — то есть
+# ровно тот дефект, который она будто бы закрывает. Опция `dateLibrary` со
+# значениями `date` | `string` есть у генератора `typescript`, но не у
+# `typescript-fetch`, на котором стоит стандарт.
+#
+# Работает `typeMappings`: пара «тип+формат → язык». Проверено исполнением
+# (срез 1): без неё `Message.createdAt` — `Date`, с ней — `string`.
+#
+# Эту пару НЕ заменять на `dateLibrary` и не поднимать `GENERATOR_DIGEST`, не
+# перепроверив у нового digest'а `config-help -g typescript-fetch` и не прогнав
+# все шесть утверждений формы в src/api/contract.test.ts. В более новых
+# редакциях генератора `dateLibrary` есть — но закреплён образ, а не свежая
+# документация, и «упрощение» по ней вернуло бы `Date` в клиент молча.
+typeMappings:
+  string+date-time: string

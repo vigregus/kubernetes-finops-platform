@@ -1,14 +1,90 @@
 # api/
 
-Per `docs/messenger/07-engineering-standard.md` Часть 6: types are not hand-written.
-The client is generated from `packages/contracts/openapi.yaml` at build time into
-`api/generated/` (gitignored) using the `typescript-fetch` generator with
-`modelPropertyNaming=camelCase`, `paramNaming=camelCase`.
+Согласно `docs/messenger/07-engineering-standard.md`, Часть 6: типы не пишутся руками.
+Клиент генерируется из `packages/contracts/openapi.yaml` в `api/generated/`.
 
-This directory currently holds no generated code — that wiring is G3-005 work and
-needs a running backend contract to generate against. Until then, feature code reads
-fixtures from `shared/lib/mock-data.ts`, typed by `shared/lib/types.ts` (itself a
-stand-in for the generated types, to be deleted once codegen lands).
+## Как он появляется
 
-Thin wrappers around the generated client (auth header injection, error mapping)
-belong here too, alongside the generated output.
+Единственный механизм — `scripts/generate-web-client.sh`. Он спрашивает корень
+репозитория у git (`git rev-parse --show-toplevel`), берёт digest генератора из
+`apps/web/base-image.lock` и конфигурацию из `apps/web/openapi-generator.yaml`.
+`package.json` только делегирует:
+
+```
+npm run api:generate   →  scripts/generate-web-client.sh
+npm run build:app      →  tsc -b && vite build
+npm run build          →  api:generate && build:app       (хост и CI)
+```
+
+Внутри образа `npm run build` не вызывается: у Node-стадии нет демона, генерация
+идёт отдельной стадией `codegen` — с тем же digest'ом и тем же файлом конфигурации.
+
+## Что здесь лежит
+
+| Файл | Роль |
+| --- | --- |
+| `generated/` | Результат генерации. В `.gitignore`, руками не правится |
+| `contract.test.ts` | Утверждения о том, что клиент — тот самый: обязательный набор операций и форма шести полей |
+| `client.ts`, `problems.ts` | Обёртка: адрес API, `Authorization`, `X-Device-Id`, разбор `Problem` |
+
+## Почему `generated/` не коммитится
+
+Версия клиента закреплена не файлом в git, а digest'ом образа генератора в
+`apps/web/base-image.lock`. Коммит сгенерированного кода завёл бы вторую версию
+правды: файл в репозитории и файл, который получится из контракта сегодня.
+
+Обратная сторона — клиента нет в дереве, пока его не сгенерировали, поэтому
+`npm run api:generate` идёт **перед** `tsc -b`. Иначе проверка типов судила бы
+пустоту.
+
+## Утверждения о форме — не украшение
+
+Контракт правится отдельно от фронта, и без `contract.test.ts` расхождение
+выяснялось бы в браузере. Утверждения типовые, поэтому их красный прогон
+приходит **от `tsc -b`**, а не от `vitest run`; рантайм-часть (сворачивание
+`null` в `undefined` десериализатором) исполняет vitest.
+
+## Три решения, найденные RED/GREEN-циклом
+
+Это не украшения к коду и не следствия чужой случайности: каждое найдено
+падением прогона, и каждое легко «починить» обратно так, что всё позеленеет —
+но поведение станет неверным. Записаны здесь, чтобы позднее они не выглядели
+недосмотром.
+
+### Любой неудачный обмен обесценивает `accessToken` — но не `sessionEstablished`
+
+`accessToken = null` стоит в `login()` **до** развилки по коду состояния, а не
+внутри ветки `401`. Обмен может отказать и кодом `503`: сервер снимает
+refresh-cookie при **любом** неудачном обмене, включая недоступный Keycloak
+(`_login_failure`, `apps/messenger/messenger/api/main.py:377`). Оставленный в
+памяти токен дал бы состояние, которого не бывает — `hasSession()` истинно
+рядом с `transient-error`, — и следующий запрос ушёл бы с bearer, про который
+заведомо известно, что он не работает.
+
+`sessionEstablished` при этом не сбрасывается: «пригодного токена нет» и
+«сессии не было» — два разных факта. Токен обесценился — состояние становится
+транзитным; но следующий `401` обязан остаться `session-expired`, а не
+превратиться в «первый визит». Сбрось его вместе с токеном — и человек,
+у которого сессия кончилась, получил бы приглашение войти как впервые.
+
+### Повтор защищённого запроса после обмена не обменивает второй раз
+
+Ветка `401` в `fetchApi` после успешного обмена идёт через `send()` и
+`check()` — то есть **не** возвращается в `fetchApi`. Это не стилистика:
+возврат туда дал бы на один исходный запрос второй обмен, и `401` на повторе
+запустил бы третий. Одна вращающаяся refresh-cookie сгорала бы по кругу, а
+`single-flight` (`refreshInFlight`) защищает только от **параллельных** `401`
+— последовательный цикл он не останавливает вовсе. Второй `401` означает, что
+сессии больше нет, и это утверждение (`check` → `sessionLost()`), а не повод
+обменять токен ещё раз.
+
+### Трасса отказа: `body.trace_id` важнее заголовка
+
+`traceIdOf` (`problems.ts`) читает `body.trace_id`, и только при его
+отсутствии — `X-Trace-Id`, и лишь затем `undefined`. Порядок именно такой:
+тело несёт `trace_id` того самого отказа, а заголовок ставит шлюз, и при
+расхождении верен первый. Обратный порядок (заголовок первым) выглядит
+рабочим на любом одиночном ответе и расходится ровно там, где значения
+разные, — то есть в разборе инцидента, ради которого трасса и существует.
+`traceIdFromResponse` — не тот же случай, а другой: там тела нет вовсе
+(сеть, `503`), и заголовок остаётся единственным следом.

@@ -15,6 +15,22 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   test: {
     projects: [{
+      // Явный unit-проект, и он здесь не для красоты.
+      //
+      // Конфигурация, объявляющая `projects`, сама тесты не запускает, а
+      // единственный проект до этой правки — `storybook` (браузерный, через
+      // `@storybook/addon-vitest`) — собирает истории, а не `src/**/*.test.ts`.
+      // То есть `client.test.ts`, `contract.test.ts` и все последующие
+      // детекторы гейта в прогон не попадали бы вовсе, и «красный прогон»
+      // был бы красным по пустоте: прогон, не собравший ни одного теста,
+      // неотличим от прогона, где дефекта нет.
+      extends: true,
+      test: {
+        name: 'unit',
+        include: ['src/**/*.test.ts'],
+        environment: 'jsdom'
+      }
+    }, {
       extends: true,
       plugins: [
       // The plugin will run tests for the stories defined in your Storybook config

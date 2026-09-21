@@ -10,15 +10,23 @@ follow `docs/messenger/07-engineering-standard.md` Часть 6; stack decisions
 npm install
 npm run dev          # app at http://localhost:5173
 npm run storybook    # component library at http://localhost:6006
-npm run build         # type-check + production build
+npm run api:generate # OpenAPI client → src/api/generated/   (нужен Docker)
+npm run build        # api:generate + tsc -b + vite build
+npm run build:app    # tsc -b + vite build, без генерации
 npm run build-storybook
 ```
+
+`npm run build` зовёт `api:generate` первым: клиент не коммитится, и без него
+`tsc -b` проверял бы отсутствующие модули. Внутри образа вызывается
+`build:app` — у Node-стадии нет демона, генерация идёт отдельной стадией.
+Подробности — в `src/api/README.md`.
 
 ## Structure
 
 ```
 src/
-  api/            generated OpenAPI client + thin wrappers (not wired yet, see below)
+  api/            generated OpenAPI client (src/api/generated/, not committed)
+                  + thin wrappers; see api/README.md
   features/
     auth/         LoginPage, SettingsSessionsPage + components/
                   (LoginScreen, SessionsPanel, SessionRow, EmailVerificationBanner, CurrentUserFooter)
@@ -73,19 +81,28 @@ Driven by `docs/messenger/{01-architecture,02-delivery,03-v1-scope,04-decisions,
 - **Client updates** (`UpdateAvailableBanner`): reload prompt for an
   incompatible Service Worker update.
 
-## Not yet wired — this is not G3-005/006
+## Что подключено, а что нет
 
-This is a component/state inventory built against the docs, not the gated
-deliverable in `IMPLEMENTATION-PLAN.md` (G3 — "согласованность клиента"), which
-requires a running backend, a generated OpenAPI client, and browser E2E against
-a real cluster. Missing before it can count as that gate:
+G3-005 (`IMPLEMENTATION-PLAN.md`, требования `CTR-004` и `DEP-001`) превращает этот
+макет в минимальный работающий клиент настоящего backend: вход через Keycloak,
+`GET /me`, `GET /conversations` и статика из собственного образа, закреплённого по
+digest. Клиент из `packages/contracts/openapi.yaml` — **это** G3-005, а не работа
+«на будущее»; подробности в `src/api/README.md`.
 
-- Client generated from `packages/contracts/openapi.yaml` into `api/generated/`
-  (`src/shared/lib/types.ts` is a hand-written stand-in, deleted once this lands)
-- TanStack Query for REST state, `centrifuge-js` for realtime
-- An XState connection/recovery FSM driving `ConnectionStateBanner` for real
-- TanStack Virtual for the message timeline, IndexedDB for the offline outbox
-- React Router
-- The G3-006 browser E2E: tab sleep → `recovered=false` → `SYNCING` → catch-up → `CONNECTED`
+В объём G3-005 **не** входит, и это не «ещё не сделано», а решение:
 
-Right now every feature reads fixtures from `shared/lib/mock-data.ts`.
+- TanStack Query — bootstrap это небольшой слой состояния, а не кэш запросов
+- `centrifuge-js` и любой realtime: ни presence, ни «печатает», ни квитанций
+- XState-FSM и основанный на нём `ConnectionStateBanner` целиком
+- TanStack Virtual, IndexedDB, офлайн-очередь
+- React Router — один адрес `/callback`, ветвление по `window.location.pathname`
+- История сообщений: `GET /conversations/{id}/messages`, `POST /messages`, пагинация
+- G3-006: tab sleep → `recovered=false` → `SYNCING` → catch-up → `CONNECTED`
+
+Компоненты и stories перечисленного остаются в дереве проектным запасом: ни одна
+`*.stories.tsx` не удаляется. Но в production-путь они не подключены — элемент,
+который рисуется и ничего не делает, обещает возможность, которой нет.
+
+`src/shared/lib/types.ts` из «заглушки вместо сгенерированных типов» становится
+UI-представлением: оно ужимается до того, что интерфейс действительно рисует, и
+перестаёт требовать полей, которых сервер не отдаёт.
