@@ -27,6 +27,14 @@ export interface Conversation {
   /** Ключа нет — «неизвестно»; это не ноль и не «всё прочитано». */
   unreadCount?: number
   previewDeleted?: boolean
+  /**
+   * Сервер сообщил последнее сообщение — `last_message` в ответе есть.
+   *
+   * Отдельный признак, а не «превью непустое»: от него зависит, можно ли
+   * говорить «No messages yet». Выведенное из пустоты строки, это утверждение
+   * держалось бы на договорённости таблицы превью, а не на факте.
+   */
+  hasMessages: boolean
   /** names currently sending typing:start heartbeats (RT-001..004) */
   typingNames?: string[]
   /** 08-authorization.md — symmetric block: no write, no presence/typing, history stays readable */

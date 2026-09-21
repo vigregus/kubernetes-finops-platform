@@ -1,78 +1,65 @@
 import { useState } from "react"
 import { ConversationSidebar } from "./components/ConversationSidebar"
 import { ChatHeader } from "./components/ChatHeader"
-import { BlockedNotice } from "./components/BlockedNotice"
-import { MessageTimeline } from "../messages/components/MessageTimeline"
-import { ConnectionStateBanner } from "../messages/components/ConnectionStateBanner"
-import { MessageComposer } from "../messages/components/MessageComposer"
+import { EmptyConversationState } from "../messages/components/EmptyConversationState"
 import { MessengerLayout } from "../../shared/ui/MessengerLayout"
-import {
-  activeConversationId as initialConversationId,
-  conversations,
-  currentUser,
-  messagesByConversation,
-} from "../../shared/lib/mock-data"
-import type { ChatMessage, ConnectionState } from "../../shared/lib/types"
+import type { Conversation, CurrentUser } from "../../shared/lib/types"
 
 interface ChatPageProps {
-  initialConnectionState?: ConnectionState
+  /** Беседы из `GET /conversations`. Фикстур здесь нет и быть не может. */
+  conversations: Conversation[]
+  currentUser: CurrentUser
 }
 
-export function ChatPage({ initialConnectionState = "connected" }: ChatPageProps) {
-  const [activeId, setActiveId] = useState(initialConversationId)
-  const [messagesById, setMessagesById] = useState(messagesByConversation)
-  const [connectionState] = useState<ConnectionState>(initialConnectionState)
+/**
+ * Главная панель знает **три** состояния, а не два, и ни одно из них не лжёт.
+ *
+ * Разделение обязательно, потому что `EmptyConversationState` говорит «No
+ * messages yet. Say hello to {name}» — и это правда **только** при отсутствии
+ * `last_message`. Если `GET /conversations` вернул `last_message`, сообщения
+ * есть; G3-005 их не загружает, но сказать «их нет» значило бы утверждать
+ * обратное тому, что сообщил сервер — тот же класс, что «Active now» и «Last
+ * seen». Третье состояние и есть способ честно не реализовать историю там, где
+ * `Scope` её прямо запрещает.
+ *
+ * `MessageTimeline`, `MessageComposer`, `ConnectionStateBanner` и `BlockedNotice`
+ * сюда не подключены: они остаются проектным запасом, но в production-путь
+ * G3-005 не входят (закрытый список B15).
+ */
+export function ChatPage({ conversations, currentUser }: ChatPageProps) {
+  // Ленивая инициализация, а не `?? conversations[0]` в рендере: запасного
+  // значения у настоящих данных нет, а пустой список — законный ответ сервера.
+  const [activeId, setActiveId] = useState<string | null>(() => conversations[0]?.id ?? null)
 
-  const activeConversation = conversations.find((c) => c.id === activeId) ?? conversations[0]
-  const messages = messagesById[activeId] ?? []
-  const blocked = activeConversation.blockedByMe || activeConversation.blockedMe
-
-  function handleSend(text: string) {
-    const message: ChatMessage = {
-      id: `local-${Date.now()}`,
-      authorId: "me",
-      kind: "text",
-      text,
-      timestamp: new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }),
-      deliveryState: "sending",
-    }
-    setMessagesById((prev) => ({ ...prev, [activeId]: [...(prev[activeId] ?? []), message] }))
-  }
-
-  function handleRetry(id: string) {
-    setMessagesById((prev) => ({
-      ...prev,
-      [activeId]: (prev[activeId] ?? []).map((m) => (m.id === id ? { ...m, deliveryState: "retrying" } : m)),
-    }))
-  }
+  const activeConversation = conversations.find((c) => c.id === activeId) ?? null
 
   return (
     <MessengerLayout
       sidebar={
         <ConversationSidebar
           conversations={conversations}
-          activeConversationId={activeId}
+          activeConversationId={activeConversation?.id ?? null}
           currentUser={currentUser}
           onSelectConversation={setActiveId}
         />
       }
     >
-      <ChatHeader conversation={activeConversation} />
-      <ConnectionStateBanner state={connectionState} />
-      <MessageTimeline
-        dayLabel="Today"
-        conversationName={activeConversation.name}
-        messages={messages}
-        syncIndicatorAfterMessageId="m5"
-        typingNames={blocked ? [] : activeConversation.typingNames}
-        onRetryMessage={handleRetry}
-      />
-      {activeConversation.blockedMe ? (
-        <BlockedNotice blockedMe />
-      ) : activeConversation.blockedByMe ? (
-        <BlockedNotice blockedMe={false} onUnblock={() => {}} />
+      {activeConversation === null ? (
+        // Шапки нет: шапка — утверждение о выбранной беседе, а её нет.
+        <div className="flex flex-1 items-center justify-center px-6 text-center">
+          <p className="text-sm text-text-warm-secondary">No conversations</p>
+        </div>
       ) : (
-        <MessageComposer recipientName={activeConversation.name} onSend={handleSend} />
+        <>
+          <ChatHeader conversation={activeConversation} />
+          {activeConversation.hasMessages ? (
+            <div className="flex flex-1 flex-col items-center justify-center px-6 text-center">
+              <p className="text-sm text-text-warm-secondary">Message history isn&apos;t loaded yet.</p>
+            </div>
+          ) : (
+            <EmptyConversationState name={activeConversation.name} />
+          )}
+        </>
       )}
     </MessengerLayout>
   )

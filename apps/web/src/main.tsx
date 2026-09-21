@@ -68,9 +68,20 @@ async function start(): Promise<void> {
   await session.bootstrap(client, bootstrapDeps);
 }
 
+/**
+ * Повтор — та же загрузка, что и в `start`, а не «сброс в bootstrapping».
+ * `bootstrap` сам решает, чем закончить; второй путь выставления состояния завёл
+ * бы вторую правду о том, что значит «готово».
+ */
+function retry(): void {
+  void session.bootstrap(client, bootstrapDeps);
+}
+
+// Обёртка и её зависимости собираются здесь, а не в `App`: у компонента нет ни
+// адреса API, ни доступа к токену, и быть не должно.
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <App />
+    <App session={session} onRetry={retry} />
   </StrictMode>,
 );
 

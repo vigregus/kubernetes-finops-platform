@@ -28,6 +28,11 @@ export function ConversationListItem({ conversation, active, onSelect }: Convers
   return (
     <button
       type="button"
+      // Идентификатор беседы в разметке — не подпорка под тест: `id` уже
+      // сущность модели, а `React key` в DOM не попадает. Без атрибута приёмка
+      // опознавала бы беседу по имени, то есть по строке, которую может
+      // совпасть у двух разных бесед.
+      data-conversation-id={id}
       onClick={() => onSelect(id)}
       className={clsx(
         "group relative flex w-full items-center gap-3 rounded-xl p-3 text-left transition-all",
@@ -41,9 +46,17 @@ export function ConversationListItem({ conversation, active, onSelect }: Convers
       <div className="min-w-0 flex-1">
         <div className="mb-0.5 flex items-center justify-between">
           <span className={clsx("truncate text-sm", active ? "font-semibold" : "font-medium")}>{name}</span>
-          <span className={clsx("text-xs", active ? "font-medium text-accent-terracotta" : "text-text-warm-muted")}>
-            {lastMessageTimestamp}
-          </span>
+          {/*
+            Время рисуется под условием: `last_message` может не прийти вовсе, и
+            выдуманного «только что» у такой беседы нет. Пустая строка в этом
+            месте ничем не отличается от выдуманной — обе утверждают, что
+            сообщение было.
+          */}
+          {lastMessageTimestamp && (
+            <span className={clsx("text-xs", active ? "font-medium text-accent-terracotta" : "text-text-warm-muted")}>
+              {lastMessageTimestamp}
+            </span>
+          )}
         </div>
         {typingNames?.length ? (
           <p className="truncate text-sm font-medium text-accent-terracotta">

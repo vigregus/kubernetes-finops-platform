@@ -17,6 +17,7 @@ import {
   createApiClient,
 } from "./client"
 import type { BootstrapDependencies } from "./client"
+import { ConversationListPageFromJSON, MeFromJSON } from "./generated"
 import {
   ApiProblem,
   ServiceUnavailableError,
@@ -79,8 +80,12 @@ const PROBLEM_UNAUTHENTICATED = {
 
 function depsOf(client: ReturnType<typeof createApiClient>): BootstrapDependencies {
   return {
-    loadAccount: () => client.fetchApi(`${API_BASE_PATH}/me`, {}),
-    loadConversations: () => client.fetchApi(`${API_BASE_PATH}/conversations`, {}),
+    loadAccount: () => client.fetchApi(`${API_BASE_PATH}/me`, {}).then((response) => response.json()).then(MeFromJSON),
+    loadConversations: () =>
+      client
+        .fetchApi(`${API_BASE_PATH}/conversations`, {})
+        .then((response) => response.json())
+        .then(ConversationListPageFromJSON),
   }
 }
 
@@ -355,7 +360,36 @@ describe("развилка 401 и 503", () => {
 
     const state = await client.bootstrap(depsOf(client))
 
-    expect(state).toEqual({ kind: "ready" })
+    expect(state).toMatchObject({ kind: "ready" })
+  })
+
+  it("ready несёт данные bootstrap, а не только факт готовности", async () => {
+    // «Токен есть» и «клиент готов» — разные утверждения; но и «готов» без
+    // данных не утверждение вовсе. Композиция, которой `ready` нужен, иначе
+    // сходила бы за теми же данными второй раз — и получила бы второе понятие
+    // готовности, способное разойтись с первым.
+    const stub = createStubFetch({
+      [`${API_BASE_PATH}/auth/refresh`]: [jsonResponse(200, ACCESS_TOKEN)],
+      [`${API_BASE_PATH}/me`]: [jsonResponse(200, { user_id: "u1", display_name: "David Miller" })],
+      [`${API_BASE_PATH}/conversations`]: [
+        jsonResponse(200, {
+          items: [{ conversation_id: "c1", type: "direct", participants: [], created_at: "2026-09-01T00:00:00Z" }],
+          next_before_activity_at: null,
+          next_before_conversation_id: null,
+        }),
+      ],
+    })
+    const client = createApiClient({ fetchImpl: stub.fetchImpl as never, deviceId: () => "device-a" })
+
+    const state = await client.bootstrap(depsOf(client))
+
+    expect(state.kind).toBe("ready")
+    if (state.kind !== "ready") return
+
+    // Идентификатор зрителя нужен адаптеру бесед: без него «собеседник»
+    // неотличим от самого зрителя (B9г).
+    expect(state.account.userId).toBe("u1")
+    expect(state.conversations.items.map((conversation) => conversation.conversationId)).toEqual(["c1"])
   })
 
   it("503 на /me — транзитное состояние, ready не выставляется", async () => {
@@ -398,7 +432,7 @@ describe("развилка 401 и 503", () => {
     })
     const client = createApiClient({ fetchImpl: stub.fetchImpl as never, deviceId: () => "device-a" })
 
-    await expect(client.bootstrap(depsOf(client))).resolves.toEqual({ kind: "ready" })
+    await expect(client.bootstrap(depsOf(client))).resolves.toMatchObject({ kind: "ready" })
 
     const error = await client.fetchApi(`${API_BASE_PATH}/me`, {}).catch((e: unknown) => e)
 
@@ -422,7 +456,7 @@ describe("развилка 401 и 503", () => {
     })
     const client = createApiClient({ fetchImpl: stub.fetchImpl as never, deviceId: () => "device-a" })
 
-    await expect(client.bootstrap(depsOf(client))).resolves.toEqual({ kind: "ready" })
+    await expect(client.bootstrap(depsOf(client))).resolves.toMatchObject({ kind: "ready" })
 
     const error = await client.fetchApi(`${API_BASE_PATH}/me`, {}).catch((e: unknown) => e)
 
@@ -457,7 +491,7 @@ describe("развилка 401 и 503", () => {
     })
     const client = createApiClient({ fetchImpl: stub.fetchImpl as never, deviceId: () => "device-a" })
 
-    await expect(client.bootstrap(depsOf(client))).resolves.toEqual({ kind: "ready" })
+    await expect(client.bootstrap(depsOf(client))).resolves.toMatchObject({ kind: "ready" })
     expect(client.hasSession()).toBe(true)
 
     const transient = await client.fetchApi(`${API_BASE_PATH}/me`, {}).catch((e: unknown) => e)
@@ -495,7 +529,7 @@ describe("развилка 401 и 503", () => {
     })
     const client = createApiClient({ fetchImpl: stub.fetchImpl as never, deviceId: () => "device-a" })
 
-    await expect(client.bootstrap(depsOf(client))).resolves.toEqual({ kind: "ready" })
+    await expect(client.bootstrap(depsOf(client))).resolves.toMatchObject({ kind: "ready" })
     await expect(client.bootstrap(depsOf(client))).resolves.toEqual({
       kind: "transient-error",
       traceId: undefined,
@@ -568,7 +602,7 @@ describe("повтор после обмена", () => {
     })
     const client = createApiClient({ fetchImpl: stub.fetchImpl as never, deviceId: () => "device-a" })
 
-    await expect(client.bootstrap(depsOf(client))).resolves.toEqual({ kind: "ready" })
+    await expect(client.bootstrap(depsOf(client))).resolves.toMatchObject({ kind: "ready" })
 
     const before = stub.calls.length
     const error = await client.fetchApi(`${API_BASE_PATH}/me`, {}).catch((e: unknown) => e)

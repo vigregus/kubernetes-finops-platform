@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { createApiClient } from "../../api/client";
-import type { FetchAPI } from "../../api/generated";
+import { ConversationListPageFromJSON, MeFromJSON, type FetchAPI } from "../../api/generated";
 import { installStorageForJsdom } from "../../test-support/storage";
 import { DEVICE_ID_KEY, ensureDeviceId, loadDeviceId, saveDeviceId } from "./deviceId";
 
@@ -71,6 +71,31 @@ const BOOTSTRAP_OK: Record<string, Route> = {
   "/api/v1/conversations": () => jsonResponse(200, { items: [] }),
 };
 
+/**
+ * Данные загрузки — настоящие DTO, собранные конвертерами.
+ *
+ * `ready` наступает только вместе с ответами `/me` и `/conversations`
+ * (B9а), поэтому загрузка обязана их **отдать**: заглушка, возвращающая
+ * `void`, проверяла бы обёртку, которой нечего сообщить о готовности.
+ * Собираются конвертерами, а не литералами, — по проводу, в snake_case.
+ */
+const ACCOUNT = MeFromJSON({
+  user_id: "user-1",
+  display_name: "Ann",
+  email: "ann@example.com",
+  email_verified: true,
+  capabilities: ["read"],
+});
+const CONVERSATIONS = ConversationListPageFromJSON({
+  items: [],
+  next_before_activity_at: null,
+  next_before_conversation_id: null,
+});
+const bootstrapDeps = {
+  loadAccount: () => Promise.resolve(ACCOUNT),
+  loadConversations: () => Promise.resolve(CONVERSATIONS),
+};
+
 describe("хранилище идентификатора устройства", () => {
   beforeEach(() => {
     window.localStorage.clear();
@@ -103,7 +128,7 @@ describe("хранилище идентификатора устройства",
 
     // Порядок как в `main.tsx`: сначала идентификатор, потом первый запрос.
     const deviceId = ensureDeviceId(window.localStorage, () => "device-created");
-    await client.bootstrap({ loadAccount: () => Promise.resolve(), loadConversations: () => Promise.resolve() });
+    await client.bootstrap(bootstrapDeps);
 
     expect(stub.calls[0]?.path).toBe("/api/v1/auth/refresh");
     expect(stub.calls[0]?.headers.get("X-Device-Id")).toBe(deviceId);
@@ -116,7 +141,7 @@ describe("хранилище идентификатора устройства",
     const client = createClient(stub.fetchImpl);
     ensureDeviceId(window.localStorage, () => "device-a");
 
-    await client.bootstrap({ loadAccount: () => Promise.resolve(), loadConversations: () => Promise.resolve() });
+    await client.bootstrap(bootstrapDeps);
     await client.refreshAccessToken();
 
     expect(Object.keys(window.localStorage)).toEqual([DEVICE_ID_KEY]);
@@ -137,7 +162,7 @@ describe("хранилище идентификатора устройства",
     const client = createClient(stub.fetchImpl);
     ensureDeviceId(window.localStorage, () => "device-stale");
 
-    await client.bootstrap({ loadAccount: () => Promise.resolve(), loadConversations: () => Promise.resolve() });
+    await client.bootstrap(bootstrapDeps);
     expect(loadDeviceId(window.localStorage)).toBe("device-server");
 
     await client.fetchApi("/api/v1/me/after");

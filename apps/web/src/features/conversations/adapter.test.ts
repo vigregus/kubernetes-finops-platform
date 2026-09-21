@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
+import { ConversationListPageFromJSON } from "../../api/generated"
 import type { Conversation as ConversationDto, Message as MessageDto, UserSummary } from "../../api/generated"
-import { adaptConversation } from "./adapter"
+import { adaptConversation, adaptConversations } from "./adapter"
 
 /**
  * Часы и зона — параметры, а не момент и место прогона: иначе проверка
@@ -139,11 +140,58 @@ describe("таблица соответствия /conversations", () => {
     expect(withoutMark.lastSeenAt).toBeUndefined()
   })
 
+  it("наличие последнего сообщения — признак, а не вывод из пустоты превью", () => {
+    // Главная панель говорит «No messages yet» только тогда, когда сообщений
+    // действительно нет. Выводить это из `lastMessagePreview === ""` значило бы
+    // держать утверждение на договорённости таблицы превью «пустая строка
+    // бывает только у беседы без сообщений» — то есть на выводе, а не на факте,
+    // который сервер сообщил ключом `last_message`.
+    expect(adapt(conversation({ lastMessage: message() })).hasMessages).toBe(true)
+    expect(adapt(conversation()).hasMessages).toBe(false)
+  })
+
+  it("страница целиком адаптируется одним и тем же зрителем", () => {
+    // Вход задан **по проводу**, в snake_case: `ConversationListPageFromJSON`
+    // читает `display_name` и `user_id`, и подмена регистра дала бы здесь
+    // «неразбираемое имя», то есть тест проверял бы собственную ошибку.
+    const page = ConversationListPageFromJSON({
+      items: [
+        {
+          conversation_id: "c1",
+          type: "direct",
+          participants: [
+            { user_id: VIEWER, display_name: "David Miller" },
+            { user_id: ANNA, display_name: "Anna Petrova" },
+          ],
+          created_at: "2026-09-01T00:00:00Z",
+        },
+        {
+          conversation_id: "c2",
+          type: "group",
+          participants: [
+            { user_id: VIEWER, display_name: "David Miller" },
+            { user_id: MARCUS, display_name: "Marcus Chen" },
+          ],
+          created_at: "2026-09-02T00:00:00Z",
+        },
+      ],
+      next_before_activity_at: null,
+      next_before_conversation_id: null,
+    })
+
+    // Зритель один на всю страницу: адаптация идёт после `/me`, а не до него.
+    expect(adaptConversations(page, VIEWER, NOW, EN).map((item) => item.name)).toEqual([
+      "Anna Petrova",
+      "Marcus Chen",
+    ])
+  })
+
   it("модель не несёт полей, о которых сервер молчит", () => {
     // Точный состав, а не «нет чего-то конкретного»: присутствие, набор
     // печатающих, блокировки и аватар источника не имеют, и появление любого
     // из них в модели — это утверждение, которого сервер не делал.
     expect(Object.keys(adapt(conversation({ lastMessage: message() }))).sort()).toEqual([
+      "hasMessages",
       "id",
       "lastMessagePreview",
       "lastMessageTimestamp",

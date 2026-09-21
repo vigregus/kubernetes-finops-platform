@@ -15,6 +15,10 @@ const base = {
   presence: "online" as const,
   lastMessagePreview: "That works! Let's review the finalized slides tomorrow.",
   lastMessageTimestamp: "14:22",
+  // Признак идёт парой с остальными данными: фикстура изображает беседу, о
+  // последнем сообщении которой сервер сообщил. У истории ниже он меняется
+  // вместе с ними, а не отдельно.
+  hasMessages: true,
 }
 
 export const Active: Story = { args: { conversation: base, active: true, onSelect: () => {} } }
@@ -29,7 +33,17 @@ export const DeletedPreview: Story = {
   args: { conversation: { ...base, name: "Daniel Kim", lastMessagePreview: "Message deleted", previewDeleted: true }, onSelect: () => {} },
 }
 export const NoMessagesYet: Story = {
-  args: { conversation: { ...base, name: "New Hire Onboarding", lastMessagePreview: "", lastMessageTimestamp: "" }, onSelect: () => {} },
+  args: {
+    conversation: {
+      ...base,
+      name: "New Hire Onboarding",
+      lastMessagePreview: "",
+      lastMessageTimestamp: "",
+      // Единственная история, где сервер сообщил, что последнего сообщения нет.
+      hasMessages: false,
+    },
+    onSelect: () => {},
+  },
 }
 export const InitialsFallback: Story = {
   args: { conversation: { ...base, name: "Elena Rostova", initials: "ER" }, onSelect: () => {} },

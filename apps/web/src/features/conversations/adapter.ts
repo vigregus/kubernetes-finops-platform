@@ -17,7 +17,12 @@
  * необязательное `lastMessageTimestamp` и пустое превью у беседы без сообщений.
  */
 
-import type { Conversation as ConversationDto, Message as MessageDto, UserSummary } from "../../api/generated"
+import type {
+  Conversation as ConversationDto,
+  ConversationListPage,
+  Message as MessageDto,
+  UserSummary,
+} from "../../api/generated"
 import type { Conversation } from "../../shared/lib/types"
 import { formatConversationTimestamp, type TimestampFormatOptions } from "./formatTimestamp"
 
@@ -117,10 +122,36 @@ export function adaptConversation(
     lastMessagePreview: previewOf(lastMessage),
     previewDeleted: Boolean(lastMessage?.deletedAt),
 
+    // Отдельный признак, а не «превью непустое»: от него зависит, можно ли
+    // говорить «No messages yet», и держать это на договорённости таблицы
+    // превью значило бы выводить утверждение о сообщениях из их текста.
+    hasMessages: lastMessage !== undefined,
+
     // Времени нет ровно тогда, когда нет сообщения: у беседы без `last_message`
     // выдуманного «только что» не бывает.
     lastMessageTimestamp: lastMessage
       ? formatConversationTimestamp(lastMessage.createdAt, now, timestampOptions)
       : undefined,
   }
+}
+
+/**
+ * Страница `GET /conversations` → модели списка.
+ *
+ * Отдельная функция, а не `page.items.map(...)` на месте вызова: зритель у
+ * страницы **один**, и он обязан быть тем же для всех её бесед — иначе одна
+ * беседа показала бы собеседника, а соседняя в той же строке — самого
+ * зрителя. Здесь же названо и правило порядка: адаптация идёт **после** `/me`,
+ * потому что до него `currentUserId` взять неоткуда.
+ *
+ * `page.nextBefore*` не читаются: пагинация в объём G3-005 не входит, и
+ * притвориться, что страница — это весь список, интерфейс не должен (B28).
+ */
+export function adaptConversations(
+  page: ConversationListPage,
+  currentUserId: string,
+  now: Date,
+  timestampOptions: TimestampFormatOptions = {},
+): Conversation[] {
+  return page.items.map((dto) => adaptConversation(dto, currentUserId, now, timestampOptions))
 }

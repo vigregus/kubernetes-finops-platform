@@ -8,7 +8,7 @@
  * (`_device_for`, `services/identity.py`) — то есть строка в `devices`
  * на каждый такой вызов.
  */
-import { Configuration, type FetchAPI } from "./generated";
+import { Configuration, type ConversationListPage, type FetchAPI, type Me } from "./generated";
 import {
   ApiProblem,
   ServiceUnavailableError,
@@ -76,7 +76,20 @@ export type BootState =
   | { readonly kind: "session-expired" }
   /** Сервис недоступен — повторяемое состояние, повод для кнопки «повторить». */
   | { readonly kind: "transient-error"; readonly traceId: string | undefined }
-  | { readonly kind: "ready" };
+  /**
+   * Готовность — утверждение о **данных**, а не о токене.
+   *
+   * Поэтому в состоянии лежат сами ответы `/me` и `/conversations`, а не
+   * признак «мы их получили»: композиции нужны и оба, и место, где они
+   * разбираются один раз. Иначе она либо ходила бы за ними второй раз, либо
+   * держала второй признак готовности, способный разойтись с этим.
+   *
+   * Тип именно транспортный (`Me`, `ConversationListPage`), а не модель
+   * интерфейса: адаптация к модели — дело `features/**`, и она обязана видеть
+   * то, что сервер действительно сказал, включая поля, которых интерфейс не
+   * показывает.
+   */
+  | { readonly kind: "ready"; readonly account: Me; readonly conversations: ConversationListPage };
 
 /** Тело `AccessToken` по проводу. Имена — как в контракте, до конвертера. */
 interface AccessTokenBody {
@@ -84,9 +97,16 @@ interface AccessTokenBody {
   readonly device_id?: string;
 }
 
+/**
+ * Данные, без которых `ready` не наступает.
+ *
+ * Возвращаемые типы — транспортные, а не `unknown`: без этого `ready` пришлось
+ * бы наполнять приведением, и обещание «готов только с данными» держалось бы
+ * на честном слове.
+ */
 export interface BootstrapDependencies {
-  readonly loadAccount: () => Promise<unknown>;
-  readonly loadConversations: () => Promise<unknown>;
+  readonly loadAccount: () => Promise<Me>;
+  readonly loadConversations: () => Promise<ConversationListPage>;
 }
 
 export interface ApiClientOptions {
@@ -327,17 +347,21 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
       return { kind: "unauthenticated" };
     }
 
+    let account: Me;
+    let conversations: ConversationListPage;
     try {
-      await Promise.all([deps.loadAccount(), deps.loadConversations()]);
+      [account, conversations] = await Promise.all([deps.loadAccount(), deps.loadConversations()]);
     } catch (error) {
       return bootstrapFailure(error);
     }
 
-    // `ready` — только здесь, после данных. «Токен есть» и «клиент готов» —
-    // разные утверждения: между ними стоят `/me` и `/conversations`, и любой
-    // из них может ответить `503`.
+    // `ready` — только здесь, после данных, и вместе с ними. «Токен есть» и
+    // «клиент готов» — разные утверждения: между ними стоят `/me` и
+    // `/conversations`, и любой из них может ответить `503`. Запросы идут
+    // параллельно, но адаптация к модели — после получения **обоих**: без
+    // `user_id` из `/me` «собеседник» в списке неотличим от самого зрителя.
     sessionEstablished = true;
-    return { kind: "ready" };
+    return { kind: "ready", account, conversations };
   }
 
   function bootstrapFailure(error: unknown): BootState {

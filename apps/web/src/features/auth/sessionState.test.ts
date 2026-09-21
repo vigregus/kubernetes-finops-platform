@@ -7,6 +7,7 @@
 import { describe, expect, it } from "vitest"
 
 import type { ApiClient, BootState } from "../../api/client"
+import { ConversationListPageFromJSON, MeFromJSON } from "../../api/generated"
 import { createSessionState } from "./sessionState"
 
 /** Подделка зависимости: хранилищу нужен один метод, а не весь клиент. */
@@ -14,9 +15,20 @@ function clientReturning(state: BootState): ApiClient {
   return { bootstrap: async () => state } as unknown as ApiClient
 }
 
+/** Данные `ready` — настоящие DTO, а не приведение: состояние несёт ответы сервера. */
+const READY: BootState = {
+  kind: "ready",
+  account: MeFromJSON({ user_id: "u1", display_name: "David Miller" }),
+  conversations: ConversationListPageFromJSON({
+    items: [],
+    next_before_activity_at: null,
+    next_before_conversation_id: null,
+  }),
+}
+
 const NEVER_CALLED = {
-  loadAccount: () => Promise.resolve(undefined),
-  loadConversations: () => Promise.resolve(undefined),
+  loadAccount: () => Promise.reject(new Error("bootstrap-данные здесь не загружаются")),
+  loadConversations: () => Promise.reject(new Error("bootstrap-данные здесь не загружаются")),
 }
 
 describe("состояние загрузки", () => {
@@ -33,9 +45,7 @@ describe("состояние загрузки", () => {
   })
 
   it("исход bootstrap возвращается вызывающему", async () => {
-    const ready: BootState = { kind: "ready" }
-
-    await expect(createSessionState().bootstrap(clientReturning(ready), NEVER_CALLED)).resolves.toEqual(ready)
+    await expect(createSessionState().bootstrap(clientReturning(READY), NEVER_CALLED)).resolves.toEqual(READY)
   })
 
   it("смена состояния уведомляет подписчика", async () => {
@@ -45,7 +55,7 @@ describe("состояние загрузки", () => {
       notified += 1
     })
 
-    await state.bootstrap(clientReturning({ kind: "ready" }), NEVER_CALLED)
+    await state.bootstrap(clientReturning(READY), NEVER_CALLED)
 
     expect(notified).toBe(1)
   })
@@ -58,7 +68,7 @@ describe("состояние загрузки", () => {
     })
 
     unsubscribe()
-    await state.bootstrap(clientReturning({ kind: "ready" }), NEVER_CALLED)
+    await state.bootstrap(clientReturning(READY), NEVER_CALLED)
 
     expect(notified).toBe(0)
   })

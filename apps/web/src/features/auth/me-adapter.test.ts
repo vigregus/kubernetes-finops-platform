@@ -64,6 +64,14 @@ describe("таблица соответствия /me", () => {
     expect(adaptMe(meWith("")).user.email).toBeUndefined();
   });
 
+  it("зритель несёт свой user_id: иначе собеседник неотличим от него самого", () => {
+    // `GET /conversations` отдаёт участников **вместе со зрителем**, поэтому
+    // адаптеру бесед нужен именно этот идентификатор, а не догадка о том, кто
+    // из участников «первый». И лежит он не в `user`: `CurrentUser` описывает
+    // то, что показывают, а идентификатор — то, чем сравнивают.
+    expect(adaptMe(MeFromJSON(wire())).userId).toBe("user-1");
+  });
+
   it("возможность не превращается в признак модели", () => {
     const viewer = adaptMe(
       MeFromJSON(wire({ capabilities: ["read", "send_message", "start_conversation"] })),

@@ -30,6 +30,17 @@ export type Capability = Me["capabilities"][number];
  * `canStartConversation`, то есть в интерфейс, нарисованный из авторизации.
  */
 export interface Viewer {
+  /**
+   * Кто смотрит — `user_id` из `/me`.
+   *
+   * Не часть `user`: `CurrentUser` описывает то, что **показывают**, а
+   * идентификатор нужен, чтобы **сравнивать**. Он здесь потому, что
+   * `GET /conversations` возвращает участников вместе со зрителем
+   * (`repositories/conversations.py:87-95`), и без него «собеседник» в личной
+   * беседе неотличим от самого зрителя: подстановка первого участника
+   * показала бы человеку его же имя под именем собеседника.
+   */
+  readonly userId: string;
   readonly user: CurrentUser;
   readonly capabilities: readonly Capability[];
 }
@@ -44,6 +55,7 @@ export function adaptMe(dto: Me): Viewer {
   const email = dto.email as string | null | undefined;
 
   return {
+    userId: dto.userId,
     user: {
       name: dto.displayName,
       // Пустая строка — тоже отсутствие адреса: она проходит через тип и дошла
