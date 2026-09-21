@@ -256,6 +256,36 @@ def realtime_delivery(outcome: str) -> None:
     REALTIME_DELIVERY.labels(service=SERVICE, outcome=outcome).inc()
 
 
+# --- присутствие ------------------------------------------------------------
+
+# Сколько людей в сети и какова их доля от заведённых учётных записей.
+# Обе снимаются одним тактом уборщика (`workers/presence_sweeper.py`),
+# поэтому доля не бывает собрана из двух разных моментов.
+#
+# Доля объявлена матрицей требований (`PRS`: «доля онлайн»), и до этого
+# гейта её не существовало ни в каталоге метрик, ни в коде — по той же
+# причине, по которой не было и самого присутствия.
+#
+# Числитель — агрегат по **пользователю**, а не по соединению: два
+# устройства одного человека дают единицу, а не двойку (`PRS-001`).
+PRESENCE_ONLINE = Gauge(
+    "messenger_presence_online_users",
+    "Пользователи с соединением внутри окна живости",
+    ["service"],
+)
+
+PRESENCE_ONLINE_SHARE = Gauge(
+    "messenger_presence_online_share",
+    "Доля пользователей в сети от заведённых учётных записей",
+    ["service"],
+)
+
+
+def presence_online(*, online: int, share: float) -> None:
+    PRESENCE_ONLINE.labels(service=SERVICE).set(online)
+    PRESENCE_ONLINE_SHARE.labels(service=SERVICE).set(share)
+
+
 # --- сквозной путь сообщения: T_commit / T_outbox / T_kafka / T_consumer /
 # T_realtime / T_delivery (docs/messenger/06-observability.md, часть 1) ------
 #

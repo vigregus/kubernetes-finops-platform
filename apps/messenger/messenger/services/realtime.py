@@ -12,7 +12,7 @@ from messenger.adapters.centrifugo import CentrifugoClient
 from messenger.domain.identity import TokenRejection
 from messenger.domain.ids import DeviceId, SessionId, UserId
 from messenger.repositories import conversations as conversation_repo
-from messenger.repositories import sessions
+from messenger.repositories import sessions, users
 from messenger.services import identity
 
 
@@ -110,14 +110,25 @@ async def connect_from_ticket(
         return ProxyConnectResult()
     channels = tuple(str(channel) for channel in claims["channels"])
 
-    accepted = await sessions.register_realtime_connection(
-        conn,
-        session_id=session_id,
-        user_id=user_id,
-        client_id=client_id,
-    )
-    if not accepted:
-        return ProxyConnectResult()
+    # Регистрация соединения и отметка «был в сети» — одна транзакция.
+    # Не ради аккуратности: `now()` в Postgres постоянен внутри неё, и оба
+    # значения берутся из одного момента, поэтому отметка равна в точности
+    # времени подтверждённого продления. Врозь они разошлись бы на время
+    # между запросами, и тождество «last_seen_at = MAX(refreshed_at)»
+    # перестало бы быть точным.
+    async with conn.transaction():
+        accepted = await sessions.register_realtime_connection(
+            conn,
+            session_id=session_id,
+            user_id=user_id,
+            client_id=client_id,
+        )
+        if not accepted:
+            return ProxyConnectResult()
+        # Отметка ставится только подтверждённой жизни: отказ регистрации
+        # означает, что сессия отозвана или истекла, и «был в сети» в этот
+        # момент было бы выдумкой.
+        await users.touch_last_seen(conn, user_id=user_id)
     expire_at = int(
         (datetime.now(UTC) + timedelta(seconds=realtime.settings.token_ttl_seconds)).timestamp()
     )
@@ -138,7 +149,16 @@ async def refresh_connection(
     client_id: str,
     realtime: CentrifugoClient | None,
 ) -> int | None:
-    """Продлевает соединение либо просит Centrifugo закрыть его."""
+    """Продлевает соединение либо просит Centrifugo закрыть его.
+
+    Продление — тот же heartbeat, что и подключение: именно оно двигает
+    `refreshed_at`, по которому считается присутствие, и оно же подтверждает
+    жизнь для отметки «был в сети». `None` в ответе означает «продлевать
+    нечего» — сессия отозвана, истекла или строку соединения успел убрать
+    уборщик; прокси отвечает `expired`, и Centrifugo закрывает соединение.
+    Это честный исход: раз клиент не продлевался дольше окна, сервер
+    перестал за него ручаться, а клиент переподключится новым ticket'ом.
+    """
     if realtime is None:
         return None
     try:
@@ -146,9 +166,12 @@ async def refresh_connection(
         sid = SessionId(uuid.UUID(session_id))
     except ValueError:
         return None
-    alive = await sessions.refresh_realtime_connection(
-        conn, session_id=sid, user_id=uid, client_id=client_id
-    )
+    async with conn.transaction():
+        alive = await sessions.refresh_realtime_connection(
+            conn, session_id=sid, user_id=uid, client_id=client_id
+        )
+        if alive:
+            await users.touch_last_seen(conn, user_id=uid)
     if not alive:
         return None
     return int(
@@ -179,10 +202,21 @@ async def register_connection(
         return RegisterConnectionResult(
             rejection=auth.rejection or TokenRejection.MISSING_CLAIM
         )
-    registered = await sessions.register_realtime_connection(
-        conn,
-        session_id=auth.session.session_id,
-        user_id=auth.user.user_id,
-        client_id=client_id,
-    )
+    # Транзакция здесь по той же причине, что и у connect-proxy: отметка
+    # и `refreshed_at` обязаны прийти из одного `now()`, иначе тождество
+    # «`last_seen_at` есть максимум подтверждённых продлений» перестаёт
+    # быть точным — а проверить его на этом входе тоже обязано быть можно.
+    async with conn.transaction():
+        registered = await sessions.register_realtime_connection(
+            conn,
+            session_id=auth.session.session_id,
+            user_id=auth.user.user_id,
+            client_id=client_id,
+        )
+        if registered:
+            # Тот же путь подтверждения жизни, что и у connect-proxy: маршрут
+            # регистрации — второй вход в ту же таблицу, и разойтись отметкам
+            # на двух входах значило бы, что «был в сети» зависит от того,
+            # каким маршрутом клиент подключился.
+            await users.touch_last_seen(conn, user_id=auth.user.user_id)
     return RegisterConnectionResult(registered=registered)

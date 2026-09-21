@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
+from datetime import datetime
 
 import asyncpg
 
@@ -74,6 +76,80 @@ async def fetch_user_by_external_id(
         external_id,
     )
     return _to_user(row) if row else None
+
+
+async def fetch_last_seen_at(
+    conn: asyncpg.Connection, *, user_ids: Sequence[UserId]
+) -> dict[UserId, datetime]:
+    """Отметки «был в сети» на пачку пользователей. Отсутствие ключа — «ни разу».
+
+    Пачкой, а не по одному: вызывающий — маршрут создания беседы, где
+    участников двое, но правило чтения то же, что у списка, и второй способ
+    читать те же отметки разошёлся бы с первым.
+
+    Отметка **не** подставляется умолчанием: пользователь, ни разу не
+    подтвердивший соединение, в карту не попадает вовсе. `NULL` в ответе и
+    отсутствие ключа означали бы разное — «неизвестно с какого времени»
+    против «не был», — и свести их здесь значило бы выдумать факт.
+
+    Пустой список — пустая карта без похода в базу: `= ANY('{}')` вернул бы
+    то же самое, но за соединение из пула, а вызов с пустым списком
+    законен (беседа, из которой все вышли).
+    """
+    if not user_ids:
+        return {}
+    rows = await conn.fetch(
+        """
+        SELECT user_id, last_seen_at
+          FROM users
+         WHERE user_id = ANY($1::uuid[])
+           AND last_seen_at IS NOT NULL
+        """,
+        list(user_ids),
+    )
+    return {UserId(row["user_id"]): row["last_seen_at"] for row in rows}
+
+
+async def count_users(conn: asyncpg.Connection) -> int:
+    """Сколько учётных записей заведено. Знаменатель доли онлайн.
+
+    Надгробия не считаются: у стёртого профиля соединений быть не может
+    (стирание отзывает сессии), и держать его в знаменателе значило бы
+    занижать долю на каждого, кто ушёл из системы навсегда.
+    """
+    row = await conn.fetchrow("SELECT count(*) AS total FROM users WHERE deleted_at IS NULL")
+    return int(row["total"]) if row is not None else 0
+
+
+async def touch_last_seen(conn: asyncpg.Connection, *, user_id: UserId) -> None:
+    """Отмечает подтверждённую жизнь пользователя. Монотонно.
+
+    Вызывается в той же транзакции, что и upsert соединения
+    (`services/realtime.py`), поэтому отметка — это в точности время
+    того продления, которое её вызвало: `now()` в Postgres постоянен
+    внутри транзакции, и оба значения берутся из одного источника.
+
+    `GREATEST`, а не присваивание: два устройства одного человека
+    продлеваются независимо, и запись «как есть» позволила бы более
+    старой транзакции затереть более новую отметку. `NULL` в `GREATEST`
+    игнорируется — «ни разу не был» становится первым подтверждением
+    без отдельной ветки.
+
+    Надгробие отметку не получает: стирание не должно оставлять в базе
+    следов активности человека, которого в системе больше нет. Условие
+    стоит в самом запросе, а не проверкой до него: проверка перед
+    изменением — это два действия, между которыми успевает вклиниться
+    стирание.
+    """
+    await conn.execute(
+        """
+        UPDATE users
+           SET last_seen_at = GREATEST(last_seen_at, now())
+         WHERE user_id = $1
+           AND deleted_at IS NULL
+        """,
+        user_id,
+    )
 
 
 async def ensure_user(

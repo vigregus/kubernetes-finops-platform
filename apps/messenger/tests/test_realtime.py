@@ -56,6 +56,33 @@ def _auth() -> identity.AuthResult:
     )
 
 
+class _Transaction:
+    async def __aenter__(self) -> _Transaction:
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+
+class Connection:
+    """Соединение, умеющее транзакцию, и журнал вызовов.
+
+    `None` вместо него здесь больше не годится: регистрация соединения
+    и отметка «был в сети» идут **одной** транзакцией, и её отсутствие —
+    предмет проверки, а не деталь стенда. Журнал ведётся по той же причине,
+    по которой у соседних сервисов: предмет — порядок, а не набор вызовов.
+    """
+
+    def __init__(self) -> None:
+        self.transactions = 0
+        self.calls: list[str] = []
+
+    def transaction(self) -> _Transaction:
+        self.transactions += 1
+        self.calls.append("transaction")
+        return _Transaction()
+
+
 class FakeRealtime:
     """Отдаёт фиксированный токен; срок записывается для проверки."""
 
@@ -82,6 +109,17 @@ def _беседы(monkeypatch, ids):
         return list(ids)
 
     monkeypatch.setattr(conversation_repo, "list_active_conversation_ids", _list)
+
+
+def _отметки(monkeypatch) -> list[UserId]:
+    """Подменяет отметку «был в сети»: проверяется её вызов и порядок, не SQL."""
+    seen: list[UserId] = []
+
+    async def _touch(conn, *, user_id):
+        seen.append(user_id)
+
+    monkeypatch.setattr(service.users, "touch_last_seen", _touch)
+    return seen
 
 
 def test_выдача_токена_на_личный_канал(monkeypatch):
@@ -167,14 +205,17 @@ def test_привязка_соединения_к_своей_сессии(monkey
 
     monkeypatch.setattr(identity, "authenticate", _authenticate)
     monkeypatch.setattr(service.sessions, "register_realtime_connection", _set)
+    _отметки(monkeypatch)
 
+    conn = Connection()
     result = asyncio.run(service.register_connection(
-        None, token="token", client_id="centrifugo-client-1", keys=None, settings=None,
+        conn, token="token", client_id="centrifugo-client-1", keys=None, settings=None,
     ))
     assert result.ok and result.registered
     assert seen["session_id"] == SESSION_ID
     assert seen["user_id"] == USER_ID
     assert seen["client_id"] == "centrifugo-client-1"
+    assert conn.transactions == 1
 
 
 def test_привязка_соединения_при_отказе_токена(monkeypatch):
@@ -203,12 +244,14 @@ def test_привязка_к_уже_отозванной_сессии_не_ош�
 
     monkeypatch.setattr(identity, "authenticate", _authenticate)
     monkeypatch.setattr(service.sessions, "register_realtime_connection", _set)
+    marks = _отметки(monkeypatch)
 
     result = asyncio.run(service.register_connection(
-        None, token="token", client_id="c1", keys=None, settings=None,
+        Connection(), token="token", client_id="c1", keys=None, settings=None,
     ))
     # Не отказ токена: доступ уже отрезан отзывом, привязка просто не нужна.
     assert result.ok and not result.registered
+    assert marks == []
 
 
 def test_connect_proxy_регистрирует_client_до_допуска(monkeypatch):
@@ -219,8 +262,11 @@ def test_connect_proxy_регистрирует_client_до_допуска(monke
         return True
 
     monkeypatch.setattr(service.sessions, "register_realtime_connection", _register)
+    marks = _отметки(monkeypatch)
+
+    conn = Connection()
     result = asyncio.run(service.connect_from_ticket(
-        None,
+        conn,
         ticket="connect-token",
         client_id="client-tab-1",
         realtime=FakeRealtime(),
@@ -230,6 +276,9 @@ def test_connect_proxy_регистрирует_client_до_допуска(monke
     assert result.session_id == str(SESSION_ID)
     assert result.channels == (f"user:{USER_ID}",)
     assert seen["client_id"] == "client-tab-1"
+    # Отметка подтверждённой жизни — в том же такте, что и регистрация.
+    assert marks == [USER_ID]
+    assert conn.transactions == 1
 
 
 def test_connect_proxy_не_принимает_отозванную_сессию(monkeypatch):
@@ -237,13 +286,19 @@ def test_connect_proxy_не_принимает_отозванную_сессию
         return False
 
     monkeypatch.setattr(service.sessions, "register_realtime_connection", _register)
+    marks = _отметки(monkeypatch)
+
     result = asyncio.run(service.connect_from_ticket(
-        None,
+        Connection(),
         ticket="connect-token",
         client_id="client-after-logout",
         realtime=FakeRealtime(),
     ))
     assert not result.accepted
+    # Отказ регистрации — это отозванная или истёкшая сессия, и «был в сети»
+    # в этот момент было бы выдумкой: отметка ставится только подтверждённой
+    # жизни, а не каждой попытке подключиться.
+    assert marks == []
 
 
 def test_connect_proxy_не_принимает_поддельный_ticket(monkeypatch):
@@ -251,10 +306,76 @@ def test_connect_proxy_не_принимает_поддельный_ticket(monke
         raise AssertionError("репозиторий вызван для поддельного ticket")
 
     monkeypatch.setattr(service.sessions, "register_realtime_connection", _never)
+    monkeypatch.setattr(service.users, "touch_last_seen", _never)
+
     result = asyncio.run(service.connect_from_ticket(
-        None,
+        Connection(),
         ticket="forged",
         client_id="client",
         realtime=FakeRealtime(),
     ))
     assert not result.accepted
+
+
+def test_продление_продлевает_и_отметку(monkeypatch):
+    """Продление — тот же heartbeat: оно двигает и `refreshed_at`, и отметку."""
+    async def _refresh(conn, **kwargs):
+        return True
+
+    monkeypatch.setattr(service.sessions, "refresh_realtime_connection", _refresh)
+    marks = _отметки(monkeypatch)
+
+    conn = Connection()
+    expire_at = asyncio.run(service.refresh_connection(
+        conn,
+        user_id=str(USER_ID),
+        session_id=str(SESSION_ID),
+        client_id="client-tab-1",
+        realtime=FakeRealtime(),
+    ))
+    assert expire_at is not None
+    assert marks == [USER_ID]
+    assert conn.transactions == 1
+
+
+def test_продление_мёртвого_соединения_не_ставит_отметку(monkeypatch):
+    """Убранная уборщиком строка — не подтверждение жизни.
+
+    Прокси ответит `expired`, и Centrifugo закроет соединение: раз клиент
+    не продлевался дольше окна, сервер за него больше не ручается. Ставить
+    здесь отметку значило бы вернуть «был в сети» в момент, когда сервер
+    как раз перестал это утверждать.
+    """
+    async def _refresh(conn, **kwargs):
+        return False
+
+    monkeypatch.setattr(service.sessions, "refresh_realtime_connection", _refresh)
+    marks = _отметки(monkeypatch)
+
+    result = asyncio.run(service.refresh_connection(
+        Connection(),
+        user_id=str(USER_ID),
+        session_id=str(SESSION_ID),
+        client_id="client-tab-1",
+        realtime=FakeRealtime(),
+    ))
+    assert result is None
+    assert marks == []
+
+
+def test_продление_без_centrifugo_не_трогает_базу(monkeypatch):
+    """Без Centrifugo продлевать нечего: ни запроса, ни транзакции."""
+    async def _never(*args, **kwargs):
+        raise AssertionError("база тронута без настроенного Centrifugo")
+
+    monkeypatch.setattr(service.sessions, "refresh_realtime_connection", _never)
+    monkeypatch.setattr(service.users, "touch_last_seen", _never)
+
+    result = asyncio.run(service.refresh_connection(
+        None,
+        user_id=str(USER_ID),
+        session_id=str(SESSION_ID),
+        client_id="client-tab-1",
+        realtime=None,
+    ))
+    assert result is None

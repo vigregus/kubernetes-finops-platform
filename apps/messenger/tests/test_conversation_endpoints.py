@@ -64,7 +64,11 @@ def _user(user_id: UserId, name: str) -> User:
     )
 
 
-def _success(*, created: bool) -> service.CreateDirectResult:
+def _participant(user_id: UserId, name: str, *, seen: datetime | None = None) -> UserSummary:
+    return UserSummary(user_id=user_id, display_name=name, last_seen_at=seen)
+
+
+def _success(*, created: bool, seen: datetime | None = None) -> service.CreateDirectResult:
     return service.CreateDirectResult(
         conversation=Conversation(
             conversation_id=CONVERSATION_ID,
@@ -74,7 +78,13 @@ def _success(*, created: bool) -> service.CreateDirectResult:
             created_at=NOW,
             updated_at=NOW,
         ),
-        participants=(_user(ACTOR_ID, "Аня"), _user(OTHER_ID, "Борис")),
+        # `UserSummary`, а не `User`: маршрут создания собирает участников
+        # той же функцией, что и список, и стенд обязан отдавать тот же тип —
+        # иначе проверяется не то, что уезжает клиенту.
+        participants=(
+            _participant(ACTOR_ID, "Аня"),
+            _participant(OTHER_ID, "Борис", seen=seen),
+        ),
         created=created,
     )
 
@@ -125,6 +135,37 @@ def test_создание_возвращает_201_и_участников(clien
         ],
         "created_at": "2026-09-15T00:00:00Z",
     }
+
+
+def test_отметка_жизни_есть_ровно_у_тех_кто_был_в_сети(client, monkeypatch):
+    """Отсутствие ключа и `null` — разные ответы.
+
+    У Ани отметки нет вовсе, у Бориса есть. Ключ появляется только у второго:
+    «ни разу не был в сети» — это отсутствие отметки, а не отметка со
+    значением «неизвестно», и контракт объявляет поле необязательным именно
+    поэтому. `null` на месте ключа клиент прочитал бы как «время неизвестно»,
+    то есть как другую величину.
+    """
+    authenticated(monkeypatch)
+
+    async def _create(*args, **kwargs):
+        return _success(created=False, seen=NOW)
+
+    monkeypatch.setattr(service, "create_direct", _create)
+    response = client.post(
+        "/conversations",
+        json={"participant_id": str(OTHER_ID)},
+        headers={"Authorization": "Bearer token"},
+    )
+    assert response.status_code == 200
+    assert response.json()["participants"] == [
+        {"user_id": str(ACTOR_ID), "display_name": "Аня"},
+        {
+            "user_id": str(OTHER_ID),
+            "display_name": "Борис",
+            "last_seen_at": "2026-09-15T00:00:00Z",
+        },
+    ]
 
 
 def test_повтор_возвращает_200(client, monkeypatch):

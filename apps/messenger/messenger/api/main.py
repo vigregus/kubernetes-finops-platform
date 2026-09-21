@@ -1214,14 +1214,27 @@ def _user_summary(participant) -> dict[str, object]:
     один и тот же участник выглядел бы по-разному в ответе на создание
     и в списке, и заметил бы это клиент, а не сервер.
 
-    `last_seen_at` объявлен контрактом, но не отдаётся: в таблице `users`
-    такой колонки нет вовсе, и взять значение неоткуда. Поле
-    необязательное, поэтому его отсутствие законно.
+    `last_seen_at` — durable факт, а не presence: отметка времени из
+    Postgres, означающая последнее подтверждённое соединение человека.
+    Ключ появляется **только** когда значение есть, и это то же правило,
+    что у `last_message` и `unread_count`: «ни разу не был в сети» — не
+    отметка времени, и `null` на её месте был бы ответом, которого
+    контракт не объявляет (поле необязательное, а не нулевое).
+
+    «Онлайн» здесь не отдаётся вовсе и отдаваться не должен: он остаётся
+    серверным агрегатом — предикатом по времени над `realtime_connections`
+    (`domain/presence.py`), — и живёт в Postgres, а не в Redis. Redis
+    и Centrifugo тут только транспорт: по нему приходит продление, которым
+    соединение остаётся живым. Отметка же — факт, который переживает и
+    потерю realtime-слоя, и перезапуск Centrifugo.
     """
-    return {
+    body: dict[str, object] = {
         "user_id": str(participant.user_id),
         "display_name": participant.display_name,
     }
+    if participant.last_seen_at is not None:
+        body["last_seen_at"] = participant.last_seen_at
+    return body
 
 
 def _conversation_body(
