@@ -91,6 +91,7 @@ export const messagesByConversation: Record<string, ChatMessage[]> = {
   "anna-petrova": [
     {
       id: "m1",
+      seq: 1,
       authorId: "anna-petrova",
       authorName: "Anna Petrova",
       avatarUrl: annaAvatar,
@@ -100,6 +101,7 @@ export const messagesByConversation: Record<string, ChatMessage[]> = {
     },
     {
       id: "m2",
+      seq: 2,
       authorId: "me",
       kind: "text",
       text: "Yes, just reviewed them. The typography hierarchy looks much cleaner now, especially on mobile.",
@@ -108,6 +110,7 @@ export const messagesByConversation: Record<string, ChatMessage[]> = {
     },
     {
       id: "m3",
+      seq: 3,
       authorId: "anna-petrova",
       authorName: "Anna Petrova",
       avatarUrl: annaAvatar,
@@ -122,6 +125,7 @@ export const messagesByConversation: Record<string, ChatMessage[]> = {
     },
     {
       id: "m3b",
+      seq: 4,
       authorId: "anna-petrova",
       authorName: "Anna Petrova",
       avatarUrl: annaAvatar,
@@ -131,6 +135,7 @@ export const messagesByConversation: Record<string, ChatMessage[]> = {
     },
     {
       id: "m4",
+      seq: 5,
       authorId: "anna-petrova",
       kind: "text",
       text: "",
@@ -139,6 +144,7 @@ export const messagesByConversation: Record<string, ChatMessage[]> = {
     },
     {
       id: "m4b",
+      seq: 6,
       authorId: "anna-petrova",
       authorName: "Anna Petrova",
       avatarUrl: annaAvatar,
@@ -147,6 +153,7 @@ export const messagesByConversation: Record<string, ChatMessage[]> = {
     },
     {
       id: "m5",
+      seq: 7,
       authorId: "me",
       kind: "text",
       text: "Perfect. I'll merge the assets into Figma so the engineering team can reference them.",
@@ -155,6 +162,7 @@ export const messagesByConversation: Record<string, ChatMessage[]> = {
     },
     {
       id: "m6",
+      seq: 8,
       authorId: "anna-petrova",
       authorName: "Anna Petrova",
       avatarUrl: annaAvatar,
@@ -164,6 +172,7 @@ export const messagesByConversation: Record<string, ChatMessage[]> = {
     },
     {
       id: "m6b",
+      seq: 9,
       authorId: "me",
       kind: "attachment",
       timestamp: "10:42 AM",
@@ -172,6 +181,7 @@ export const messagesByConversation: Record<string, ChatMessage[]> = {
     },
     {
       id: "m7",
+      seq: 10,
       authorId: "me",
       kind: "text",
       text: "Will do. Let's do a quick sync after lunch.",
@@ -180,6 +190,7 @@ export const messagesByConversation: Record<string, ChatMessage[]> = {
     },
     {
       id: "m7b",
+      seq: 11,
       authorId: "me",
       kind: "attachment",
       timestamp: "10:43 AM",
@@ -188,6 +199,7 @@ export const messagesByConversation: Record<string, ChatMessage[]> = {
     },
     {
       id: "m8",
+      seq: 12,
       authorId: "me",
       kind: "text",
       text: "I can also prepare the motion specs if helpful.",
@@ -198,6 +210,7 @@ export const messagesByConversation: Record<string, ChatMessage[]> = {
   "marcus-chen": [
     {
       id: "mc1",
+      seq: 1,
       authorId: "marcus-chen",
       authorName: "Marcus Chen",
       avatarUrl: marcusAvatar,
@@ -209,6 +222,7 @@ export const messagesByConversation: Record<string, ChatMessage[]> = {
   "daniel-kim": [
     {
       id: "dk1",
+      seq: 1,
       authorId: "daniel-kim",
       authorName: "Daniel Kim",
       avatarUrl: danielAvatar,
@@ -218,6 +232,7 @@ export const messagesByConversation: Record<string, ChatMessage[]> = {
     },
     {
       id: "dk2",
+      seq: 2,
       authorId: "daniel-kim",
       kind: "text",
       text: "",
@@ -228,6 +243,7 @@ export const messagesByConversation: Record<string, ChatMessage[]> = {
   "sofia-rossi": [
     {
       id: "sr1",
+      seq: 1,
       authorId: "sofia-rossi",
       authorName: "Sofia Rossi",
       avatarUrl: sofiaAvatar,
@@ -239,6 +255,7 @@ export const messagesByConversation: Record<string, ChatMessage[]> = {
   "elena-rostova": [
     {
       id: "er1",
+      seq: 1,
       authorId: "elena-rostova",
       authorName: "Elena Rostova",
       kind: "text",
