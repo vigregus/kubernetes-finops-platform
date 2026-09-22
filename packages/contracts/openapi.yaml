@@ -199,6 +199,9 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
 
   /conversations/{conversation_id}/messages:
+    # Держится для `post`: он своего `parameters` не объявляет и получает
+    # `conversation_id` отсюда. У `get` параметр продублирован по причине
+    # выше. Удалять уровень пути нельзя, пока `post` на него опирается.
     parameters:
       - $ref: '#/components/parameters/ConversationId'
 
@@ -253,6 +256,16 @@ paths:
           что пропустил.
       operationId: listMessages
       parameters:
+        # CODEGEN COMPATIBILITY:
+        # openapi-generator 7.10.0 теряет path-level parameter,
+        # когда operation объявляет собственный parameters.
+        # Семантически это тот же параметр; operation-level
+        # запись перекрывает одноимённый path-level parameter.
+        # Дубль сторожат `ListMessagesHasConversationId` и проверка
+        # URL в apps/web/src/api/contract.test.ts: без него запрос
+        # уходит на литеральный `{conversation_id}`.
+        - $ref: '#/components/parameters/ConversationId'
+
         - name: before_seq
           in: query
           description: Строго меньше указанного номера. Взаимно исключим с `after_seq`.
@@ -331,6 +344,8 @@ paths:
         вернуть **то же** сообщение с тем же `message_id` и `seq` и кодом
         `200`, а не создать второе.
       operationId: sendMessage
+      # своего parameters нет: conversation_id продолжает наследоваться
+      # с path-level. Именно поэтому параметр остаётся и там.
       requestBody:
         required: true
         content:
