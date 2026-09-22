@@ -190,7 +190,7 @@ services:
       # конвейером и живёт отдельно от API. Digest подставляет
       # scripts/promote-image.sh, сохраняя этот ключ.
       repository: ghcr.io/vigregus/messenger-web
-      digest: sha256:0fb80f6cccfe54006386f07753371ed3188e6f28a94b54eeefa2bbb17c44f4b2
+      digest: sha256:da35128928075c6117d5c673559f7fa44db8354588f8e7a5cca6e3f858dd3cfd
     # То, что не может лежать в бандле, — и здесь лежит именно поэтому.
     #
     # Имя источника идентичности зависит от стенда, а образ у всех стендов
@@ -212,6 +212,16 @@ services:
         # совпадение: браузер уходит на него сам, а сервер по нему же сверяет
         # издателя токена. Разойтись они не должны — расходятся они молча.
         oidcIssuer: https://idp.finops.local/realms/messenger
+        # Адрес realtime — публичный, как и issuer: на него уходит **браузер**,
+        # и `.svc.cluster.local` был бы адресом, которого он не разрешает.
+        # Другой origin (`app.finops.local` открывает `rt.finops.local`) здесь
+        # безопасен и объясним: cookie в WebSocket не едет вовсе, а соединение
+        # аутентифицируется тикетом в connect-data, который выдаёт API.
+        #
+        # Ключ обязателен для образа, который продвигается этим же коммитом:
+        # без него клиент падает громко при загрузке — молчаливое «realtime не
+        # поднялся» выглядело бы как «просто не подключилось».
+        centrifugoUrl: wss://rt.finops.local/connection/websocket
     resources:
       requests: {cpu: 25m, memory: 64Mi}
       limits: {cpu: 500m, memory: 256Mi}
