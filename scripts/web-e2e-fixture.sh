@@ -246,6 +246,18 @@ def ensure(token, email, password):
     user = find(token, email)
     created = user is None
 
+    # Имя и фамилия — не украшение профиля, а **условие входа**, и это
+    # измерено, а не предположено. Реалм объявляет их обязательными
+    # (declarative user profile), и Keycloak 26 добавляет `VERIFY_PROFILE`
+    # на входе, если они пусты, — при этом `requiredActions` учётной записи
+    # остаётся пустым. Готовая на вид запись не доходит до `/callback`:
+    # Keycloak уводит на `login-actions/required-action?execution=VERIFY_PROFILE`,
+    # и приёмка падает таймаутом ожидания обмена кода, не называя причины.
+    # Значение детерминировано и различает сторону: display_name в интерфейсе
+    # читается («E2E A»), и адрес при этом остаётся единственным ключом.
+    side = email.split("@", 1)[0].rsplit("-", 1)[-1].upper()
+    profile = {"firstName": "E2E", "lastName": side}
+
     if created:
         status, body = call(
             "POST",
@@ -259,6 +271,7 @@ def ensure(token, email, password):
                 "emailVerified": True,
                 "enabled": True,
                 "requiredActions": [],
+                **profile,
                 "credentials": [{"type": "password", "value": password, "temporary": False}],
             },
             token=token,
@@ -282,13 +295,20 @@ def ensure(token, email, password):
     # Представление берётся целиком из GET и правится точечно: `PUT` без
     # остальных полей затёр бы их, а неподтверждённый адрес вернул бы страницу
     # «проверьте почту» вместо кода.
-    if not user.get("emailVerified") or user.get("requiredActions"):
+    #
+    # Имя и фамилия проверяются наравне с адресом: учётная запись, заведённая
+    # прежней версией скрипта, чинится здесь же, а не заводится заново, — и
+    # `requiredActions` тут ничего не сообщает, потому что Keycloak добавляет
+    # `VERIFY_PROFILE` на входе, не отражая его в списке.
+    needs_profile = not user.get("firstName") or not user.get("lastName")
+    if needs_profile or not user.get("emailVerified") or user.get("requiredActions"):
         patched = dict(user)
         patched["emailVerified"] = True
         patched["requiredActions"] = []
+        patched.update(profile)
         status, body = call("PUT", f"/admin/realms/{realm}/users/{user['id']}", patched, token=token)
         if status not in (200, 204):
-            fail(f"подтверждение адреса {email} вернуло {status}: {body}")
+            fail(f"подтверждение адреса и профиля {email} вернуло {status}: {body}")
 
     return user["id"], created
 
