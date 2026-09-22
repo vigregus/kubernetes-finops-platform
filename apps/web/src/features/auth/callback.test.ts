@@ -2,12 +2,22 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type { ApiClient, LoginOutcome } from "../../api/client";
 import { installSubtleForJsdom } from "../../test-support/webcrypto";
 import { type CallbackOutcome, bootStateOf, completeLogin } from "./callback";
-import { OIDC_ISSUER, PENDING_LOGIN_KEY, beginLogin, consumePendingLogin } from "./session";
+import { PENDING_LOGIN_KEY, beginLogin, consumePendingLogin } from "./session";
 
 installSubtleForJsdom();
 
 const ORIGIN = "https://app.finops.local";
 const RFC_VERIFIER = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+
+/**
+ * Источник идентичности в тесте — свой, а не из окружения приложения.
+ *
+ * Этот файл проверяет исходы обмена кода, а не то, откуда берётся имя IdP;
+ * окружение здесь было бы зависимостью, которой не видно в проверяемом
+ * утверждении. `beginLogin` и не берёт его сам — адрес ему передают явно,
+ * ровно как на стенде передаёт единственное место, читающее окружение.
+ */
+const ISSUER = "https://idp.finops.local/realms/messenger";
 
 type ExchangeParams = Parameters<ApiClient["exchangeAuthorizationCode"]>[0];
 
@@ -34,7 +44,7 @@ async function givenPendingLogin(state = "state-fixed"): Promise<void> {
   await beginLogin({
     store: window.sessionStorage,
     origin: ORIGIN,
-    issuer: OIDC_ISSUER,
+    issuer: ISSUER,
     createVerifier: () => RFC_VERIFIER,
     state,
   });

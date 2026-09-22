@@ -8,10 +8,16 @@
  * состоялся бы вовсе) и не в `localStorage` (там он пережил бы вкладку, а
  * `ADR 0005` держит `localStorage` под один `device_id`).
  */
+import { loadRuntimeConfig } from "../../runtime-config";
 import { createCodeChallenge, createCodeVerifier, createState } from "./pkce";
 
-/** Источник идентичности стенда. Значение — из `realm.yaml`, не из документации. */
-export const OIDC_ISSUER = "https://idp.finops.local/realms/messenger";
+// Источника идентичности в бандле нет — и это не упущение, а требование:
+// вшитое имя IdP означало бы отдельную сборку на каждый стенд, тогда как
+// `DEP-001` обещает один образ на все. Имя приходит из окружения — файлом
+// `/runtime-config.js` рядом с `index.html` (см. `runtime-config.ts`).
+//
+// Прежнее значение бралось из `realm.yaml` стенда, и бралось верно; вопрос был
+// не в нём, а в том, что оно вообще попадало в сборку.
 
 /** Публичный клиент с PKCE S256 и `directAccessGrantsEnabled: false`. */
 export const OIDC_CLIENT_ID = "messenger-web";
@@ -102,7 +108,13 @@ function parsePendingLogin(raw: string | null): PendingLogin | null {
 export async function beginLogin(params: {
   readonly store: PendingLoginStore;
   readonly origin: string;
-  readonly issuer?: string;
+  /**
+   * Обязателен, а не взят из окружения здесь же: источник идентичности —
+   * вход этой функции, а не глобальная переменная модуля. Иначе у неё
+   * появилась бы зависимость, которой не видно в подписи, и тест «уходит на
+   * Keycloak» перестал бы называть то, что проверяет.
+   */
+  readonly issuer: string;
   readonly clientId?: string;
   readonly createVerifier?: () => string;
   readonly state?: string;
@@ -113,7 +125,7 @@ export async function beginLogin(params: {
   params.store.setItem(PENDING_LOGIN_KEY, JSON.stringify(pending));
 
   const authorizeUrl = buildAuthorizeUrl({
-    issuer: params.issuer ?? OIDC_ISSUER,
+    issuer: params.issuer,
     clientId: params.clientId ?? OIDC_CLIENT_ID,
     redirectUri: redirectUri(params.origin),
     state,
@@ -147,7 +159,14 @@ export async function startLogin(params: {
   readonly origin: string;
   readonly navigate?: (url: string) => void;
 }): Promise<string> {
-  const { authorizeUrl, pending } = await beginLogin({ store: params.store, origin: params.origin });
+  // Окружение читается здесь — в единственном месте, откуда вход начинается.
+  // Отказ (`RuntimeConfigMissingError`) уходит наверх отклонением: чинить надо
+  // развёртывание, а не повторять нажатие.
+  const { authorizeUrl, pending } = await beginLogin({
+    store: params.store,
+    origin: params.origin,
+    issuer: loadRuntimeConfig().oidcIssuer,
+  });
   (params.navigate ?? ((url: string) => window.location.assign(url)))(authorizeUrl);
   return pending.state;
 }

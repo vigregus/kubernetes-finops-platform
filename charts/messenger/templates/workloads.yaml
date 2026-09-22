@@ -230,9 +230,32 @@ spec:
             # Корень только для чтения, поэтому временные файлы - явный том.
             - name: tmp
               mountPath: /tmp
+            {{- with $svc.runtimeConfig }}
+            # Каталогом, и без `subPath` — это не мелочь и не стиль.
+            #
+            # `subPath` фиксирует файл на момент старта пода: kubelet не
+            # перерисовывает такой том у работающего пода. Смена источника
+            # идентичности тогда доехала бы до кластера и остановилась: в
+            # ConfigMap новый IdP, в поде прежний, и вход ведёт не туда, куда
+            # стенд настроен, — до первой пересозданной реплики, а её может не
+            # быть месяцами. Без `subPath` обновление доезжает само.
+            #
+            # Каталог именно свой (`dir`), а не корень статики: смонтированный
+            # в корень том накрыл бы index.html, и nginx отдавал бы 404 на
+            # страницу — при зелёном рендере и отвечающих пробах, потому что
+            # /healthz отдаёт сам nginx, а не файл.
+            - name: runtime-config
+              mountPath: {{ dir .mountPath }}
+              readOnly: true
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
+        {{- with $svc.runtimeConfig }}
+        - name: runtime-config
+          configMap:
+            name: {{ $name }}-runtime
+        {{- end }}
 ---
 apiVersion: v1
 kind: ServiceAccount
