@@ -17,6 +17,7 @@
   "dependencies": {
     "@radix-ui/react-avatar": "^1.2.6",
     "@radix-ui/react-tooltip": "^1.2.16",
+    "centrifuge": "5.7.4",
     "clsx": "^2.1.1",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"

@@ -31,6 +31,17 @@ const ORIGIN = "https://app.finops.local";
 const ISSUER = "https://idp.finops.local/realms/messenger";
 
 /**
+ * Адрес соединения — здесь не предмет проверки, а условие входа.
+ *
+ * `loadRuntimeConfig` требует **оба** поля, и это правильно: частичная
+ * конфигурация — отказ развёртывания. Но тогда тест входа, оставивший поле
+ * пустым, падал бы на чужом для него требовании — то есть краснел бы не по
+ * той причине, ради которой написан. Поэтому поле предъявляется, а его
+ * собственные отказы проверяет `runtime-config.test.ts`.
+ */
+const CENTRIFUGO = "wss://rt.finops.local/connection/websocket";
+
+/**
  * Окружение, каким его видит вход.
  *
  * `startLogin` читает источник идентичности сам — это единственная точка, где
@@ -41,7 +52,7 @@ const ISSUER = "https://idp.finops.local/realms/messenger";
  * конфигурации зеленело бы от соседнего теста.
  */
 function givenRuntimeConfig(issuer = ISSUER): void {
-  window.__MESSENGER_RUNTIME_CONFIG__ = { oidcIssuer: issuer };
+  window.__MESSENGER_RUNTIME_CONFIG__ = { oidcIssuer: issuer, centrifugoUrl: CENTRIFUGO };
 }
 
 // На уровне файла, а не внутри `describe`: отсутствие конфигурации — состояние,

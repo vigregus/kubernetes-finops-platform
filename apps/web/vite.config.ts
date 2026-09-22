@@ -27,9 +27,16 @@ const dirname = typeof __dirname !== 'undefined' ? __dirname : path.dirname(file
  */
 function runtimeConfigForDev(): Plugin {
   const issuer = process.env.MESSENGER_OIDC_ISSUER ?? 'https://idp.finops.local/realms/messenger';
+  // Второе поле появилось вместе с соединением (G3-006) и здесь обязано быть
+  // по той же причине, что и первое: `loadRuntimeConfig` требует оба поля, и
+  // без этой строки `vite dev` падал бы на конфигурации, которой не хватает
+  // адреса. Имя публичное — то же, что у стенда: кластерное `loadRuntimeConfig`
+  // отвергает, и локальная разработка падала бы на нём же.
+  const centrifugo =
+    process.env.MESSENGER_CENTRIFUGO_URL ?? 'wss://rt.finops.local/connection/websocket';
   const body =
     `window.__MESSENGER_RUNTIME_CONFIG__ = Object.freeze(` +
-    `${JSON.stringify({ oidcIssuer: issuer })});\n`;
+    `${JSON.stringify({ oidcIssuer: issuer, centrifugoUrl: centrifugo })});\n`;
 
   // Объединение, а не `ViteDevServer`: предпросмотр отдаёт `PreviewServer`, и
   // подпись «сервер разработки» была бы неверна ровно на том случае, ради
