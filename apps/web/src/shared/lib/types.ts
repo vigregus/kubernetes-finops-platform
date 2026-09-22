@@ -15,9 +15,26 @@ export interface Conversation {
   presence?: PresenceStatus
   lastSeenAt?: string
   lastMessagePreview: string
-  lastMessageTimestamp: string
+  /**
+   * Display-строка (`14:22`, `Yesterday`, `Sep 20`), а не ISO: компонент рисует
+   * поле безусловно, и прокинутый `created_at` уехал бы в список как есть.
+   *
+   * Необязательно: у беседы без `last_message` честного времени нет, и
+   * выдуманного «только что» не бывает. `undefined` в разметке рисуется
+   * пустотой — ровно то, что нужно.
+   */
+  lastMessageTimestamp?: string
+  /** Ключа нет — «неизвестно»; это не ноль и не «всё прочитано». */
   unreadCount?: number
   previewDeleted?: boolean
+  /**
+   * Сервер сообщил последнее сообщение — `last_message` в ответе есть.
+   *
+   * Отдельный признак, а не «превью непустое»: от него зависит, можно ли
+   * говорить «No messages yet». Выведенное из пустоты строки, это утверждение
+   * держалось бы на договорённости таблицы превью, а не на факте.
+   */
+  hasMessages: boolean
   /** names currently sending typing:start heartbeats (RT-001..004) */
   typingNames?: string[]
   /** 08-authorization.md — symmetric block: no write, no presence/typing, history stays readable */
@@ -68,11 +85,20 @@ export interface ChatMessage {
   failureReason?: string
 }
 
+/**
+ * Текущий пользователь — то, что о нём действительно известно.
+ *
+ * `handle` и `presence` из типа **удалены**, а не оставлены незаполненными:
+ * `GET /me` не отдаёт ни того, ни другого. Поле, которое никто не заполняет, —
+ * это приглашение заполнить его догадкой: `@handle` вывели бы из адреса, а
+ * `presence` — «на глазок», и интерфейс начал бы сообщать факты, которых сервер
+ * не сообщал. Домен прямо разделяет два `last_seen_at` (`03-v1-scope.md:77-83`)
+ * и отдаёт наружу отметку **без** признака «онлайн» (`README.md:78`).
+ * Единственный потребитель этих полей — подвал, и он их не рисует.
+ */
 export interface CurrentUser {
   name: string
-  handle: string
   avatarUrl?: string
-  presence: PresenceStatus
   emailVerified?: boolean
   email?: string
 }

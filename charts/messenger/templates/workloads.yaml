@@ -6,6 +6,11 @@
 {{- range $name, $svc := .Values.services }}
 {{- if $svc.enabled }}
 {{- $ctx := dict "root" $ "svc" $svc "name" $name "component" $svc.component }}
+{{- /* Умолчание признака метрик - истина, поэтому проверяется именно
+       ложь: отсутствие ключа у нагрузки обязано снимать метрики, а не
+       отдавать их по инерции. `not $svc.metrics` здесь не годится: у
+       отсутствующего ключа значение nil, и он тоже дал бы ложь. */}}
+{{- $metrics := ne $svc.metrics false }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -82,6 +87,12 @@ spec:
             # что управляют выборкой, а терялись бы ошибки.
             - name: OTEL_TRACES_SAMPLER
               value: {{ $.Values.telemetry.tracesSampler | quote }}
+            # Секреты и адреса зависимостей идут по признаку `backendEnv`,
+            # умолчание которого ложь. Отказ закрытый намеренно: забытая
+            # нагрузка упадёт заметно (нет базы, нет шины), тогда как
+            # умолчание «истина» тихо выдало бы учётные данные бэкенда
+            # следующей статике, и заметил бы это тот, кто пошёл в под.
+            {{- if $svc.backendEnv }}
             # Пароль приходит из секрета, который создал оператор CNPG.
             # В values его нет и не будет.
             - name: DATABASE_HOST
@@ -175,6 +186,7 @@ spec:
                 secretKeyRef:
                   name: {{ $.Values.dependencies.centrifugo.secret }}
                   key: CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY
+            {{- end }}
             {{- with $svc.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -218,9 +230,32 @@ spec:
             # Корень только для чтения, поэтому временные файлы - явный том.
             - name: tmp
               mountPath: /tmp
+            {{- with $svc.runtimeConfig }}
+            # Каталогом, и без `subPath` — это не мелочь и не стиль.
+            #
+            # `subPath` фиксирует файл на момент старта пода: kubelet не
+            # перерисовывает такой том у работающего пода. Смена источника
+            # идентичности тогда доехала бы до кластера и остановилась: в
+            # ConfigMap новый IdP, в поде прежний, и вход ведёт не туда, куда
+            # стенд настроен, — до первой пересозданной реплики, а её может не
+            # быть месяцами. Без `subPath` обновление доезжает само.
+            #
+            # Каталог именно свой (`dir`), а не корень статики: смонтированный
+            # в корень том накрыл бы index.html, и nginx отдавал бы 404 на
+            # страницу — при зелёном рендере и отвечающих пробах, потому что
+            # /healthz отдаёт сам nginx, а не файл.
+            - name: runtime-config
+              mountPath: {{ dir .mountPath }}
+              readOnly: true
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
+        {{- with $svc.runtimeConfig }}
+        - name: runtime-config
+          configMap:
+            name: {{ $name }}-runtime
+        {{- end }}
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -248,6 +283,8 @@ spec:
     - name: http
       port: 80
       targetPort: http
+{{- end }}
+{{- if and $svc.http $metrics }}
 ---
 # Метрика, которую никто не снимает, не метрика. Первая редакция оставила
 # /metrics на поде и посчитала возможность наблюдаемой - в VictoriaMetrics
@@ -283,7 +320,7 @@ spec:
       # до этой строки в ответе были обе метки сразу.
       honorLabels: true
 {{- end }}
-{{- if and (not $svc.http) $svc.metricsPort }}
+{{- if and (not $svc.http) $svc.metricsPort $metrics }}
 ---
 # У фонового процесса нет службы, поэтому и снимать метрики надо с пода.
 # Без этого блока отправитель остаётся невидимым: пробы готовности у него

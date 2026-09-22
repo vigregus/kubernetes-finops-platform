@@ -9,7 +9,18 @@ const meta: Meta<typeof ChatHeader> = {
 export default meta
 type Story = StoryObj<typeof ChatHeader>
 
-const base = { id: "1", name: "Anna Petrova", lastMessagePreview: "", lastMessageTimestamp: "" }
+// `hasMessages: false` — согласовано с пустым превью: фикстура изображает беседу
+// без последнего сообщения, и признак говорит то же, что и превью. Шапка его не
+// читает — он здесь потому, что без него `Conversation` не соберётся, и это
+// намеренно: тип требует ответить на вопрос «сервер сообщил сообщение?», а не
+// оставить его неотвеченным.
+const base = {
+  id: "1",
+  name: "Anna Petrova",
+  lastMessagePreview: "",
+  lastMessageTimestamp: "",
+  hasMessages: false,
+}
 
 export const Online: Story = { args: { conversation: { ...base, presence: "online" } } }
 export const Away: Story = { args: { conversation: { ...base, presence: "away" } } }

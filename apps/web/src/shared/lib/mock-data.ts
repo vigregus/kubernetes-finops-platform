@@ -1,13 +1,14 @@
 import type { ChatMessage, Conversation, CurrentUser, DeviceSession } from "./types"
 
+// Фикстура приведена к модели, а не наоборот: `handle` и `presence` из
+// `CurrentUser` ушли, потому что `/me` их не отдаёт, — и оставлять их здесь
+// значило бы держать у догадки законное место.
 export const currentUser: CurrentUser = {
   name: "David Miller",
-  handle: "@dmiller.signal",
   email: "david.miller@example.com",
   emailVerified: true,
   avatarUrl:
     "https://lh3.googleusercontent.com/aida-public/AB6AXuBt061pWtdxBlMqSkLbBb286z673SNeLN4BjrVxnSQ4MgTBsIiH1ZxPM5GAyk9xoC_RxKn_tIehLkK09ZWW0pJW9OGOmX7Jmt11Ujf0EQV8k_pH6jXnaRzyiqB8EHJvcYrLMYQHUiUo-8st-_nnUu_cxIcAjMOpbMdffaihKx3LAfN_OdqpPisRLmGJkY_7VoKFFzu9wsGnR6WvTkpADVIBqHheFMs1KvHfv7M2LOxTS1M--tY0pFJp",
-  presence: "online",
 }
 
 const annaAvatar =
@@ -19,6 +20,11 @@ const danielAvatar =
 const sofiaAvatar =
   "https://lh3.googleusercontent.com/aida-public/AB6AXuATsjrz3gIL5qwHmjDyXv8rxBELuZUNWYOTE3zcSN6ft3O4c_RsRnhEBtZlioheHDpDcUtgnrJsYT2SvEA_jwmWz-FEi2IrsU9DqIBtHK_f8ecImUOXthOgS49n_QtKmwDmCi2CSPUx8WHOTnF3-dGWVHrHtAnW0XwvBkUyRcSgqxpDkUSJKBNI6EHXgQ5C0bw35pFrMqbSoq2wFIemSoOQt1RtTjBQkhQ0G4QkVhQafDWlDOyYvzCG"
 
+// `hasMessages` проставлен у каждого литерала: это признак «сервер сообщил
+// последнее сообщение», и вывести его из пустоты превью значило бы держать
+// утверждение «сообщений нет» на договорённости таблицы превью, а не на факте.
+// У последней беседы `last_message` нет — там превью пустое **и** признак ложен;
+// у остальных они согласованы, потому что фикстура изображает то же, что ответ.
 export const conversations: Conversation[] = [
   {
     id: "anna-petrova",
@@ -27,6 +33,7 @@ export const conversations: Conversation[] = [
     presence: "online",
     lastMessagePreview: "That works! Let's review the finalized slides tomorrow.",
     lastMessageTimestamp: "14:22",
+    hasMessages: true,
   },
   {
     id: "marcus-chen",
@@ -37,6 +44,7 @@ export const conversations: Conversation[] = [
     lastMessageTimestamp: "13:58",
     unreadCount: 2,
     typingNames: ["Marcus"],
+    hasMessages: true,
   },
   {
     id: "daniel-kim",
@@ -46,6 +54,7 @@ export const conversations: Conversation[] = [
     lastMessageTimestamp: "Yesterday",
     previewDeleted: true,
     blockedByMe: true,
+    hasMessages: true,
   },
   {
     id: "sofia-rossi",
@@ -56,6 +65,7 @@ export const conversations: Conversation[] = [
     lastMessagePreview: "Let's grab coffee before the project kickoff.",
     lastMessageTimestamp: "Sep 20",
     blockedMe: true,
+    hasMessages: true,
   },
   {
     id: "elena-rostova",
@@ -63,6 +73,7 @@ export const conversations: Conversation[] = [
     initials: "ER",
     lastMessagePreview: "Thanks for checking in, talk soon!",
     lastMessageTimestamp: "Sep 18",
+    hasMessages: true,
   },
   {
     id: "new-hire-project",
@@ -70,6 +81,7 @@ export const conversations: Conversation[] = [
     initials: "NH",
     lastMessagePreview: "",
     lastMessageTimestamp: "",
+    hasMessages: false,
   },
 ]
 

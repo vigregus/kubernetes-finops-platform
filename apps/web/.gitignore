@@ -25,3 +25,8 @@ dist-ssr
 
 *storybook.log
 storybook-static
+
+# Клиент, сгенерированный из packages/contracts/openapi.yaml
+# (scripts/generate-web-client.sh). Не правится руками и не коммитится:
+# версия закреплена digest'ом образа генератора в base-image.lock (CTR-004).
+src/api/generated/

@@ -104,6 +104,15 @@ services:
   api:
     enabled: true
     component: api
+    # Секреты и адреса зависимостей. Признак задан значением у всех шести
+    # нагрузок, а не только там, где он что-то меняет: умолчание у него
+    # ложь, и «у web снято» не должно быть следствием забытого ключа, а
+    # «у api есть» — следствием прежнего безусловного поведения шаблона.
+    backendEnv: true
+    # Метрики снимаются со службы: у нагрузки есть входящие запросы.
+    # Умолчание у признака — истина, поэтому true здесь нужен не для
+    # работы, а чтобы снятие ключа у соседа не выглядело нормой.
+    metrics: true
     replicas: 1
     minAvailable: 1
     priorityClass: messenger-critical
@@ -138,14 +147,70 @@ services:
   web:
     enabled: false
     component: web
+    # У статики нет ни базы, ни шины, ни Keycloak: nginx отдаёт файлы, и
+    # единственная его зависимость — собственный образ. Ключ стоит
+    # значением, а не оставлен умолчанию: ложь здесь — утверждение
+    # о нагрузке, а не следствие незаполненного поля.
+    backendEnv: false
+    # Метрик у статики нет: снимать нечего, и скрейп ходил бы за 404.
+    # Умолчание признака — истина, поэтому ключ обязателен: забытый, он
+    # отдал бы web VMServiceScrape, и заметил бы это только тот, кто
+    # пошёл в хранилище за рядом, которого там нет.
+    metrics: false
     replicas: 1
     minAvailable: 1
     priorityClass: messenger-standard
     preStopSeconds: 5
     terminationGracePeriodSeconds: 30
+    # Все три пробы смотрят на /healthz — статический ответ самого nginx.
+    # Ни одна не ходит в /api: здоровье статики не зависит от backend,
+    # и связать их значило бы гасить web при недоступном API.
+    startupProbe:
+      httpGet:
+        path: /healthz
+        port: http
+      periodSeconds: 10
+      failureThreshold: 3
+    livenessProbe:
+      httpGet:
+        path: /healthz
+        port: http
+      periodSeconds: 60
+      failureThreshold: 6
+    readinessProbe:
+      httpGet:
+        path: /healthz
+        port: http
+      periodSeconds: 60
+      failureThreshold: 3
     http:
       port: 8080
-    image: {}
+    image:
+      # Второй образ — второй репозиторий: статика собирается своим
+      # конвейером и живёт отдельно от API. Digest подставляет
+      # scripts/promote-image.sh, сохраняя этот ключ.
+      repository: ghcr.io/vigregus/messenger-web
+    # То, что не может лежать в бандле, — и здесь лежит именно поэтому.
+    #
+    # Имя источника идентичности зависит от стенда, а образ у всех стендов
+    # один и тот же: `DEP-001` обещает «собрано один раз, продвинуто без
+    # пересборки». Вшитое в статику имя означало бы сборку на каждый стенд,
+    # поэтому оно приходит томом из ConfigMap и читается до модуля приложения.
+    #
+    # `mountPath` — вопрос Kubernetes, `values` — то, что уезжает в браузер.
+    # Это путь **файла**; каталог тома и ключ в ConfigMap выводятся из него
+    # (`dir` и `base`), а не пишутся рядом: два независимо записанных значения
+    # разошлись бы, и под получил бы пустой файл при зелёном рендере.
+    #
+    # Каталог — свой, внутри корня статики, а не сам корень: том, смонтированный
+    # в корень, накрыл бы index.html.
+    runtimeConfig:
+      mountPath: /usr/share/nginx/html/runtime/runtime-config.js
+      values:
+        # Тот же адрес, что у API в `dependencies.keycloak.issuer`, и это не
+        # совпадение: браузер уходит на него сам, а сервер по нему же сверяет
+        # издателя токена. Разойтись они не должны — расходятся они молча.
+        oidcIssuer: https://idp.finops.local/realms/messenger
     resources:
       requests: {cpu: 25m, memory: 64Mi}
       limits: {cpu: 500m, memory: 256Mi}
@@ -156,6 +221,10 @@ services:
     # Учётная запись Kafka: только запись в оба потока и IdempotentWrite.
     # Читать relay не умеет и не должен.
     kafkaUser: messenger-outbox
+    # Ходит в базу и в шину, поэтому backend-набор ей нужен целиком;
+    # у соседей ниже те же два ключа по той же причине.
+    backendEnv: true
+    metrics: true
     # Метрики есть, входящих запросов нет - поэтому порт только для них.
     metricsPort: 9100
     command: ["python", "-m", "messenger.workers.outbox_relay"]
@@ -178,6 +247,8 @@ services:
     # Единственная учётная запись с правом на оба потока: собрать факт
     # и содержимое обратно может только тот, кому положены обе половины.
     kafkaUser: messenger-realtime
+    backendEnv: true
+    metrics: true
     metricsPort: 9100
     command: ["python", "-m", "messenger.workers.consumer_realtime"]
     component: worker
@@ -206,6 +277,8 @@ services:
     # нужен факт появления сообщения, и SEC-010 держится её правами,
     # а не дисциплиной кода.
     kafkaUser: messenger-unread
+    backendEnv: true
+    metrics: true
     # Метрики есть, входящих запросов нет - поэтому порт только для них,
     # а пробы готовности не нужны: ради них нечего ответить.
     metricsPort: 9100
@@ -240,6 +313,11 @@ services:
     # её не касается — по той же причине, по которой не касается уборки
     # мусора.
     #
+    # База и Redis — весь её backend-набор: в шину уборщик не ходит.
+    # Ключи стоят значением, а не полагаются на умолчание, по той же
+    # причине, что и у соседей: снятый ключ обязан выглядеть снятым.
+    backendEnv: true
+    metrics: true
     # Метрики есть, входящих запросов нет - поэтому порт только для них,
     # а пробы готовности не нужны: ради них нечего ответить.
     metricsPort: 9100

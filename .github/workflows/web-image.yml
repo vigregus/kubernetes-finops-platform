@@ -1,0 +1,134 @@
+name: Образ веб-клиента
+
+# Отдельный конвейер, а не шаг в image.yml. Причина не в удобстве: у статики
+# свой репозиторий, свой конвейер и свой digest, и общий workflow означал бы,
+# что правка веба выпускает новый digest API — то есть что «выкатили версию»
+# больше ничего не значит. `image.yml` этим PR не трогается вовсе.
+
+on:
+  push:
+    # Публикация только из main. Артефакт веба едет в кластер, и выпущенный
+    # из PR он соответствовал бы коммиту, которого в main может не быть, —
+    # а продвинули бы именно его. Здесь это свойство конвейера, а не обещание
+    # человека. В PR работает web-джоб contracts.yml: он собирает образ
+    # дымом и никуда ничего не отправляет.
+    #
+    # Ветка в этом списке стояла **временно** — пока шла работа над G3-005, —
+    # и снята перед слиянием. Соблазн вернуть её понятен и повторяется: без
+    # неё образ нельзя получить до слияния. Но `workflow_dispatch` этого не
+    # заменяет: для файла, которого нет в ветке по умолчанию, GitHub отвечает
+    # `HTTP 404: workflow web-image.yml not found on the default branch`, а
+    # push-событие этого ограничения не знает — workflow исполняется из того
+    # коммита, куда пришёл push. Поэтому «собрать образ из ветки» достигается
+    # ровно одним способом — вернуть строку сюда, — и стоит помнить, что образ
+    # из ветки принадлежит коммиту, которого в main ещё нет: он годится
+    # **только** для проверки до слияния и продвижению не подлежит. `DEP-001`
+    # закрывает повторная публикация из main, а не эта.
+    branches: [main]
+    #
+    # Фильтр обязан покрывать ВСЕ настоящие входы сборки, а не только
+    # приложение. scripts/build-web.sh и scripts/generate-web-client.sh лежат
+    # вне apps/web/**, читают base-image.lock и передают digest'ы в сборку:
+    # без этих строк правка скрипта не выпустила бы новый образ, и в кластере
+    # остался бы прежний. Правило общее — любой shared-скрипт генерации или
+    # сборки, от которого зависит образ, входит в фильтр.
+    paths:
+      - 'apps/web/**'
+      - 'packages/contracts/openapi.yaml'
+      - 'scripts/build-web.sh'
+      - 'scripts/generate-web-client.sh'
+      - '.github/workflows/web-image.yml'
+  # Пересобрать артефакт без пустого коммита.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # Право на публикацию пакета. Отдельного секрета не нужно: GITHUB_TOKEN
+  # выдаётся заданию и живёт только пока оно идёт.
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/messenger-web
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Основания закреплены
+        # Значения читаются из того же файла, что и локальной сборкой
+        # (scripts/build-web.sh): один источник для человека и конвейера, а
+        # не две константы, которые разойдутся молча. Значения по умолчанию
+        # нет ни у одного основания — голый docker build падает.
+        id: lock
+        run: |
+          LOCK=apps/web/base-image.lock
+          test -s "$LOCK" || { echo "нет $LOCK" >&2; exit 1; }
+          for name in GENERATOR_DIGEST NODE_DIGEST NGINX_DIGEST; do
+            value="$(grep "^${name}=" "$LOCK" | cut -d= -f2-)"
+            case "$value" in
+              sha256:*) ;;
+              *) echo "в $LOCK нет digest у ${name}: ${value:-пусто}" >&2; exit 1 ;;
+            esac
+            echo "${name}=${value}" >> "$GITHUB_OUTPUT"
+          done
+
+      # Две архитектуры. amd64 — то, на чём собирают; arm64 — то, на чём
+      # считается модель затрат: в ней узлы Graviton, и образ под них нужен
+      # раньше, чем узлы. Статике nginx это стоит копейки, а перевод нагрузки
+      # на ARM потом не потребует внезапно чинить frontend.
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Сборка и публикация
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          # Контекст — корень репозитория: контракт лежит в
+          # packages/contracts/, то есть выше приложения. Ту же формулировку
+          # использует scripts/build-web.sh; «..» здесь не годится — она
+          # читается по-разному из apps/web, из корня и из CI.
+          context: .
+          file: apps/web/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            GENERATOR_DIGEST=${{ steps.lock.outputs.GENERATOR_DIGEST }}
+            NODE_DIGEST=${{ steps.lock.outputs.NODE_DIGEST }}
+            NGINX_DIGEST=${{ steps.lock.outputs.NGINX_DIGEST }}
+          # Тег — только идентификатор коммита. `latest` намеренно отсутствует:
+          # подвижный тег в реестре возвращает ровно ту проблему, ради которой
+          # всё это и делается.
+          tags: ${{ env.IMAGE }}:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Digest для выкатки
+        # Это и есть артефакт конвейера: всё дальнейшее ссылается на него,
+        # а не на коммит и не на тег. Место рядом со временем старта шага:
+        # закреплённое время рядом с событиями нужно, чтобы ожидание в журнале
+        # не совпало с событием прошлого прогона.
+        run: |
+          {
+            echo "### Образ веба опубликован"
+            echo
+            echo '```'
+            echo "образ:  ${{ env.IMAGE }}"
+            echo "digest: ${{ steps.push.outputs.digest }}"
+            echo "время:  $(date -u +%Y-%m-%dT%H:%M:%SZ) (UTC), старт шага"
+            echo '```'
+            echo
+            echo 'Продвижение: `scripts/promote-image.sh sha256:W web` — версия'
+            echo 'скрипта принята feature-PR (срез 9). Без имён он продвигает'
+            echo 'пять backend-нагрузок, как и раньше.'
+          } >> "$GITHUB_STEP_SUMMARY"
