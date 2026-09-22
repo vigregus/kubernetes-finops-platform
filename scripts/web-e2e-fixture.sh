@@ -517,11 +517,17 @@ root, web = Path(sys.argv[1]), Path(sys.argv[2])
 required = [
     web / "playwright.config.ts",
     root / "tests/e2e/g3-005-web.spec.ts",
+    root / "tests/e2e/g3-006-web.spec.ts",
     root / "tests/e2e/fixture.setup.ts",
+    root / "tests/e2e/support/auth.ts",
     root / "tests/e2e/README.md",
     root / "tests/e2e/tsconfig.json",
 ]
-inspected = [web / "playwright.config.ts"] + sorted((root / "tests/e2e").glob("*.ts"))
+# Обход **рекурсивный**, а не по одному уровню, и это несущая деталь: помощники
+# входа живут в `support/`, а не в корне каталога. Плоский обход оставил бы их
+# вне проверок `FORBIDDEN` и вне запрета на удаление — то есть **ослабил** бы
+# существующую проверку ровно тем коммитом, который её расширяет.
+inspected = [web / "playwright.config.ts"] + sorted((root / "tests/e2e").rglob("*.ts"))
 
 FORBIDDEN = {
     ".svc.cluster.local": "проверка ушла внутрь кластера: приёмка идёт снаружи, публичными именами",
@@ -587,6 +593,54 @@ if "data-conversation-id" not in spec_code:
         "tests/e2e/g3-005-web.spec.ts: беседа не опознаётся по атрибуту — "
         "по имени её может совпасть со стендовыми данными случайно"
     )
+
+g3_006 = root / "tests/e2e/g3-006-web.spec.ts"
+g3_006_code = "\n".join(code_by_file.get(g3_006, []))
+
+if "test(" not in g3_006_code:
+    violations.append("tests/e2e/g3-006-web.spec.ts: в спеке нет ни одного теста")
+if "data-connection-state" not in g3_006_code:
+    violations.append(
+        "tests/e2e/g3-006-web.spec.ts: состояние соединения не читается с "
+        "production-поверхности (`data-connection-state`) — значит проверять нечего"
+    )
+# Заморозка вкладки не предъявляет production-вход, введённый для `DISCONNECTED`:
+# она не даёт ни `navigator.onLine === false`, ни события `offline`. Оставленная
+# как fallback, она превратила бы «сценарий доказал восстановление» в «сценарий
+# прошёл, ничего не предъявив».
+if "setWebLifecycleState" in g3_006_code:
+    violations.append(
+        "tests/e2e/g3-006-web.spec.ts: заморозка вкладки — не эквивалент офлайна "
+        "(`navigator.onLine` не становится false, события `offline` нет)"
+    )
+
+# `BrowserContext.setOffline()` гасит **весь** контекст. Общий контекст на двоих
+# погасил бы вместе с предметом свидетеля, и барьер публикации доказывал бы пустоту.
+offline_lines = [line for line in g3_006_code.splitlines() if "setOffline(" in line]
+if not offline_lines:
+    violations.append("tests/e2e/g3-006-web.spec.ts: уход в офлайн не предъявляется вовсе")
+for line in offline_lines:
+    if "contextB" not in line:
+        violations.append(
+            f"tests/e2e/g3-006-web.spec.ts: setOffline вызван не на contextB — "
+            f"свидетель погашен вместе с предметом: {line.strip()}"
+        )
+
+# Стороны входят по отдельности и настоящим входом: `signIn` живёт в
+# `support/auth.ts` и вызывается за каждую сторону здесь. Обе половины
+# проверяются вместе — один вход плюс второй, «уже вошедший» из общего контекста,
+# дал бы спеке свидетеля без своей сессии.
+if "signIn(browser," not in g3_006_code:
+    violations.append(
+        "tests/e2e/g3-006-web.spec.ts: вход идёт не через общий `signIn` из "
+        "support/auth.ts — вторая копия логики входа разойдётся с первой"
+    )
+for side in ("A", "B"):
+    if f"open({side})" not in g3_006_code:
+        violations.append(
+            f"tests/e2e/g3-006-web.spec.ts: сторона {side} не входит — "
+            f"сценарию нужны обе: свидетель и предмет"
+        )
 
 # Инвариант 0 проверяется по тексту Makefile и скрипта: нарушение здесь
 # молчаливое. Цель `web-e2e`, вызывающая `web-e2e-fixture`, выглядит как «то же
