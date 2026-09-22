@@ -145,7 +145,7 @@ services:
       limits: {cpu: "1", memory: 512Mi}
 
   web:
-    enabled: false
+    enabled: true
     component: web
     # У статики нет ни базы, ни шины, ни Keycloak: nginx отдаёт файлы, и
     # единственная его зависимость — собственный образ. Ключ стоит
@@ -190,6 +190,7 @@ services:
       # конвейером и живёт отдельно от API. Digest подставляет
       # scripts/promote-image.sh, сохраняя этот ключ.
       repository: ghcr.io/vigregus/messenger-web
+      digest: sha256:0fb80f6cccfe54006386f07753371ed3188e6f28a94b54eeefa2bbb17c44f4b2
     # То, что не может лежать в бандле, — и здесь лежит именно поэтому.
     #
     # Имя источника идентичности зависит от стенда, а образ у всех стендов

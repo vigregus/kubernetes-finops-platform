@@ -1,0 +1,60 @@
+# Единственная точка входа клиента: один origin, два правила.
+# Имя уже в dnsNames сертификата, но без этого маршрута браузер не доходит
+# ни до страницы, ни до API.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: app
+  namespace: messenger
+  labels:
+    app.kubernetes.io/name: web
+    finops.internal/product: messenger
+    finops.internal/team: platform-engineering
+    finops.internal/environment: local
+    finops.internal/component: web
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: edge
+      namespace: edge
+      sectionName: https
+  hostnames:
+    - app.finops.local
+  rules:
+    # Правило API объявлено первым, и это не стилистика: шлюз берёт
+    # самое длинное совпадение префикса, но при равной длине порядок
+    # правил решает. `/api/v1` обязан уйти в api, а не в статику.
+    #
+    # Префикс снимается здесь же: сервер объявляет свои пути от корня
+    # (`/me`, `/conversations`, `/auth/refresh`), а наружу они выставлены
+    # под `/api/v1`. Без URLRewrite на всё вернулся бы 404.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/v1
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /
+      backendRefs:
+        - group: ""
+          kind: Service
+          name: api
+          port: 80
+          weight: 1
+    # Всё остальное — статика. SPA-fallback на index.html живёт внутри
+    # образа: `/callback` и любой неизвестный путь отдаёт index.html,
+    # `/healthz` — статический ответ самого nginx.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - group: ""
+          kind: Service
+          name: web
+          port: 80
+          weight: 1
