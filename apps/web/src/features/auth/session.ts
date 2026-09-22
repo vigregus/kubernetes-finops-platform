@@ -153,8 +153,41 @@ export function clearPendingLogin(store: PendingLoginStore): void {
   store.removeItem(PENDING_LOGIN_KEY);
 }
 
+/**
+ * Один начатый вход на вкладку.
+ *
+ * Между записью `pending` в хранилище и уводом браузера стоит `await` — на
+ * `crypto.subtle.digest`. Второй клик успевает записать **свой** `pending`
+ * раньше, чем первый увёл браузер, и входов оказывается два вместо одного: в
+ * хранилище остаётся `state` второго, а браузер уходит по адресу первого.
+ * Вернувшийся из Keycloak `state` сверяется тогда с чужим `pending`, и обмен
+ * отвергается как чужой — вход не удаётся по причине, которой человек не делал.
+ *
+ * Разделяемый промис, а не запрет кнопки: запрет — состояние представления, и
+ * держать его пришлось бы в компоненте, который о входах ничего не знает, а
+ * второй клик тогда просто не имел бы обработчика. Обмен токена устроен так же
+ * (`refreshInFlight` в `api/client.ts`) и по той же причине.
+ */
+let loginInFlight: Promise<string> | null = null;
+
 /** Настоящий вход: заводит незавершённый вход и уводит браузер на Keycloak. */
 export async function startLogin(params: {
+  readonly store: PendingLoginStore;
+  readonly origin: string;
+  readonly navigate?: (url: string) => void;
+}): Promise<string> {
+  if (loginInFlight === null) {
+    // Обнуление — в `finally`, а не по завершении: вход, который никуда не увёл
+    // (увод подменён, `location.assign` не сработал), обязан оставить
+    // возможность повторить, иначе кнопка замолчит навсегда.
+    loginInFlight = beginAndNavigate(params).finally(() => {
+      loginInFlight = null;
+    });
+  }
+  return loginInFlight;
+}
+
+async function beginAndNavigate(params: {
   readonly store: PendingLoginStore;
   readonly origin: string;
   readonly navigate?: (url: string) => void;
