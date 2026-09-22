@@ -190,7 +190,7 @@ services:
       # конвейером и живёт отдельно от API. Digest подставляет
       # scripts/promote-image.sh, сохраняя этот ключ.
       repository: ghcr.io/vigregus/messenger-web
-      digest: sha256:da35128928075c6117d5c673559f7fa44db8354588f8e7a5cca6e3f858dd3cfd
+      digest: sha256:380617f9a5eafcfebb051f77bd8a3a7938ffc21c03cddc1e902d175caaf67cdd
     # То, что не может лежать в бандле, — и здесь лежит именно поэтому.
     #
     # Имя источника идентичности зависит от стенда, а образ у всех стендов
