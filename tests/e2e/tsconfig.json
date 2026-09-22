@@ -16,5 +16,5 @@
       "@playwright/test": ["../../apps/web/node_modules/@playwright/test"]
     }
   },
-  "include": ["*.ts"]
+  "include": ["*.ts", "support/*.ts"]
 }
