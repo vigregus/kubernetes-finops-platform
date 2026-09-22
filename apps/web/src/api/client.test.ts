@@ -350,6 +350,56 @@ describe("развилка 401 и 503", () => {
     expect(client.hasSession()).toBe(false)
   })
 
+  // Сетевой отказ — третий вид неудачи обмена, и он не сводится к двум
+  // первым: `Response` не приходит вовсе, поэтому ни `status`, ни `trace_id`
+  // взять неоткуда. Раньше это отклонение уходило наружу из `login()`, минуя
+  // разбор, — и `bootstrap` оставался в `bootstrapping` навсегда: отклонившийся
+  // промис не состояние, а отсутствие состояния. Человек видит «Loading…» и
+  // ничего больше.
+  it("сетевой отказ на стартовом обмене — транзитное состояние, а не отклонение", async () => {
+    const stub = createStubFetch({
+      [`${API_BASE_PATH}/auth/refresh`]: [new TypeError("Failed to fetch")],
+    })
+    const client = createApiClient({ fetchImpl: stub.fetchImpl as never })
+
+    const state = await client.bootstrap(depsOf(client))
+
+    expect(state).toEqual({ kind: "transient-error", traceId: undefined })
+  })
+
+  it("сетевой отказ при обмене кода — транзитное состояние, а не отклонение", async () => {
+    const stub = createStubFetch({
+      [`${API_BASE_PATH}/auth/callback`]: [new TypeError("Failed to fetch")],
+    })
+    const client = createApiClient({ fetchImpl: stub.fetchImpl as never })
+    client.setAccessToken("token-before")
+
+    const outcome = await client.exchangeAuthorizationCode({
+      code: "code-1",
+      codeVerifier: "verifier-1",
+      redirectUri: "https://app.finops.local/callback",
+      deviceId: "device-a",
+    })
+
+    expect(outcome).toEqual({ kind: "unavailable", traceId: undefined })
+    // Тот же довод, что и у `503`: сервер снимает refresh-cookie при любом
+    // неудачном обмене, а сетевой отказ не даёт узнать, дошёл ли запрос.
+    // Прежний токен, оставленный в памяти, дал бы `hasSession()` истинно рядом
+    // с транзитным состоянием — пару, которой не бывает.
+    expect(client.hasSession()).toBe(false)
+  })
+
+  it("отмена остаётся отменой и на обмене токена", async () => {
+    const abort = new DOMException("Aborted", "AbortError")
+    const stub = createStubFetch({ [`${API_BASE_PATH}/auth/refresh`]: [abort] })
+    const client = createApiClient({ fetchImpl: stub.fetchImpl as never })
+
+    const error = await client.refreshAccessToken().catch((e: unknown) => e)
+
+    expect(error).not.toBeInstanceOf(ServiceUnavailableError)
+    expect((error as Error).name).toBe("AbortError")
+  })
+
   it("ready только после /me и /conversations, а не по успешному обмену", async () => {
     const stub = createStubFetch({
       [`${API_BASE_PATH}/auth/refresh`]: [jsonResponse(200, ACCESS_TOKEN)],

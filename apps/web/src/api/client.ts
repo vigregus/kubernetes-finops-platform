@@ -266,7 +266,30 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
       init.body = JSON.stringify(body);
     }
 
-    const response = await send(`${API_BASE_PATH}${path}`, init, null);
+    // Сетевой отказ — третий исход обмена, и он не ответ: `Response` не
+    // приходит вовсе, поэтому ни `status`, ни `trace_id` взять неоткуда. Без
+    // этой ветки отклонение уходило бы наружу мимо разбора, и вызывающий
+    // оставался бы без состояния вовсе — `bootstrap` не выставил бы даже
+    // `transient-error`, а человек смотрел бы на «Loading…» бесконечно.
+    let response: Response;
+    try {
+      response = await send(`${API_BASE_PATH}${path}`, init, null);
+    } catch (cause) {
+      // Отмена — не отказ обмена: снятый запрос не говорит о сервисе ничего,
+      // и трогать по нему токен нельзя. Уходит наверх как есть.
+      if (isAbortError(cause)) {
+        throw cause;
+      }
+      if (cause instanceof ServiceUnavailableError) {
+        // Токен обесценивается тем же правилом, что и в развилке ниже, и это
+        // не формальность: сетевой отказ не даёт узнать, дошёл ли запрос до
+        // сервера, а тот снимает refresh-cookie при любом неудачном обмене.
+        accessToken = null;
+        return { kind: "unavailable", traceId: cause.traceId };
+      }
+      // Всё прочее здесь — неожиданность, а не состояние: пусть падает громко.
+      throw cause;
+    }
 
     if (response.ok) {
       const accessTokenBody = (await response.json()) as AccessTokenBody;
