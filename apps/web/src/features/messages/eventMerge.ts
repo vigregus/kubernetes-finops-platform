@@ -142,6 +142,53 @@ export function applyBuffered(state: MergeState, buffered: readonly ChatMessage[
   return { kind: "applied", state: current };
 }
 
+/**
+ * Итог круга догрузки: буфер проигран, и видно, сошлось ли.
+ *
+ * Круг догрузки ограничен замороженной границей `T`, а публикации за это время
+ * приходят и **выше** неё: поток не останавливается на время REST. Такая
+ * публикация не применяется (для границы `T` она — дыра), и сама догрузка её
+ * не вернёт: `through_seq = T` ограничивает ответ. Значит после круга её
+ * обязательно надо проиграть, и по её номеру понять, сошлось ли:
+ *
+ * * `seq = T + 1` — круг закрыл ровно то, что нужно, и публикация встаёт следом;
+ * * `seq > T + 1` — между `T` и публикацией есть ещё пропущенное, нужен **ещё
+ *   один** круг от новой границы. Объявить здесь сходимость значило бы потерять
+ *   пропущенное молча — а `RT-004` требует каждое сообщение ровно один раз.
+ *
+ * Переполнение буфера — тот же «нужен ещё круг», и проверяется **раньше**
+ * проигрывания: после переполнения `drain()` отдаёт пустое, и проигрывание
+ * пустого буфера выглядело бы сходимостью.
+ */
+export type RoundOutcome =
+  | { readonly kind: "settled"; readonly state: MergeState }
+  | {
+      readonly kind: "needs-another-round";
+      readonly state: MergeState;
+      /** `gap` — буфер вскрыл пропуск; `overflow` — буфер снял с себя работу. */
+      readonly reason: "gap" | "overflow";
+    }
+  /** Границы ещё нет: снимок не применён, кругу не от чего идти. */
+  | { readonly kind: "before-snapshot"; readonly state: MergeState };
+
+export function settleAfterRound(
+  state: MergeState,
+  drained: readonly ChatMessage[],
+  overflowed: boolean,
+): RoundOutcome {
+  if (state.appliedThroughSeq === null) {
+    return { kind: "before-snapshot", state };
+  }
+  const replay = applyBuffered(state, drained);
+  if (overflowed) {
+    return { kind: "needs-another-round", state: replay.state, reason: "overflow" };
+  }
+  if (replay.kind === "applied") {
+    return { kind: "settled", state: replay.state };
+  }
+  return { kind: "needs-another-round", state: replay.state, reason: "gap" };
+}
+
 function headOf(messages: readonly ChatMessage[]): number {
   return messages.length === 0 ? 0 : Math.max(...messages.map((message) => message.seq));
 }

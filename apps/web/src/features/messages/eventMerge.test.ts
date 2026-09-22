@@ -15,6 +15,7 @@ import {
   applyPage,
   applySnapshot,
   emptyMergeState,
+  settleAfterRound,
   type MergeState,
 } from "./eventMerge";
 
@@ -169,5 +170,64 @@ describe("граница: неизвестна, ноль и число", () => {
 
     expect(outcome.kind).toBe("applied");
     expect(outcome.state.appliedThroughSeq).toBe(101);
+  });
+});
+
+describe("круг догрузки и публикации поверх замороженной границы", () => {
+  // Поток не останавливается на время REST: пока догрузка идёт до границы `T`,
+  // публикации приходят и выше неё. Ответ ограничен `through_seq = T`, поэтому
+  // такую публикацию вернуть может только буфер — и от её номера зависит,
+  // сошлось ли.
+  it("публикация ровно на T+1 встаёт следом за кругом", () => {
+    const afterRound = givenState(102, [message(101), message(102)]);
+
+    const outcome = settleAfterRound(afterRound, [message(103)], false);
+
+    expect(outcome.kind).toBe("settled");
+    expect(seqs(outcome.state)).toEqual([101, 102, 103]);
+    expect(outcome.state.appliedThroughSeq).toBe(103);
+  });
+
+  it("публикация выше T+1 требует ещё одного круга, а не сходимости", () => {
+    // `104` при границе `102`: между ними `103`, и догрузка его не вернёт —
+    // `through_seq` был `102`. Объявить сходимость значило бы потерять `103`.
+    const afterRound = givenState(102, [message(101), message(102)]);
+
+    const outcome = settleAfterRound(afterRound, [message(104)], false);
+
+    expect(outcome.kind).toBe("needs-another-round");
+    expect(outcome.kind === "needs-another-round" && outcome.reason).toBe("gap");
+    expect(seqs(outcome.state)).toEqual([101, 102]);
+    expect(outcome.state.appliedThroughSeq).toBe(102);
+  });
+
+  it("второй круг от той же границы доводит ленту до каждого номера по одному разу", () => {
+    // Продолжение предыдущего: круг от `102` приносит `103` и `104`.
+    const firstRound = givenState(102, [message(101), message(102)]);
+    const stopped = settleAfterRound(firstRound, [message(104)], false);
+    const secondRound = applyPage(stopped.state, [message(103), message(104)]);
+
+    const settled = settleAfterRound(secondRound.state, [], false);
+
+    expect(settled.kind).toBe("settled");
+    expect(seqs(settled.state)).toEqual([101, 102, 103, 104]);
+    expect(settled.state.appliedThroughSeq).toBe(104);
+  });
+
+  it("переполнение буфера — ещё круг, а не сходимость на пустом drain", () => {
+    // После переполнения `drain()` отдаёт пустое, и проигрывание пустого
+    // буфера выглядело бы сходимостью. Признак проверяется раньше.
+    const afterRound = givenState(102, [message(101), message(102)]);
+
+    const outcome = settleAfterRound(afterRound, [], true);
+
+    expect(outcome.kind).toBe("needs-another-round");
+    expect(outcome.kind === "needs-another-round" && outcome.reason).toBe("overflow");
+  });
+
+  it("до снимка круг не от чего идти", () => {
+    const outcome = settleAfterRound(emptyMergeState(), [message(1)], false);
+
+    expect(outcome.kind).toBe("before-snapshot");
   });
 });
