@@ -13,7 +13,7 @@
 import { describe, expect, it } from "vitest"
 
 import type { Attachment as AttachmentDto, Message as MessageDto } from "../../api/generated"
-import { adaptMessage, adaptMessages } from "./message-adapter"
+import { adaptMessage, adaptMessages, adaptPublication } from "./message-adapter"
 
 const NOW = new Date("2026-09-20T18:00:00Z")
 const EN = { locale: "en-US", timeZone: "UTC" } as const
@@ -215,5 +215,105 @@ describe("страница", () => {
     )
 
     expect(items.map((it) => it.seq)).toEqual([103, 102])
+  })
+})
+
+// Публикация канала (срез 5) — второй вход в ту же таблицу соответствия, и
+// форма у него другая: измеренная (`_client_event`,
+// `services/realtime_delivery.py:43-56`) — ровно пять полей, из которых контракт
+// канала обязательным объявляет **только `type`** (`channels.json`,
+// `$defs.conversationEvent`). Отсюда оба требования к разбору: он защитный (мусор
+// и чужие события дают `null`, а не падение внутри обработчика публикации) и он
+// ничего не выдумывает (времени отправки на проводе нет вовсе).
+
+/** Публикация в измеренной форме: пять полей `_client_event`. */
+type Publication = Record<string, unknown>
+
+function publication(overrides: Publication = {}): Publication {
+  return {
+    type: "message.created",
+    message_id: "m-1",
+    seq: 1,
+    sender_id: ANNA,
+    payload: { text: "#1" },
+    ...overrides,
+  }
+}
+
+function fromChannel(overrides: Publication = {}, viewer: string = VIEWER) {
+  return adaptPublication(publication(overrides), viewer)
+}
+
+describe("публикация канала", () => {
+  it("живое сообщение становится моделью: опознание, номер, тело", () => {
+    expect(fromChannel()).toMatchObject({ id: "m-1", seq: 1, text: "#1", kind: "text" })
+  })
+
+  it("своё сообщение узнаётся по идентификатору зрителя, а не по каналу", () => {
+    // Тот же вопрос, что и у истории, и ответ обязан быть тот же: разошедшись,
+    // эти два пути показали бы свои сообщения входящими ровно на одном из них.
+    expect(fromChannel({ sender_id: VIEWER })?.authorId).toBe("me")
+    expect(fromChannel({ sender_id: ANNA })?.authorId).toBe(ANNA)
+  })
+
+  it("квитанция и надгробие — не сообщения", () => {
+    // Канал несёт три вида событий, а сообщение из них одно. Нарисовать
+    // `message.read` репликой значило бы показать чужое событие как текст.
+    expect(fromChannel({ type: "message.read" })).toBeNull()
+    expect(fromChannel({ type: "message.deleted" })).toBeNull()
+    // И незнакомый вид — тоже `null`, а не «наверное сообщение».
+    expect(fromChannel({ type: "message.edited" })).toBeNull()
+  })
+
+  it("запись без номера не применяется", () => {
+    // Номер — это и порядок, и признак пропуска, то есть предмет всего гейта.
+    // `NaN` в `seq` положил бы слияние, а дробный номер не совпал бы ни с одной
+    // границей: `2.5 > 1 + 1` — это «пропуск», которого нет.
+    expect(fromChannel({ seq: undefined })).toBeNull()
+    expect(fromChannel({ seq: "7" })).toBeNull()
+    expect(fromChannel({ seq: 1.5 })).toBeNull()
+    expect(fromChannel({ seq: 0 })).toBeNull()
+  })
+
+  it("запись без опознания и без отправителя не применяется", () => {
+    // Обе — поля домена: опознание доказывает «ровно один раз» (RT-004), а
+    // отправитель отличает свою реплику от чужой. Пустая строка на месте
+    // любого из них была бы выдуманным значением, а не отсутствием.
+    expect(fromChannel({ message_id: undefined })).toBeNull()
+    expect(fromChannel({ message_id: "" })).toBeNull()
+    expect(fromChannel({ sender_id: undefined })).toBeNull()
+    expect(fromChannel({ sender_id: "" })).toBeNull()
+  })
+
+  it("время отправки не подменяется временем получения", () => {
+    // На провод не уезжает ни `created_at`, ни иное время — измерено у
+    // `_client_event`. Подставь сюда момент получения, и он поедет в пузырь как
+    // время отправки: чем свежее сообщение, тем правдоподобнее подмена.
+    expect(fromChannel()?.timestamp).toBe("")
+  })
+
+  it("вложение из публикации не выдумывается", () => {
+    // `attachments` живут в ответе REST, в канал не попадают. Вложение,
+    // отправленное живьём, доедет подписью и без вложения — это названная
+    // граница канала, и её закрывает G3-007.
+    expect(fromChannel()?.attachment).toBeUndefined()
+    expect(fromChannel()?.kind).toBe("text")
+  })
+
+  it("тело не выдумывается, когда payload его не несёт", () => {
+    // `payload` необязателен, а `text` в нём — не обязательно строка.
+    expect(fromChannel({ payload: undefined })?.text).toBeUndefined()
+    expect(fromChannel({ payload: {} })?.text).toBeUndefined()
+    expect(fromChannel({ payload: { text: 42 } })?.text).toBeUndefined()
+  })
+
+  it("разбор защитный: мусор не роняет обработчик публикации", () => {
+    // Падение здесь унесло бы соединение — то, ради чего гейт и существует.
+    expect(adaptPublication(null, VIEWER)).toBeNull()
+    expect(adaptPublication(undefined, VIEWER)).toBeNull()
+    expect(adaptPublication("message.created", VIEWER)).toBeNull()
+    expect(adaptPublication({}, VIEWER)).toBeNull()
+    // Объект на месте `payload` — тоже допустимый провод.
+    expect(fromChannel({ payload: "not an object" })?.text).toBeUndefined()
   })
 })

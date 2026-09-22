@@ -92,6 +92,45 @@ describe("соединение живёт ровно столько, сколь�
   });
 });
 
+describe("факт, увиденный над SDK, доходит до автомата", () => {
+  // Третий источник фактов, и он не SDK и не браузер: пропуск в `seq` видит
+  // детектор слияния, а завершение догрузки — протокол `sync`. Обе новости
+  // обязаны попасть в **тот же** автомат, иначе `SYNCING` перестанет быть
+  // одним состоянием: `data-sync-reason` нечем заполнить, а выход из
+  // синхронизации неоткуда взять.
+  it("пропуск переводит в SYNCING и называет причину", () => {
+    const { result, fake } = givenHook();
+
+    act(() => {
+      fake.clientHandlers.connected();
+    });
+
+    act(() => {
+      result.current.notify({ type: "sequence-gap" });
+    });
+
+    expect(result.current.state).toBe("syncing");
+    expect(result.current.syncReason).toBe("sequence-gap");
+  });
+
+  it("завершение догрузки возвращает CONNECTED и снимает причину", () => {
+    const { result, fake } = givenHook();
+
+    act(() => {
+      fake.clientHandlers.connected();
+      result.current.notify({ type: "sequence-gap" });
+    });
+    expect(result.current.state).toBe("syncing");
+
+    act(() => {
+      result.current.notify({ type: "sync-completed" });
+    });
+
+    expect(result.current.state).toBe("connected");
+    expect(result.current.syncReason).toBeNull();
+  });
+});
+
 describe("терминальный разрыв не возрождается браузерным online", () => {
   it("после 4501 возврат сети не зовёт connect и оставляет DISCONNECTED", () => {
     // Проверка B16 на уровне обвязки. Состояние само по себе уже проверено

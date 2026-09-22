@@ -35,6 +35,13 @@ FORBIDDEN = {
     "shared/lib/mock-data.ts": "фикстуры в production-пути",
     "features/messages/components/MessageComposer.tsx": "вне объёма G3-005 (B15)",
     "features/messages/components/MessageTimeline.tsx": "вне объёма G3-005 (B15)",
+    # Строка добавлена этим гейтом, и это **изменение списка**, а не сохранение.
+    # До неё `MessageBubble` был недостижим лишь транзитивно — через запрещённый
+    # `MessageTimeline.tsx:6`, — а прямое подключение не ловил никто: измерено
+    # подстановкой импорта в `ChatPage.tsx` (граф 75 модулей, чек зелёный).
+    # Решение «весь штатный messaging UI остаётся запасом» должно быть закреплено
+    # статически, а не следовать из одного лишь чужого импорта (B13, вариант A).
+    "features/messages/components/MessageBubble.tsx": "вне объёма G3-005/G3-006 (B13)",
     "features/messages/components/ConnectionStateBanner.tsx": "вне объёма G3-005 (B15)",
     "features/messages/components/TypingIndicator.tsx": "вне объёма G3-005 (B15)",
     "features/messages/components/SyncIndicator.tsx": "вне объёма G3-005 (B15)",
@@ -53,6 +60,12 @@ REQUIRED = (
     "features/auth/me-adapter.ts",
     "features/conversations/ChatPage.tsx",
     "features/conversations/adapter.ts",
+    # Поверхность среза 5: лента и строка состояния. Обе — не оформление, а то,
+    # по чему приёмка читает состояние (B8). В списке они потому, что «объявлен
+    # рабочим, а не подключён» и «не смонтирован вовсе» выглядят одинаково, и
+    # без REQUIRED снятый импорт прошёл бы молча.
+    "features/messages/components/MessageList.tsx",
+    "features/realtime/components/ConnectionStatusLine.tsx",
 )
 
 

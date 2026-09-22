@@ -3,11 +3,14 @@ import { createRoot } from "react-dom/client";
 import "./index.css";
 import App from "./App.tsx";
 import { createApiClient } from "./api/client";
-import { AuthApi, ConversationsApi } from "./api/generated";
+import { AuthApi, ConversationsApi, MessagesApi } from "./api/generated";
+import { createRealtimeTicketIssuer } from "./api/realtimeToken";
 import { bootStateOf, completeLogin } from "./features/auth/callback";
 import { ensureDeviceId, loadDeviceId, saveDeviceId } from "./features/auth/deviceId";
 import { CALLBACK_PATH } from "./features/auth/session";
 import { createSessionState } from "./features/auth/sessionState";
+import type { HistoryApi } from "./features/messages/history";
+import { loadRuntimeConfig } from "./runtime-config";
 
 /**
  * Роутера нет — и не будет: адрес ровно один, `/callback`, и различается он по
@@ -26,6 +29,27 @@ const session = createSessionState();
 
 const authApi = new AuthApi(client.configuration);
 const conversationsApi = new ConversationsApi(client.configuration);
+const messagesApi = new MessagesApi(client.configuration);
+
+/**
+ * Клиент истории отдаётся **операцией**, а не объектом: `HistorySource`
+ * собирается в `App` под зрителя, потому что `currentUserId` известен только
+ * после `/me`. Обёртка нужна и технически — метод класса, отданный голой
+ * ссылкой, потерял бы `this.configuration`.
+ */
+const historyApi: HistoryApi = {
+  listMessages: (request) => messagesApi.listMessages(request),
+};
+
+/** Свежий тикет на каждую попытку соединения: он живёт 120 секунд. */
+const issueTicket = createRealtimeTicketIssuer(client.configuration);
+
+/**
+ * Адрес соединения — функцией, а не значением: `loadRuntimeConfig()` бросает на
+ * отсутствующей конфигурации, и прочитанное заранее значение уронило бы страницу
+ * целиком вместо отказа, который называет то, что человек делал.
+ */
+const readCentrifugoUrl = () => loadRuntimeConfig().centrifugoUrl;
 
 /** Что грузит загрузка. `ready` ставится обоими, а не первым из них. */
 const bootstrapDeps = {
@@ -81,7 +105,13 @@ function retry(): void {
 // адреса API, ни доступа к токену, и быть не должно.
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <App session={session} onRetry={retry} />
+    <App
+      session={session}
+      onRetry={retry}
+      historyApi={historyApi}
+      readCentrifugoUrl={readCentrifugoUrl}
+      issueTicket={issueTicket}
+    />
   </StrictMode>,
 );
 

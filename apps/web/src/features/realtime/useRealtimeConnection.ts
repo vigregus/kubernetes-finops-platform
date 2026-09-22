@@ -10,9 +10,9 @@
  * Логики здесь нет: все решения — в `connectionMachine`. Этот файл только
  * доставляет факты и владеет временем жизни соединения.
  */
-import { useEffect, useReducer, useRef } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 
-import type { ConnectionMachineState } from "./connectionMachine";
+import type { ConnectionEvent, ConnectionMachineState } from "./connectionMachine";
 import { initialConnectionState, transition } from "./connectionMachine";
 import type { RealtimeClient, RealtimeClientOptions } from "./realtimeClient";
 import { createRealtimeClient } from "./realtimeClient";
@@ -33,16 +33,47 @@ export interface UseRealtimeConnectionOptions {
 }
 
 /**
- * Состояние соединения для интерфейса.
+ * Факт, который видит **композиция**, а не SDK.
+ *
+ * Источников фактов у автомата не два, а три: SDK говорит о сокете, браузер —
+ * о сети, а детектор пропуска и протокол догрузки говорят о **наших данных**
+ * (`eventMerge` решает, что публикация — дыра; `sync` решает, что граница
+ * достигнута). Оба последних факта обязаны попасть в тот же автомат: разложи
+ * их по отдельным `useState` — и `SYNCING` перестанет быть одним состоянием,
+ * а `data-sync-reason` нечем будет заполнить.
+ *
+ * Тип **сужен**, а не равен `ConnectionEvent`: композиция вправе сообщить
+ * ровно эти два факта. `sdk-*`, `browser-*` и `subscription-*` приносит
+ * обвязка сама, и пускать их снаружи значило бы завести второй, обходящий SDK
+ * путь управления соединением — то есть ровно то, чего этот файл не делает.
+ */
+export type ClientObservedEvent = Extract<
+  ConnectionEvent,
+  { readonly type: "sequence-gap" | "sync-completed" }
+>;
+
+/**
+ * Состояние соединения для интерфейса — плюс способ сообщить ему то, чего не
+ * видит SDK.
  *
  * Возвращается всё состояние целиком, а не отдельные поля: `syncReason`
- * имеет смысл только вместе с `syncReason !== null`, а `reconnectAllowed`
+ * имеет смысл только вместе с `state === "syncing"`, а `reconnectAllowed`
  * объясняет, почему `online` не поднял соединение. Разложенные на три
  * независимых `useState` значения разошлись бы в момент перехода.
+ *
+ * Форма — **расширение** состояния, а не пара `[state, dispatch]`: у обвязки
+ * один потребитель состояния и один повод его менять снаружи, и `notify`
+ * называет этот повод по имени, тогда как `dispatch` отдал бы наружу весь
+ * набор событий автомата.
  */
+export type RealtimeConnection = ConnectionMachineState & {
+  /** Сообщить автомату факт, увиденный над SDK (см. `ClientObservedEvent`). */
+  notify(event: ClientObservedEvent): void;
+};
+
 export function useRealtimeConnection(
   options: UseRealtimeConnectionOptions,
-): ConnectionMachineState {
+): RealtimeConnection {
   // Начальное состояние — из факта браузера, а не из предположения:
   // страница может быть открыта уже без сети, и тогда `CONNECTING` был бы
   // обещанием соединения, которого не будет.
@@ -109,5 +140,10 @@ export function useRealtimeConnection(
     };
   }, []);
 
-  return state;
+  const notify = useCallback((event: ClientObservedEvent) => dispatch(event), []);
+
+  // Объект собирается через `useMemo`, потому что от него зависит эффект
+  // композиции («вошли в SYNCING — пойти за историей»): новая ссылка на каждом
+  // рендере перезапускала бы его на каждом рендере.
+  return useMemo(() => ({ ...state, notify }), [state, notify]);
 }

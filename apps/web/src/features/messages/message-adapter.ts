@@ -177,6 +177,28 @@ function attachmentOf(dto: MessageDto, attachment: AttachmentDto): MessageAttach
 }
 
 /**
+ * Публикация приходит из сети, поэтому «объект ли это» — первая проверка, а не
+ * подробность: `null.message_id` уронил бы обработчик публикации, а падение
+ * внутри него уносит соединение.
+ */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null
+}
+
+/**
+ * `"me"` — слово модели, `currentUserId` — идентификатор домена. Перевод здесь,
+ * а не в компоненте: рендер не обязан знать, кто смотрит.
+ *
+ * Функция, а не выражение на месте, потому что входов в модель теперь два —
+ * история и канал, — и ответ на вопрос «чьё это сообщение» обязан быть один.
+ * Разошедшись, они показали бы свои сообщения входящими ровно на одном из двух
+ * путей, и заметил бы это человек, а не компилятор.
+ */
+function authorIdOf(senderId: string, currentUserId: string): string {
+  return senderId === currentUserId ? "me" : senderId
+}
+
+/**
  * `now` — обязательный параметр, а не `new Date()` внутри, по той же причине,
  * что и у списка бесед: со скрытыми часами тест на «сегодня/вчера/раньше»
  * зависел бы от момента прогона и не проверял бы ничего.
@@ -198,9 +220,7 @@ export function adaptMessage(
     id: dto.messageId,
     seq: dto.seq,
 
-    // `"me"` — слово модели, `currentUserId` — идентификатор домена. Перевод
-    // здесь, а не в компоненте: рендер не обязан знать, кто смотрит.
-    authorId: dto.senderId === currentUserId ? "me" : dto.senderId,
+    authorId: authorIdOf(dto.senderId, currentUserId),
 
     // Имени отправителя в ответе нет — и выдуманного не появляется.
     authorName: undefined,
@@ -252,4 +272,76 @@ export function adaptMessages(
   timestampOptions: TimestampFormatOptions = {},
 ): ChatMessage[] {
   return items.map((dto) => adaptMessage(dto, currentUserId, now, timestampOptions))
+}
+
+/**
+ * Публикация канала → модель. Второй вход в ту же таблицу соответствия, и
+ * разбор здесь **защитный**, а не доверчивый: форма измерена, а не предположена.
+ *
+ * `_client_event` (`services/realtime_delivery.py:43-56`) отдаёт ровно пять
+ * полей — `type`, `message_id`, `seq`, `sender_id`, `payload` — и публикует их
+ * на `conversation:{conversation_id}`. **Привязка к беседе — это подписка**:
+ * `conversation_id` в теле публикации не едет вовсе, и брать его оттуда неоткуда.
+ *
+ * Контракт канала (`packages/contracts/websocket/channels.json`,
+ * `$defs.conversationEvent`) обязательным объявляет **только `type`**; поля
+ * `message_id`/`seq`/`sender_id`/`payload` у него необязательны, а сам `type`
+ * берётся из набора `message.created`/`message.read`/`message.deleted`. Значит
+ * разбор обязан отвечать `null`, а не падать: падение внутри обработчика
+ * публикации уносит соединение, которого этот гейт и добивается.
+ *
+ * Чего здесь **не** выводится — и это не пропуски, а названные границы:
+ *
+ * * **`timestamp`** — на провод не уезжает ни `created_at`, ни иное время.
+ *   Подставить момент получения значило бы выдать время прихода за время
+ *   отправки, и тем правдоподобнее, чем свежее сообщение. Пустая строка честнее
+ *   и ровно так же пуста, как у записи истории, которой сервер времени не назвал.
+ * * **`attachment`** — публикация несёт `payload`, а `attachments` живут в ответе
+ *   REST (`MessageDto`) и в канал не попадают. Вложение, отправленное живьём,
+ *   доедет подписью и **без** вложения; это граница канала, и её закрывает G3-007.
+ * * **`kind`** — вида сообщения в публикации нет: `type` здесь — тип **события**
+ *   (`message.created`), а не тип сообщения. `"text"` описывает то, что канал
+ *   действительно принёс (тело); `unsupported` утверждал бы, что интерфейс не
+ *   умеет показать сообщение, которое он тут же и показывает.
+ * * **`deleted`** — `false`, и это факт, а не умолчание: надгробия приходят
+ *   событием `message.deleted`, на котором ниже стоит `null`.
+ * * **`deliveryState`** — по той же причине, что и в истории: `message.created`
+ *   сообщает о создании, а не о доставке или прочтении (квитанции — G3-007).
+ */
+export function adaptPublication(event: unknown, currentUserId: string): ChatMessage | null {
+  // Только `message.created` — сообщение. `message.read` и `message.deleted`
+  // принадлежат другим возможностям (квитанции, надгробия — G3-007), и нарисовать
+  // их репликой значило бы показать чужое событие как текст.
+  if (!isRecord(event) || event.type !== "message.created") return null
+
+  const id = event.message_id
+  const seq = event.seq
+  const senderId = event.sender_id
+
+  // Номер — это и порядок, и признак пропуска, то есть предмет всего гейта:
+  // запись без него некуда поставить. Дробный номер тоже отвергается — он не
+  // совпал бы ни с одной границей, и `2.5 > 1 + 1` прочиталось бы пропуском.
+  if (typeof id !== "string" || id.length === 0) return null
+  if (typeof seq !== "number" || !Number.isInteger(seq) || seq < 1) return null
+
+  // Отправитель отличает свою реплику от чужой, опознание доказывает «ровно один
+  // раз» (RT-004). Пустая строка на месте любого из них была бы выдуманным
+  // значением, а не отсутствием, поэтому запись не применяется вовсе.
+  if (typeof senderId !== "string" || senderId.length === 0) return null
+
+  const payload = event.payload
+
+  return {
+    id,
+    seq,
+    authorId: authorIdOf(senderId, currentUserId),
+    kind: "text",
+    // Тело берётся, когда оно строка: `payload` необязателен, а `payload.text`
+    // может прийти числом или объектом. Выдуманного тела не появляется —
+    // `undefined` рисуется пустотой.
+    text: isRecord(payload) && typeof payload.text === "string" ? payload.text : undefined,
+    attachment: undefined,
+    timestamp: "",
+    deleted: false,
+  }
 }

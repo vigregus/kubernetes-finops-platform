@@ -7,10 +7,15 @@
 
 import { describe, expect, it } from "vitest";
 
-import type { ListMessages200Response, Message as MessageDto } from "../../api/generated";
+import type {
+  ListMessages200Response,
+  ListMessagesRequest,
+  Message as MessageDto,
+} from "../../api/generated";
 import type { ChatMessage } from "../../shared/lib/types";
 import { emptyMergeState } from "./eventMerge";
-import { applyTail, TAIL_LIMIT, tailPageOf, tailRequest } from "./history";
+import type { HistoryApi } from "./history";
+import { applyTail, createHistorySource, TAIL_LIMIT, tailPageOf, tailRequest } from "./history";
 
 function message(seq: number, overrides: Partial<ChatMessage> = {}): ChatMessage {
   return {
@@ -154,5 +159,97 @@ describe("форма ответа на входе", () => {
 
     expect(outcome.state.appliedThroughSeq).toBe(0);
     expect(outcome.state.messages).toEqual([]);
+  });
+});
+
+describe("загрузчики истории поверх клиента", () => {
+  // Красный здесь приходит от двух классов дефекта, и оба не выдуманы:
+  // «параметр не доехал» — ровно тот класс, которым был блокер ревизии 3.2
+  // (`conversationId` терялся по дороге в URL), и «граница не заморожена» —
+  // единственный способ, которым догрузка уезжает за голову.
+
+  function givenApi(
+    answer: ListMessages200Response = response({
+      items: [dto(103), dto(102), dto(101)],
+      hasMore: true,
+      syncToSeq: null,
+    }),
+  ) {
+    const calls: ListMessagesRequest[] = [];
+    const api: HistoryApi = {
+      listMessages: (request) => {
+        calls.push(request);
+
+        return Promise.resolve(answer);
+      },
+    };
+
+    return { api, calls };
+  }
+
+  function givenSource(answer?: ListMessages200Response) {
+    const { api, calls } = givenApi(answer);
+
+    return {
+      calls,
+      source: createHistorySource({
+        api,
+        currentUserId: "u-viewer",
+        now: () => NOW,
+        timestampOptions: EN,
+      }),
+    };
+  }
+
+  it("хвост спрашивается у той беседы, которую открыли", async () => {
+    // `toStrictEqual`, а не `toEqual`: последний пропускает ключи со значением
+    // `undefined`, и запрос, собранный с лишним курсором, остался бы зелёным.
+    // У листания курсоров нет вовсе — только лимит.
+    const { source, calls } = givenSource();
+
+    const page = await source.loadTail("c-1");
+
+    expect(calls).toStrictEqual([{ conversationId: "c-1", limit: TAIL_LIMIT }]);
+    // Записи проходят **как пришли** — в порядке ответа, то есть по убыванию.
+    // Порядок наводится ровно в одном месте, `eventMerge` (B22); сортировка
+    // здесь завела бы второе место для того же самого, и однажды они
+    // разошлись бы молча — на том сообщении, ради которого и затевался гейт.
+    expect(page.items.map((it) => it.id)).toEqual(["m-103", "m-102", "m-101"]);
+  });
+
+  it("догрузка несёт замороженную границу и переносит её в ответ", async () => {
+    // Граница переносится **как есть**: потеряй её загрузчик — `advance`
+    // оставит курсор незамороженным, и следующий запрос пересчитает границу
+    // заново, то есть догрузка поедет за голову.
+    const { source, calls } = givenSource(
+      response({ items: [dto(103)], hasMore: false, syncToSeq: 102, nextAfterSeq: null }),
+    );
+
+    const result = await source.loadPage("c-1", { afterSeq: 100, throughSeq: 102 });
+
+    expect(calls).toStrictEqual([
+      { conversationId: "c-1", afterSeq: 100, throughSeq: 102, limit: TAIL_LIMIT },
+    ]);
+    expect(result.syncToSeq).toBe(102);
+    expect(result.hasMore).toBe(false);
+    expect(result.nextAfterSeq).toBeNull();
+  });
+
+  it("первый запрос догрузки не несёт числа на месте границы", async () => {
+    // Требование сформулировано по проводу, а не по форме объекта: клиент
+    // отправляет `through_seq` только при `!= null`, поэтому «ключ со
+    // значением `undefined`» и «ключа нет» для сервера — одно и то же, и
+    // различать их в тесте значило бы требовать от кода того, чего контракт
+    // не требует. Требует он другого: **числа** на месте границы быть не
+    // должно — `through_seq=0` при `after_seq=100` это `400`
+    // (`openapi.yaml:608-613`), то есть смерть догрузки на первом же запросе.
+    const { source, calls } = givenSource();
+
+    await source.loadPage("c-1", { afterSeq: 100 });
+
+    expect(calls[0].conversationId).toBe("c-1");
+    expect(calls[0].afterSeq).toBe(100);
+    expect(calls[0].throughSeq).toBeUndefined();
+    expect(calls[0].limit).toBe(TAIL_LIMIT);
   });
 });

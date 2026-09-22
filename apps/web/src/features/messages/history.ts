@@ -16,11 +16,12 @@
  *   (`openapi.yaml:319-321`): «листание не синхронизация, и границы у него
  *   нет». Граница заводится только запросом с `after_seq` без `through_seq`.
  */
-import type { ListMessages200Response } from "../../api/generated";
+import type { ListMessages200Response, ListMessagesRequest } from "../../api/generated";
 import type { ChatMessage } from "../../shared/lib/types";
 import type { TimestampFormatOptions } from "../conversations/formatTimestamp";
 import { applySnapshot, type MergeOutcome, type MergeState } from "./eventMerge";
 import { adaptMessages } from "./message-adapter";
+import type { SyncPage, SyncPageResult } from "./sync";
 
 /** Сколько сообщений тянем хвостом. Значение названо, а не «на глаз». */
 export const TAIL_LIMIT = 50;
@@ -79,5 +80,86 @@ export function tailPageOf(
     hasMore: response.hasMore,
     nextBeforeSeq: response.nextBeforeSeq,
     syncToSeq: response.syncToSeq,
+  };
+}
+
+/**
+ * Чем история читает сервер. Операция **одна**, и это не совпадение: обе дороги
+ * — хвост без курсора и догрузка с `after_seq` — это один `listMessages` с
+ * разными параметрами. Разводить их по двум клиентам значило бы завести две
+ * копии формы ответа, которые однажды разойдутся.
+ */
+export interface HistoryApi {
+  listMessages(request: ListMessagesRequest): Promise<ListMessages200Response>;
+}
+
+/**
+ * Две дороги истории в том виде, в каком их ждёт `useConversationHistory`.
+ *
+ * Загрузчики, а не состояние: этот модуль знает **форму ответа**, но не знает,
+ * ни когда спрашивать, ни что делать с пропуском. Такое разделение позволяет
+ * проверять протокол догрузки прогоном без сети (`sync.ts`), а форму ответа —
+ * прогоном без хука (здесь).
+ */
+export interface HistorySource {
+  readonly loadTail: (conversationId: string) => Promise<TailPage>;
+  readonly loadPage: (conversationId: string, page: SyncPage) => Promise<SyncPageResult>;
+}
+
+export interface HistorySourceOptions {
+  readonly api: HistoryApi;
+  /** `"me"` в модели — это взгляд; идентификатор домена приходит отсюда. */
+  readonly currentUserId: string;
+  /**
+   * Момент, относительно которого читается display-время.
+   *
+   * Функция, а не значение: страницы читаются в разные мгновения, и общий
+   * замороженный `Date` на всю жизнь соединения показывал бы «вчера» там, где
+   * уже «сегодня». В тестах это же позволяет зафиксировать время.
+   */
+  readonly now?: () => Date;
+  readonly timestampOptions?: TimestampFormatOptions;
+}
+
+/**
+ * Загрузчики истории поверх клиента API.
+ *
+ * Границы ответственности здесь видны в сигнатурах, и это главное, что этот
+ * шов делает: `conversationId` **обязан доехать до запроса** — он приходит
+ * вызывающим, а не берётся из замыкания, потому что одна и та же фабрика
+ * обслуживает любую открытую беседу, и подстановка «текущей» внутри неё
+ * привязала бы ответ к беседе, которой в запросе нет.
+ *
+ * `throughSeq` догрузки переносится **как есть**, включая `undefined`: на
+ * первом запросе границы ещё нет, и появление здесь любого числа означало бы
+ * пересчёт границы вместо её заморозки (B14).
+ */
+export function createHistorySource(options: HistorySourceOptions): HistorySource {
+  const { api, currentUserId, now = () => new Date(), timestampOptions = {} } = options;
+
+  return {
+    loadTail: async (conversationId) => {
+      const response = await api.listMessages({ conversationId, ...tailRequest() });
+
+      return tailPageOf(response, currentUserId, now(), timestampOptions);
+    },
+
+    loadPage: async (conversationId, page) => {
+      const response = await api.listMessages({
+        conversationId,
+        afterSeq: page.afterSeq,
+        throughSeq: page.throughSeq,
+        limit: TAIL_LIMIT,
+      });
+
+      return {
+        items: adaptMessages(response.items, currentUserId, now(), timestampOptions),
+        hasMore: response.hasMore,
+        nextAfterSeq: response.nextAfterSeq,
+        // Без этого поля курсор не заморозится никогда: `advance` оставит
+        // границу `null`, и следующий запрос пересчитает её заново.
+        syncToSeq: response.syncToSeq,
+      };
+    },
   };
 }
