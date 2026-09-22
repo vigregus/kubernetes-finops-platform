@@ -13,6 +13,21 @@
  * Centrifuge` живёт внутри и один раз. Двойник обязан быть **уже**
  * настоящего класса, иначе тест зеленел бы на поверхности, которой у SDK
  * нет.
+ *
+ * **Двойник моделирует server-side подписку, а не клиентскую**, и это его
+ * главное свойство, а не деталь. Канал клиенту не принадлежит: сервер выдаёт
+ * его в connect-ответе (`channels` в `services/realtime.py:83`,
+ * `api/main.py:593`), «Клиент не выбирает канал сам» (`channels.json:5`), а SDK
+ * принимает каналы и эмитит события **клиента** — `client.on("subscribed" |
+ * "publication")` — с полем `ctx.channel` (`_processServerSubs`,
+ * `centrifuge/build/index.js:5149`; `ClientEvents`, `build/types.d.ts:20-45`).
+ *
+ * Поэтому `subscriptionHandlers` здесь **нет** и `newSubscription` только
+ * считается. Двойник, умеющий и клиентскую подписку тоже, позволял бы тесту
+ * изобразить режим, которого на стенде не бывает, — и зелёный прогон говорил
+ * бы о коде, который не исполняется. Ровно это и случилось до правки: адаптер
+ * заводил `newSubscription()`, двойник её обслуживал, а сервер подписывает
+ * клиента сам.
  */
 import type { CentrifugeFactory } from "../features/realtime/realtimeClient";
 
@@ -27,11 +42,14 @@ export interface FakeCentrifuge {
   options: Record<string, unknown>;
   /** `getData` из опций — отдельно, чтобы вызывать его в тесте. */
   getData: (() => Promise<unknown>) | undefined;
-  /** Имя канала подписки. */
-  channel: string;
+  /** Обработчики клиентских событий — единственный вход фактов в этом режиме. */
   clientHandlers: Record<string, Handler>;
-  subscriptionHandlers: Record<string, Handler>;
-  calls: { connect: number; disconnect: number; subscribe: number };
+  /**
+   * `newSubscription` **считается**, а не обслуживается: в server-side режиме
+   * её вызов — уже дефект, и тест обязан называть его числом, а не падением
+   * внутри двойника.
+   */
+  calls: { connect: number; disconnect: number; newSubscription: number };
 }
 
 export function givenFakeCentrifuge(): FakeCentrifuge {
@@ -45,10 +63,8 @@ export function givenFakeCentrifuge(): FakeCentrifuge {
     endpoint: "",
     options: {} as Record<string, unknown>,
     getData: undefined as (() => Promise<unknown>) | undefined,
-    channel: "",
     clientHandlers: {} as Record<string, Handler>,
-    subscriptionHandlers: {} as Record<string, Handler>,
-    calls: { connect: 0, disconnect: 0, subscribe: 0 },
+    calls: { connect: 0, disconnect: 0, newSubscription: 0 },
   } as unknown as FakeCentrifuge;
 
   fake.factory = (endpoint, options) => {
@@ -60,16 +76,13 @@ export function givenFakeCentrifuge(): FakeCentrifuge {
       on: (event: string, cb: Handler) => {
         fake.clientHandlers[event] = cb;
       },
-      newSubscription: (channel: string) => {
-        fake.channel = channel;
-        return {
-          on: (event: string, cb: Handler) => {
-            fake.subscriptionHandlers[event] = cb;
-          },
-          subscribe: () => {
-            fake.calls.subscribe += 1;
-          },
-        };
+      // Заглушка, а не рабочая подписка: её задача — довести вызов до счётчика
+      // и не уронить тест `TypeError`-ом раньше, чем он назовёт дефект
+      // ассертом. Обработчики никуда не пишутся: у серверной подписки их и
+      // неоткуда взять, поэтому тест, навесивший их здесь, обязан покраснеть.
+      newSubscription: () => {
+        fake.calls.newSubscription += 1;
+        return { on: () => {}, subscribe: () => {}, unsubscribe: () => {} };
       },
       connect: () => {
         fake.calls.connect += 1;

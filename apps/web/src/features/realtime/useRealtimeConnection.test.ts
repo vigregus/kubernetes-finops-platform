@@ -84,7 +84,7 @@ describe("соединение живёт ровно столько, сколь�
     const { unmount, fake } = givenHook();
 
     expect(fake.calls.connect).toBe(1);
-    expect(fake.calls.subscribe).toBe(1);
+    expect(fake.calls.newSubscription).toBe(0);
 
     unmount();
 

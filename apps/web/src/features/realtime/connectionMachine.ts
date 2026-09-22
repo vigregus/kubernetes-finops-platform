@@ -20,11 +20,18 @@ import type { ConnectionState } from "../../shared/lib/types";
  * Почему мы синхронизируемся.
  *
  * Не телеметрия: `SYNCING` после переподключения приходит и от недостижимой
- * позиции, и от локального пропуска в `seq`, и от ошибки позиции, — и без
- * причины эти три случая в разметке неотличимы друг от друга. Поле живёт
+ * позиции (сервер не смог восстановить), и от локального пропуска в `seq`, — и
+ * без причины эти два случая в разметке неотличимы друг от друга. Поле живёт
  * ровно пока состояние `syncing` и снимается при выходе из него.
+ *
+ * Значений **два**, а не три, и третье убрано замером, а не забыто. Ошибка
+ * недостижимой позиции (`112`) при server-side подписке не наблюдаема: код
+ * выбрасывает сам SDK, эмитя `unsubscribed` без кода
+ * (`centrifuge/build/index.js:5321-5326`); разбор — в `realtimeClient.ts` и в
+ * `README.md` этого каталога. Значение, на которое нет входа, объявляло бы
+ * покрытым путь, которого нет.
  */
-export type SyncReason = "recovery-miss" | "sequence-gap" | "unrecoverable-position";
+export type SyncReason = "recovery-miss" | "sequence-gap";
 
 export interface ConnectionMachineState {
   readonly state: ConnectionState;
@@ -61,14 +68,18 @@ export type ConnectionEvent =
   | { readonly type: "sdk-connected" }
   /** Разрыв с кодом из `DisconnectedContext`. */
   | { readonly type: "sdk-disconnected"; readonly code: number }
-  /** Ответ на подписку: обе половины — из `ServerSubscribedContext`. */
+  /**
+   * Ответ на подписку: обе половины — из `ServerSubscribedContext`.
+   *
+   * Второй документированный вход в ту же починку — ошибка недостижимой
+   * позиции — отдельным событием **не заведён**: замер показал, что до
+   * приложения он в этом режиме не доходит (см. `SyncReason` выше).
+   */
   | {
       readonly type: "subscription-subscribed";
       readonly wasRecovering: boolean;
       readonly recovered: boolean;
     }
-  /** Ошибка недостижимой позиции — приходит подпиской, а не разрывом (см. README). */
-  | { readonly type: "unrecoverable-position" }
   /** Публикация с `seq > appliedThroughSeq + 1` — детектор пропуска среза 3. */
   | { readonly type: "sequence-gap" }
   /** Догрузка дошла до границы: `has_more === false` и `next_after_seq === null`. */
@@ -178,12 +189,6 @@ export function transition(
         return state;
       }
       return { ...state, state: "connected", syncReason: null };
-
-    case "unrecoverable-position":
-      // Второй документированный путь к той же починке: позиция недостижима, и
-      // сходить за историей нужно так же, как при неудачном восстановлении.
-      // Отказом или бесконечным переподключением это быть не должно.
-      return state.browserOnline ? syncing(state, "unrecoverable-position") : state;
 
     case "sequence-gap":
       return state.browserOnline ? syncing(state, "sequence-gap") : state;

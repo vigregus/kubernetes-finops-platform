@@ -28,6 +28,14 @@ const VIEWER_ID = "user-viewer";
 const CENTRIFUGO_URL = "wss://rt.finops.local/connection/websocket";
 
 const ANNA = conversationOf({ id: "c1", name: "Anna Petrova", hasMessages: true });
+/**
+ * Канал беседы `ANNA` — так его строит панель (`conversation:{id}`).
+ *
+ * Указывается в событиях SDK явно, потому что канал теперь **отбор**: сервер
+ * подписывает клиента на несколько каналов сразу (`user:{id}` тем же событием),
+ * и событие без имени канала не говорит, о какой подписке речь.
+ */
+const ANNA_CHANNEL = "conversation:c1";
 const MARCUS_NO_MESSAGES = conversationOf({
   id: "c2",
   name: "Marcus Chen",
@@ -209,7 +217,7 @@ describe("состояние соединения наблюдаемо и наз
     await waitFor(() => expect(screen.getByText("message 102")).toBeTruthy());
 
     await act(async () => {
-      fake.subscriptionHandlers["subscribed"]?.({ wasRecovering: true, recovered: false });
+      fake.clientHandlers["subscribed"]?.({ channel: ANNA_CHANNEL, wasRecovering: true, recovered: false });
     });
 
     await waitFor(() => expect(state()).toBe("syncing"));
@@ -257,7 +265,7 @@ describe("состояние соединения наблюдаемо и наз
     await waitFor(() => expect(screen.getByText("message 102")).toBeTruthy());
 
     await act(async () => {
-      fake.subscriptionHandlers["subscribed"]?.({ wasRecovering: true, recovered: false });
+      fake.clientHandlers["subscribed"]?.({ channel: ANNA_CHANNEL, wasRecovering: true, recovered: false });
     });
 
     await waitFor(() => expect(syncReason()).toBe("recovery-miss"));
@@ -284,7 +292,7 @@ describe("состояние соединения наблюдаемо и наз
     await waitFor(() => expect(screen.getByText("message 1")).toBeTruthy());
 
     await act(async () => {
-      fake.subscriptionHandlers["subscribed"]?.({ wasRecovering: false, recovered: false });
+      fake.clientHandlers["subscribed"]?.({ channel: ANNA_CHANNEL, wasRecovering: false, recovered: false });
     });
 
     await waitFor(() => expect(state()).toBe("connected"));

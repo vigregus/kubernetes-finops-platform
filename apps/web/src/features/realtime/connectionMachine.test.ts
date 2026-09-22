@@ -37,7 +37,6 @@ const ALL_EVENTS: readonly ConnectionEvent[] = [
   { type: "subscription-subscribed", wasRecovering: false, recovered: false },
   { type: "subscription-subscribed", wasRecovering: true, recovered: false },
   { type: "subscription-subscribed", wasRecovering: true, recovered: true },
-  { type: "unrecoverable-position" },
   { type: "sequence-gap" },
   { type: "sync-completed" },
 ];
@@ -123,23 +122,25 @@ describe("детектор расхождения: защита wasRecovering", 
   });
 });
 
-describe("второй путь к той же починке — ошибка позиции", () => {
-  // Измерено у закреплённого артефакта: ошибка недостижимой позиции приходит
-  // событием подписки (`unsubscribed`, ctx.code === 112), а не разрывом.
-  // Поэтому у неё **своё** событие автомата: свести её к обычному разрыву
-  // значило бы увести клиента в переподключение без догрузки.
-  it("ведёт в тот же SYNCING, с собственной причиной", () => {
-    const state = transition(connected(), { type: "unrecoverable-position" });
-
-    expect(state.state).toBe("syncing");
-    expect(state.syncReason).toBe("unrecoverable-position");
-  });
-
-  it("причина отличима от пропуска в seq — иначе три случая в разметке неразличимы", () => {
+describe("причин синхронизации ровно две, и они различимы", () => {
+  // Третьего значения — `unrecoverable-position` — в наборе **нет**, и это
+  // замер, а не забывчивость: ошибка недостижимой позиции (`112`) при
+  // server-side подписке до приложения не доходит. Код выбрасывает сам SDK,
+  // эмитя `unsubscribed` без кода (`centrifuge/build/index.js:5321-5326`), а
+  // разобрать его можно только у объекта подписки, которого в этом режиме нет.
+  // Значение, на которое нет входа, объявляло бы покрытым путь, которого нет.
+  it("пропуск в seq и расхождение восстановления дают разные причины", () => {
     const gap = transition(connected(), { type: "sequence-gap" });
+    const miss = transition(connected(), {
+      type: "subscription-subscribed",
+      wasRecovering: true,
+      recovered: false,
+    });
 
     expect(gap.state).toBe("syncing");
     expect(gap.syncReason).toBe("sequence-gap");
+    expect(miss.state).toBe("syncing");
+    expect(miss.syncReason).toBe("recovery-miss");
   });
 });
 
@@ -190,7 +191,6 @@ describe("офлайн как производственный вход", () => 
       { type: "sdk-connecting" },
       { type: "sdk-disconnected", code: 3001 },
       { type: "subscription-subscribed", wasRecovering: false, recovered: false },
-      { type: "unrecoverable-position" },
       { type: "sequence-gap" },
       { type: "sync-completed" },
     ] satisfies ConnectionEvent[]) {

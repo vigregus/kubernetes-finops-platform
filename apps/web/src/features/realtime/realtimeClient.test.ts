@@ -1,9 +1,9 @@
-// Детекторы адаптера: свежий тикет на каждую попытку, разбор событий SDK
-// и изоляция зависимости.
+// Детекторы адаптера: свежий тикет на каждую попытку, режим server-side
+// подписки и изоляция зависимости.
 //
 // SDK подменяется **параметром фабрики**, а не `vi.mock` модуля: подмена
-// модуля целиком подменила бы и константу `UNRECOVERABLE_POSITION`, и тест
-// проверял бы не тот код, который исполняется.
+// модуля целиком подменила бы и решения самого адаптера, и тест проверял бы
+// не тот код, который исполняется.
 
 import { readFileSync, readdirSync } from "node:fs";
 import { join, relative } from "node:path";
@@ -16,6 +16,8 @@ import { createRealtimeClient } from "./realtimeClient";
 
 const CENTRIFUGO = "wss://rt.finops.local/connection/websocket";
 const CHANNEL = "conversation:3f6b0d1e-0f4e-4a1f-9d2b-3ad0d1e6a111";
+/** Второй канал той же выдачи сервера: он подписывает клиента и на `user:{id}`. */
+const OTHER_CHANNEL = "user:8c1f2a34-5b6d-4e7f-8a90-1b2c3d4e5f60";
 
 /** Адаптер с двойником и записью всего, что он отдаёт наружу. */
 function givenClient() {
@@ -50,18 +52,11 @@ describe("свежий тикет на каждую попытку соедин�
   });
 });
 
-describe("адрес и канал приходят снаружи", () => {
+describe("адрес соединения приходит снаружи", () => {
   it("адрес соединения — публичный, из конфигурации", () => {
     const { fake } = givenClient();
 
     expect(fake.endpoint).toBe(CENTRIFUGO);
-  });
-
-  it("канал беседы назван по контракту", () => {
-    const { client, fake } = givenClient();
-    client.start();
-
-    expect(fake.channel).toBe(CHANNEL);
   });
 });
 
@@ -82,7 +77,35 @@ describe("факты клиента доходят до автомата", () =>
   });
 });
 
-describe("факты подписки доходят до автомата", () => {
+describe("server-side подписка: канал выдаёт сервер, клиент его не выбирает", () => {
+  // Измерено у закреплённого артефакта `centrifuge` 5.7.4. Сервер подписывает
+  // клиента сам — `channels` приходят в connect-data (`services/realtime.py:83`,
+  // `api/main.py:593`), и «Клиент не выбирает канал сам»
+  // (`channels.json:5`). В этом режиме SDK эмитит события **клиента** —
+  // `client.on("subscribed" | "publication")` — с полем `ctx.channel`
+  // (`build/types.d.ts:20-45`, обработка в `_processServerSubs`,
+  // `build/index.js:5149`). Объекта подписки, созданного клиентом, здесь нет
+  // вовсе, поэтому двойник и даёт эти два события верхним уровнем.
+
+  it("подписки, заведённой клиентом, не заводится вовсе", () => {
+    // Клиентская подписка — **другой** режим: в нём события приходят объекту
+    // подписки, а сервер канал не выдаёт. Двойник считает её вызовы именно
+    // затем, чтобы этот счётчик краснел числом, а не падением внутри двойника.
+    const { client, fake } = givenClient();
+
+    client.start();
+
+    expect(fake.calls.newSubscription).toBe(0);
+  });
+
+  it("start поднимает только соединение", () => {
+    const { client, fake } = givenClient();
+
+    client.start();
+
+    expect(fake.calls).toEqual({ connect: 1, disconnect: 0, newSubscription: 0 });
+  });
+
   it("обе половины ответа на подписку передаются как есть", () => {
     // `recovered: false` при `wasRecovering: true` и при `wasRecovering: false` —
     // разные факты, и различить их может только автомат. Адаптер обязан
@@ -90,9 +113,12 @@ describe("факты подписки доходят до автомата", () 
     const { client, fake, events } = givenClient();
     client.start();
 
-    fake.subscriptionHandlers.subscribed({ wasRecovering: false, recovered: false });
-    fake.subscriptionHandlers.subscribed({ wasRecovering: true, recovered: false });
-    fake.subscriptionHandlers.subscribed({ wasRecovering: true, recovered: true });
+    const subscribed = (wasRecovering: boolean, recovered: boolean) =>
+      fake.clientHandlers["subscribed"]?.({ channel: CHANNEL, wasRecovering, recovered });
+
+    subscribed(false, false);
+    subscribed(true, false);
+    subscribed(true, true);
 
     expect(events).toEqual([
       { type: "subscription-subscribed", wasRecovering: false, recovered: false },
@@ -101,30 +127,39 @@ describe("факты подписки доходят до автомата", () 
     ]);
   });
 
-  it("ошибка позиции приходит подпиской и названа своим событием", () => {
-    // Измерено у закреплённого артефакта: код 112 уходит путём
-    // `_setUnsubscribed`, то есть событием `unsubscribed`, а не `disconnected`.
+  it("чужой канал за подписку этой беседы не принимается", () => {
+    // Тем же событием приходят все каналы выдачи, включая `user:{id}`
+    // (`services/realtime.py:83`). Доложить о чужом автомату беседы значило бы
+    // принять чужую подписку за подписку этой — и, например, уехать в SYNCING
+    // по чужому `recovered: false`.
     const { client, fake, events } = givenClient();
     client.start();
 
-    fake.subscriptionHandlers.unsubscribed({ code: 112 });
-
-    expect(events).toEqual([{ type: "unrecoverable-position" }]);
-  });
-
-  it("прочие коды снятия подписки автомату не докладываются", () => {
-    // Обычный разрыв приходит событием `disconnected` и имеет свой код.
-    // Доложить о нём ещё и отсюда значило бы послать автомату два разных
-    // факта об одном событии.
-    const { client, fake, events } = givenClient();
-    client.start();
-
-    fake.subscriptionHandlers.unsubscribed({ code: 3001 });
+    fake.clientHandlers["subscribed"]?.({
+      channel: OTHER_CHANNEL,
+      wasRecovering: true,
+      recovered: false,
+    });
 
     expect(events).toEqual([]);
   });
 
-  it("публикация доходит как есть, без разбора", () => {
+  it("ответ на подписку нашего канала называет расхождение", () => {
+    const { client, fake, events } = givenClient();
+    client.start();
+
+    fake.clientHandlers["subscribed"]?.({
+      channel: CHANNEL,
+      wasRecovering: true,
+      recovered: false,
+    });
+
+    expect(events).toEqual([
+      { type: "subscription-subscribed", wasRecovering: true, recovered: false },
+    ]);
+  });
+
+  it("публикация нашего канала доходит как есть, без разбора", () => {
     const { client, fake, publications } = givenClient();
     client.start();
 
@@ -135,34 +170,57 @@ describe("факты подписки доходят до автомата", () 
       sender_id: "u-1",
       payload: { text: "привет" },
     };
-    fake.subscriptionHandlers.publication({ data: payload });
+    fake.clientHandlers["publication"]?.({ channel: CHANNEL, data: payload });
 
     expect(publications).toEqual([payload]);
+  });
+
+  it("публикация чужого канала в ленту не попадает", () => {
+    const { client, fake, publications } = givenClient();
+    client.start();
+
+    fake.clientHandlers["publication"]?.({ channel: OTHER_CHANNEL, data: { seq: 42 } });
+
+    expect(publications).toEqual([]);
+  });
+
+  it("снятия подписки адаптер не слушает вовсе", () => {
+    // Измерено: `unsubscribed` верхнего уровня **не несёт кода** —
+    // `_handleUnsubscribe` выбрасывает `unsubscribe.code` для серверных подписок
+    // (`build/index.js:5321-5326`), а доходит код только путём клиентской
+    // подписки, которой здесь нет. Докладывать автомату нечего, поэтому
+    // обработчика нет, и это проверяется наличием самого обработчика, а не
+    // пустым списком событий: пустой список получился бы и от вызова
+    // отсутствующего обработчика, то есть был бы тождеством, а не детектором.
+    const { client, fake } = givenClient();
+
+    client.start();
+
+    expect(fake.clientHandlers["unsubscribed"]).toBeUndefined();
   });
 });
 
 describe("жизненный цикл", () => {
-  it("start поднимает подписку и соединение, stop опускает соединение", () => {
+  it("start поднимает соединение, stop опускает", () => {
     const { client, fake } = givenClient();
 
     client.start();
-    expect(fake.calls).toEqual({ connect: 1, disconnect: 0, subscribe: 1 });
+    expect(fake.calls).toEqual({ connect: 1, disconnect: 0, newSubscription: 0 });
 
     client.stop();
     expect(fake.calls.disconnect).toBe(1);
   });
 
-  it("connect возобновляет попытки, не пересоздавая подписку", () => {
-    // Возврат браузера в сеть не должен заводить вторую подписку: канал
-    // один, и вторая подписка на тот же канал — ошибка SDK, а не
-    // переподключение.
+  it("connect возобновляет попытки, подписки при этом не появляется", () => {
+    // Возврат браузера в сеть не должен ничего подписывать: сервер подписал
+    // клиента сам, и выбора канала на клиенте нет вовсе.
     const { client, fake } = givenClient();
 
     client.start();
     client.connect();
 
     expect(fake.calls.connect).toBe(2);
-    expect(fake.calls.subscribe).toBe(1);
+    expect(fake.calls.newSubscription).toBe(0);
   });
 });
 
