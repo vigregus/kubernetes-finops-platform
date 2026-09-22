@@ -43,6 +43,13 @@ REALM="${KEYCLOAK_REALM:-messenger}"
 APP_ORIGIN="${E2E_BASE_URL:-https://app.finops.local}"
 IDP_ORIGIN="${E2E_IDP_ORIGIN:-https://idp.finops.local}"
 
+# Адрес realtime — третье имя, которое обязано разрешаться **на хосте**: его
+# открывает браузер приёмки, а не под. Оно приходит странице не отсюда, а из
+# `runtimeConfig` продвижения, и это ровно та причина, по которой его нельзя
+# не проверить: разойтись они могут молча, и расходятся тихо — клиент остаётся
+# в `connecting`, а падение выглядит как дефект кода, а не как незаведённое имя.
+RT_ORIGIN="${E2E_RT_ORIGIN:-https://rt.finops.local}"
+
 USER_A="${E2E_USER_A_EMAIL:-g3-web-e2e-a@finops.local}"
 USER_B="${E2E_USER_B_EMAIL:-g3-web-e2e-b@finops.local}"
 
@@ -78,6 +85,25 @@ die()  { bad "$1"; exit 1; }
 probe() {
     local code
     code="$(curl -s -k -o /dev/null -w '%{http_code}' --max-time 10 "$1" 2>/dev/null || true)"
+    printf '%s' "${code:-000}"
+}
+
+# Realtime проверяется **рукопожатием, а не кодом ответа на `/`**. Маршрут
+# обслуживает только `/connection/websocket`, поэтому `404` на корне — признак
+# работающего маршрута, а не сломанного, и ждать там `200` значило бы завести
+# проверку, красную на исправном стенде. `101` доказывает сразу два нужных
+# свойства: имя разрешается на хосте и шлюз принимает переход в WebSocket —
+# то же самое, что делает браузер сценария.
+#
+# Коды различаются по причине, и это здесь несущее: `000` — имя не разрешилось
+# или край не проброшен, `404` — имя разрешилось, а маршрута для него нет.
+realtime_upgrade() {
+    local code
+    code="$(curl -s -k -o /dev/null -w '%{http_code}' --max-time 10 \
+        -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+        -H 'Sec-WebSocket-Version: 13' \
+        -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+        "$RT_ORIGIN/connection/websocket" 2>/dev/null || true)"
     printf '%s' "${code:-000}"
 }
 
@@ -761,6 +787,7 @@ step "preflight: стенд отвечает по публичным имена�
 
 app_code="$(probe "$APP_ORIGIN/")"
 idp_code="$(probe "$IDP_ORIGIN/realms/$REALM/.well-known/openid-configuration")"
+rt_code="$(realtime_upgrade)"
 
 if [ "$app_code" = "200" ]; then
     ok "$APP_ORIGIN/ → $app_code"
@@ -772,6 +799,11 @@ if [ "$idp_code" = "200" ]; then
 else
     bad "$IDP_ORIGIN → $idp_code (нужен 200)"
 fi
+if [ "$rt_code" = "101" ]; then
+    ok "$RT_ORIGIN/connection/websocket → $rt_code (рукопожатие принято)"
+else
+    bad "$RT_ORIGIN/connection/websocket → $rt_code (нужно 101)"
+fi
 
 if [ "$app_code" != "200" ] || [ "$idp_code" != "200" ]; then
     # Две причины называются рядом, потому что снаружи они выглядят одинаково:
@@ -779,6 +811,20 @@ if [ "$app_code" != "200" ] || [ "$idp_code" != "200" ]; then
     warn "нужен и проброс края на хост (docs/local-setup.md, шаг 7), и маршрут:"
     warn "  app.finops.local обслуживается только после коммита продвижения (срез 12)"
     die "стенд не отвечает по публичным именам — приёмка не начнётся"
+fi
+
+# Отдельная ветка, а не общий выход: у realtime причина своя, и называть её
+# надо до браузера. Иначе сценарий досидит весь свой бюджет в `connecting`, а
+# падение покажет «сторона A: панель не несёт connected» — то есть дефект кода
+# там, где не разрешается имя. Проверено этим гейтом: `rt.finops.local`
+# обслуживался, но в `/etc/hosts` его не было, и красный пришёл именно оттуда.
+if [ "$rt_code" != "101" ]; then
+    if [ "$rt_code" = "000" ]; then
+        warn "имя не разрешается на хосте: добавьте строку в /etc/hosts рядом с app.finops.local"
+    else
+        warn "имя разрешается, а маршрута нет: rt.finops.local не обслуживается краем"
+    fi
+    die "realtime не отвечает рукопожатием — сценарий не сможет выйти из connecting"
 fi
 
 step "preflight: администратор Keycloak"
