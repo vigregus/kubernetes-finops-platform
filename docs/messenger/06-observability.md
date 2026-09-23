@@ -510,6 +510,31 @@ client_queue_size              slow_consumer_disconnects
 
 — то есть один под на грани, а среднее прекрасно.
 
+Метрики отдаёт сам Centrifugo, и включать ничего не нужно: чарт передаёт
+`--prometheus.enabled` безусловно, на внутреннем порту `9000` (`internal`)
+по пути `/metrics` отвечает 200 — 77 имён, из них 37 `centrifugo_*`,
+остальные `go_*`, `process_*` и `promhttp_*`. Панель «WebSocket-соединения»
+на обзорном дашборде рисует `centrifugo_node_num_clients` в разрезе подов —
+сама метрика идёт без меток, разрез даёт скрейп, — и рядом стоят
+`centrifugo_node_num_subscriptions`, `centrifugo_node_num_channels`
+и `centrifugo_node_num_users`.
+
+Снимать их было нечем: ни один scrape-объект кластера не адресовал
+Centrifugo, а неснятая метрика снаружи неотличима от нуля. Теперь её
+снимает `VMServiceScrape` из каталога компонента — с того же порта и
+с тем же интервалом 30 с, что и у соседей по namespace.
+
+Остальное из списка выше снимается теми же именами, но пока не нарисовано:
+переподключения — `centrifugo_client_connections_accepted` и
+`centrifugo_client_num_server_disconnects`, восстановление —
+`centrifugo_client_recover`, отправленное и принятое —
+`centrifugo_node_messages_sent_count` и `centrifugo_node_messages_received_count`,
+отставание подписки в Redis — `centrifugo_node_pub_sub_lag_seconds`,
+вытеснение у медленного потребителя — `centrifugo_broker_redis_pub_sub_dropped_messages`.
+Точных аналогов `client_queue_size` и `slow_consumer_disconnects` в этом
+наборе нет: незавершённое видно только как `..._inflight`, а вытеснение
+происходит на стороне брокера, а не клиента.
+
 ### Телеметрия браузера обязательна
 
 Без неё настоящий SLI не измерить. «Centrifugo опубликовал» — ещё не
