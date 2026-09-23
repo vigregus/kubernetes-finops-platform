@@ -32,7 +32,7 @@ MESSENGER_APPS  := messenger-secrets messenger-postgres messenger-redis \
 PYTHON ?= python3.12
 PYTHON_VERSION = (3, 12)
 
-.PHONY: help bootstrap local-up local-test local-down contracts kafka-security layers sql venv lint unit web-check chart-env chart-render web-e2e web-e2e-fixture migrate smoke integration send-message status
+.PHONY: help bootstrap local-up local-test local-down contracts kafka-security layers sql venv lint unit web-check chart-env chart-render dashboards web-e2e web-e2e-fixture migrate smoke integration send-message status
 
 help:
 	@# Класс символов включает цифры: имя `web-e2e` без них не опознаётся вовсе,
@@ -221,6 +221,14 @@ chart-render: ## Чарт: шаблон не изменил вывод пяти 
 	@# его могло бы просто не найтись. В CI сюда придёт
 	@# `github.event.pull_request.base.sha`.
 	@BASE_SHA="$(BASE_SHA)" python3 scripts/check-chart-render.py
+
+dashboards: ## Дашборды: метрики панелей существуют, манифесты применяются
+	@# В агрегат `local-test` не входит — как и `chart-env` с `chart-render`:
+	@# это статика по gitops, а не прогон кода, и падение здесь означает не
+	@# сломанную сборку, а панель, которая никогда не нарисуется, или
+	@# манифест, который никто не применяет. Обе причины проходят молча и
+	@# без этой цели не краснеют нигде.
+	@python3 scripts/check-dashboards.py
 
 web-e2e: ## Веб: браузерная приёмка против стенда (единственный вход)
 	@# Один процесс, а не два. Пароль фикстуры живёт только в окружении, и

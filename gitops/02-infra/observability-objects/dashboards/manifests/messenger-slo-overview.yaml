@@ -188,6 +188,36 @@ spec:
               "expr": "max(messenger_outbox_oldest_age_seconds{namespace=~\"$namespace\"})"
             }
           ]
+        },
+        {
+          "id": 11,
+          "type": "timeseries",
+          "title": "HTTP запросов в секунду (API)",
+          "description": "Панель 9 отвечает, какая доля запросов — ошибки; эта — сколько всего приходит.",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "reqps" } },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 23 },
+          "targets": [
+            {
+              "expr": "sum by (route) (rate(http_requests_total{namespace=~\"$namespace\"}[5m]))",
+              "legendFormat": "{{route}}"
+            }
+          ]
+        },
+        {
+          "id": 12,
+          "type": "timeseries",
+          "title": "WebSocket-соединения (Centrifugo)",
+          "description": "Разрез по подам обязателен (докс, часть 4 «Centrifugo — отдельный случай»): десять подов и триста тысяч соединений в среднем выглядят благополучно.",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "short" } },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 23 },
+          "targets": [
+            {
+              "expr": "sum by (pod) (centrifugo_node_num_clients{namespace=~\"$namespace\"})",
+              "legendFormat": "{{pod}}"
+            }
+          ]
         }
       ]
     }
