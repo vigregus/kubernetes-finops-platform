@@ -59,12 +59,23 @@ from grafana_correlation.dashboard_yaml import load
 ROOT = Path(__file__).resolve().parent.parent
 
 # Метрики, которые приходят не из `apps/**`, а от чужого экспортёра, чей
-# scrape-объект лежит в этом же репозитории. Ключ — префикс имени метрики,
-# значение — манифест, который эту метрику снимает. Манифест обязан
-# существовать и быть покрытым инвариантом B: иначе строка в таблице
-# разрешает панель на метрике, которой в кластере никто не снимает, — то
-# есть ровно тот дефект, от которого таблица и защищает.
-EXTERNAL_METRICS: dict[str, str] = {}
+# scrape-объект лежит в этом же репозитории. Ключ — имя метрики целиком,
+# значение — манифест, который её снимает. Манифест обязан существовать и
+# быть покрытым инвариантом B: иначе строка в таблице разрешает панель на
+# метрике, которой в кластере никто не снимает, — то есть ровно тот дефект,
+# от которого таблица и защищает.
+#
+# Именно имя целиком, а не префикс семейства: префикс разрешил бы опечатку
+# в любом другом имени того же семейства, а это тот же класс, что и опечатка
+# в метрике приложения. Новая метрика того же экспортёра — новая строка,
+# и она видна в диффе.
+EXTERNAL_METRICS: dict[str, str] = {
+    # Отдаёт Centrifugo на внутреннем порту 9000, объявлена не в `apps/**`,
+    # а в самом чарте. Снимается скрейпом из этого же репозитория.
+    "centrifugo_node_num_clients": (
+        "gitops/04-messenger/messenger-centrifugo/manifests/service-scrape.yaml"
+    ),
+}
 
 # Ключевые слова PromQL, которые не сопровождаются скобкой и потому не
 # снимаются структурой. Список закрытый и намеренно короткий: сюда попадает
@@ -269,19 +280,19 @@ def main() -> int:
                 checked_names += 1
                 unique_names.add(name)
                 base = base_name(name)
-                prefix = next((p for p in EXTERNAL_METRICS if base.startswith(p)), None)
-                if prefix is not None:
-                    manifest = ROOT / EXTERNAL_METRICS[prefix]
-                    external_seen[prefix] = EXTERNAL_METRICS[prefix]
+                known = base if base in EXTERNAL_METRICS else None
+                if known is not None:
+                    manifest = ROOT / EXTERNAL_METRICS[known]
+                    external_seen[known] = EXTERNAL_METRICS[known]
                     if not manifest.exists():
                         violations.append(
                             f"{where} (панель {panel_id}): `{base}` разрешена строкой "
-                            f"EXTERNAL_METRICS, но манифеста {EXTERNAL_METRICS[prefix]} нет"
+                            f"EXTERNAL_METRICS, но манифеста {EXTERNAL_METRICS[known]} нет"
                         )
                     elif not any(covers(source, manifest) for source in sources):
                         violations.append(
                             f"{where} (панель {panel_id}): `{base}` разрешена строкой "
-                            f"EXTERNAL_METRICS, но {EXTERNAL_METRICS[prefix]} "
+                            f"EXTERNAL_METRICS, но {EXTERNAL_METRICS[known]} "
                             f"не покрыт ни одним `source.path`"
                         )
                 elif base not in app_text:

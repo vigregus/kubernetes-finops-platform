@@ -1,0 +1,29 @@
+# Centrifugo отдаёт метрики на внутреннем HTTP-порту 9000 без всякой настройки:
+# чарт 13.5.9 безусловно передаёт `--prometheus.enabled`. Проверено изнутри
+# кластера - `http://messenger-centrifugo:9000/metrics` отвечает 200, 672 строки,
+# среди них `centrifugo_node_num_clients`. Поэтому `metrics.serviceMonitor`
+# чарта не нужен: у него другая беда - в кластере нет CRD monitoring.coreos.com,
+# и объект просто не применился бы.
+#
+# Скребём службу, а не под: порт метрик - именованный порт службы, и роль
+# endpoints добавляет к серии namespace/pod/container, без которых панель
+# не разрезать по подам.
+#
+# Селектор намеренно не такой, как у api: там есть `part-of: messenger`,
+# а у пода Centrifugo этой метки нет. Ошибка тут не видна ничем - объект
+# с селектором в пустоту остаётся operational, потому что «ни один под
+# не подошёл» ошибкой не считается, а панель при этом пуста.
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMServiceScrape
+metadata:
+  name: messenger-centrifugo
+  namespace: messenger
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: centrifugo
+      app.kubernetes.io/instance: messenger-centrifugo
+  endpoints:
+    - port: internal
+      path: /metrics
+      interval: 30s

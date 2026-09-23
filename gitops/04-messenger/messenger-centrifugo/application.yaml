@@ -22,6 +22,15 @@ spec:
         releaseName: messenger-centrifugo
         valueFiles:
           - $values/gitops/04-messenger/messenger-centrifugo/values.yaml
+    # Метрики Centrifugo снимаются отдельным объектом, а не чартом: у чарта
+    # это `metrics.serviceMonitor`, а CRD monitoring.coreos.com в кластере нет.
+    # Каталог свой, а не общий messenger: скрейп принадлежит этому компоненту,
+    # и удаление компонента уносит его с собой.
+    - repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
+      targetRevision: HEAD
+      path: gitops/04-messenger/messenger-centrifugo/manifests
+      directory:
+        recurse: true
   destination:
     server: https://kubernetes.default.svc
     namespace: messenger
