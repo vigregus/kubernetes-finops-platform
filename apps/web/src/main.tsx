@@ -57,6 +57,25 @@ const bootstrapDeps = {
   loadConversations: () => conversationsApi.listConversations(),
 };
 
+/**
+ * Сверка: перечитать список бесед — операция, собранная рядом с загрузкой.
+ *
+ * Клиенту списка сегодня **нечем** его перечитать: `loadConversations` живёт
+ * здесь, а панель получает уже разобранный массив. Без этого пропа сверка была
+ * бы словом в докстринге: у счётчика непрочитанного событие — транспорт
+ * best-effort, и после потерянной публикации истину взять неоткуда.
+ *
+ * Тикет здесь не перевыпускается, устройство не переспрашивается и `/me` не
+ * повторяется: список бесед несёт и счётчики, и отметки квитанций, то есть всё,
+ * что сверяется. Второй круг за тем, что не меняется, был бы платой за
+ * симметрию (`D11`).
+ *
+ * Отдаётся **клиентским** типом (`ConversationListPage`), а не моделью
+ * интерфейса: адаптация — работа `ReadyScreen`, и здесь её негде взять
+ * (`currentUserId` известен только после `/me`).
+ */
+const refreshConversations = () => conversationsApi.listConversations();
+
 async function start(): Promise<void> {
   // Идентификатор заводится **до** первого запроса — и до ветки: на `/callback`
   // первым запросом идёт обмен, и он тоже обязан нести `X-Device-Id`, иначе
@@ -109,6 +128,7 @@ createRoot(document.getElementById("root")!).render(
       session={session}
       onRetry={retry}
       historyApi={historyApi}
+      refreshConversations={refreshConversations}
       readCentrifugoUrl={readCentrifugoUrl}
       issueTicket={issueTicket}
     />

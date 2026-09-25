@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
+import type { ConversationListPage } from "../../api/generated";
 import { givenFakeCentrifuge, givenTicketIssuer } from "../../test-support/centrifuge";
 import { VIEWER, conversationOf } from "../../test-support/fixtures";
 import type { ChatMessage } from "../../shared/lib/types";
@@ -36,6 +37,14 @@ const ANNA = conversationOf({ id: "c1", name: "Anna Petrova", hasMessages: true 
  * и событие без имени канала не говорит, о какой подписке речь.
  */
 const ANNA_CHANNEL = "conversation:c1";
+/**
+ * Личный канал зрителя — так его строит панель (`user:{currentUserId}`).
+ *
+ * Проверки счётчика адресуются ему явно: публикация без имени канала не
+ * говорит, о какой подписке речь, а событие, отправленное в канал беседы,
+ * проверяло бы не тот путь.
+ */
+const VIEWER_CHANNEL = "user:user-viewer";
 const MARCUS_NO_MESSAGES = conversationOf({
   id: "c2",
   name: "Marcus Chen",
@@ -69,16 +78,23 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+/** Пустая страница списка — законный ответ сервера, а не заглушка. */
+function emptyPage(items: ConversationListPage["items"] = []): ConversationListPage {
+  return { items, nextBeforeActivityAt: null, nextBeforeConversationId: null };
+}
+
 interface SetupOptions {
   readonly conversations: Conversation[];
   readonly tail?: (conversationId: string) => Promise<TailPage>;
   readonly loadPage?: HistorySource["loadPage"];
+  /** Ответ сверки. По умолчанию — пустая страница: сверка не обязана ничего менять. */
+  readonly refresh?: () => Promise<ConversationListPage>;
 }
 
-function setup({ conversations, tail, loadPage }: SetupOptions) {
+function setup({ conversations, tail, loadPage, refresh }: SetupOptions) {
   const fake = givenFakeCentrifuge();
   const tickets = givenTicketIssuer();
-  const calls = { tails: [] as string[], pages: [] as SyncPage[] };
+  const calls = { tails: [] as string[], pages: [] as SyncPage[], refreshes: 0 };
 
   const history: HistorySource = {
     loadTail: (conversationId) => {
@@ -93,17 +109,28 @@ function setup({ conversations, tail, loadPage }: SetupOptions) {
     },
   };
 
-  const view = render(
+  const refreshConversations = () => {
+    calls.refreshes += 1;
+    return refresh ? refresh() : Promise.resolve(emptyPage());
+  };
+
+  // Собирается функцией, а не литералом на месте: повтор загрузки приносит
+  // **тот же** компонент с другим списком, и собрать его вторым литералом
+  // значило бы разойтись с первым на первой же правке пропсов.
+  const panel = (list: Conversation[]) => (
     <ChatPage
-      conversations={conversations}
+      conversations={list}
+      refreshConversations={refreshConversations}
       currentUser={VIEWER}
       currentUserId={VIEWER_ID}
       history={history}
       centrifugoUrl={CENTRIFUGO_URL}
       issueTicket={tickets.issueTicket}
       createCentrifuge={fake.factory}
-    />,
+    />
   );
+
+  const view = render(panel(conversations));
 
   const pane = view.container.querySelector("[data-connection-state]");
 
@@ -111,6 +138,12 @@ function setup({ conversations, tail, loadPage }: SetupOptions) {
     ...view,
     fake,
     calls,
+    /**
+     * Новые данные загрузки — тем же пропсом, каким они приходят в жизни:
+     * повтор чтения после отказа. Это **единственный** путь, на котором список
+     * меняется без сверки, и до него состояние панели не сбрасывалось ничем.
+     */
+    reload: (list: Conversation[]) => view.rerender(panel(list)),
     state: () => pane?.getAttribute("data-connection-state") ?? null,
     syncReason: () => pane?.getAttribute("data-sync-reason") ?? null,
     /**
@@ -122,7 +155,39 @@ function setup({ conversations, tail, loadPage }: SetupOptions) {
       view.container
         .querySelector("[data-applied-through-seq]")
         ?.getAttribute("data-applied-through-seq") ?? null,
+    /**
+     * Число непрочитанного — **из разметки строки**, а не из `Badge`.
+     *
+     * `null` здесь значит «атрибута нет», то есть «сервер числа не назвал», и
+     * это третье состояние, отличное от `"0"`: слить их в одно значило бы
+     * выдавать молчание сервера за «всё прочитано».
+     */
+    unread: (conversationId: string) =>
+      view.container
+        .querySelector(`[data-conversation-id="${conversationId}"]`)
+        ?.getAttribute("data-unread-count") ?? null,
   };
+}
+
+/** Публикация личного канала — тот самый вход, а не подмена состояния. */
+async function publishUnread(
+  fake: ReturnType<typeof givenFakeCentrifuge>,
+  conversationId: string,
+  unreadCount: number,
+) {
+  await act(async () => {
+    fake.clientHandlers["publication"]?.({
+      channel: VIEWER_CHANNEL,
+      data: { type: "unread.changed", conversation_id: conversationId, unread_count: unreadCount },
+    });
+  });
+}
+
+/** Возврат вкладки — повод сверки (`D11`). */
+async function returnToVisible() {
+  await act(async () => {
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
 }
 
 describe("панель не ветвится по hasMessages", () => {
@@ -297,6 +362,211 @@ describe("состояние соединения наблюдаемо и наз
 
     await waitFor(() => expect(state()).toBe("connected"));
     expect(screen.queryByText(/catching up on missed messages/i)).toBeNull();
+  });
+});
+
+describe("число непрочитанного: событие личного канала и сверка", () => {
+  /** Страница сверки с одним числом — то, что несёт ответ REST. */
+  function pageWith(conversationId: string, unreadCount: number): ConversationListPage {
+    return emptyPage([
+      {
+        conversationId,
+        type: "direct",
+        participants: [
+          { userId: VIEWER_ID, displayName: "David Miller" },
+          { userId: "user-anna", displayName: "Anna Petrova" },
+        ],
+        createdAt: "2026-09-01T00:00:00Z",
+        unreadCount,
+      },
+    ]);
+  }
+
+  it("событие личного канала ставит число, а не прибавляет его", async () => {
+    // Абсолютность — не деталь: публикация best-effort, и повтор доставки
+    // возможен (пачка Kafka приезжает второй раз). Сложение сдвинуло бы
+    // счётчик вверх на каждом повторе, и исправить это на клиенте нечем.
+    const { fake, unread, calls } = setup({
+      conversations: [conversationOf({ id: "c1", unreadCount: 1 })],
+    });
+
+    await publishUnread(fake, "c1", 2);
+    expect(unread("c1")).toBe("2");
+
+    await publishUnread(fake, "c1", 5);
+    expect(unread("c1")).toBe("5");
+
+    // Число пришло событием, а не сверкой: круг REST здесь был бы лишним.
+    expect(calls.refreshes).toBe(0);
+  });
+
+  it("число из личного канала доходит до строки списка", async () => {
+    // Без правки среза 5 сюда не доходило ничего: публикации личного канала
+    // выбрасывались фильтром по одному каналу, и вкладка узнавала своё число
+    // только перезагрузкой.
+    const { fake, unread } = setup({ conversations: [conversationOf({ id: "c1" })] });
+
+    expect(unread("c1")).toBeNull();
+
+    await publishUnread(fake, "c1", 3);
+
+    expect(unread("c1")).toBe("3");
+  });
+
+  it("ноль из события — настоящее число, а не отсутствие", async () => {
+    const { fake, unread } = setup({ conversations: [conversationOf({ id: "c1", unreadCount: 4 })] });
+
+    await publishUnread(fake, "c1", 0);
+
+    expect(unread("c1")).toBe("0");
+  });
+
+  it("возврат вкладки заменяет число ответом REST, а не правит прежнее", async () => {
+    // `D11`: транспорт у события best-effort, истину приносит чтение. Замена
+    // чинит потерянную публикацию целиком, накопление — не чинит вовсе.
+    // Мутация, которая это краснит: оверлей оставляется поверх свежего ответа
+    // (тогда здесь осталось бы «3»), либо число складывается (тогда «10»).
+    const { fake, unread, calls } = setup({
+      conversations: [conversationOf({ id: "c1", unreadCount: 1 })],
+      refresh: () => Promise.resolve(pageWith("c1", 7)),
+    });
+
+    await publishUnread(fake, "c1", 3);
+    expect(unread("c1")).toBe("3");
+
+    await returnToVisible();
+
+    await waitFor(() => expect(unread("c1")).toBe("7"));
+    expect(calls.refreshes).toBe(1);
+  });
+
+  it("сверка берёт число из ответа, а не из пропса, оставшегося прежним", async () => {
+    // Пропс не менялся вовсе: `conversations` — снимок момента загрузки, и
+    // перечитанный список обязан заменить его целиком, а не «дополнить».
+    const { fake, unread } = setup({
+      conversations: [conversationOf({ id: "c1", unreadCount: 1 })],
+      refresh: () => Promise.resolve(pageWith("c1", 9)),
+    });
+
+    await returnToVisible();
+
+    await waitFor(() => expect(unread("c1")).toBe("9"));
+    expect(fake.calls.connect).toBe(1);
+  });
+
+  it("новые данные загрузки снимают оверлей: событие не старше только что прочитанного", async () => {
+    // Обратная сторона предыдущего теста. Там пропс не менялся, и ответ сверки
+    // обязан был его перекрыть; здесь пришли **новые данные загрузки** (повтор
+    // чтения после отказа), и наложенное поверх них прежнее событие было бы
+    // утверждением старше только что полученного — тот же класс, что запрещает
+    // `D11`. Оверлей снимается **вместе с данными**, а не живёт своей жизнью:
+    // число берётся из пришедшего списка.
+    const { fake, unread, reload } = setup({
+      conversations: [conversationOf({ id: "c1", unreadCount: 1 })],
+    });
+
+    await publishUnread(fake, "c1", 5);
+    expect(unread("c1")).toBe("5");
+
+    reload([conversationOf({ id: "c1", unreadCount: 2 })]);
+
+    expect(unread("c1")).toBe("2");
+  });
+
+  it("на монтирование сверка не ходит: повод берётся по переходу", async () => {
+    // Панель пересоздаётся на каждой смене беседы (`key`), и сверка «на
+    // монтирование» давала бы лишний круг REST на каждое переключение.
+    const { calls } = setup({ conversations: [conversationOf({ id: "c1" })] });
+
+    expect(calls.refreshes).toBe(0);
+  });
+
+  it("уход в фон сверку не запускает: там вкладка от событий ушла, а не пропустила их", async () => {
+    // `document.visibilityState` в jsdom — `visible` (что и проверяет соседний
+    // тест). Здесь он подменяется **своим** свойством `document`, а не правкой
+    // прототипа: прототип принадлежит прогону целиком, и оставленный на нём
+    // `hidden` сделал бы слепым следующий тест, а не убрался бы вместе с этим.
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
+
+    try {
+      const { calls } = setup({ conversations: [conversationOf({ id: "c1" })] });
+
+      await returnToVisible();
+
+      expect(calls.refreshes).toBe(0);
+    } finally {
+      delete (document as unknown as Record<string, unknown>).visibilityState;
+      expect(document.visibilityState).toBe("visible");
+    }
+  });
+
+  it("подписка личного канала не сдвигает состояние соединения беседы", async () => {
+    // Тот самый красный, ради которого фильтр `subscribed` оставлен. Сервер
+    // выдаёт оба канала одним тикетом (`services/realtime.py:83`) и эмитит
+    // `subscribed` на **каждый** из них. Пущенная в автомат, эта подписка
+    // читалась бы как подписка нашей беседы: `wasRecovering: true,
+    // recovered: false` увёл бы панель в `syncing`, и `data-connection-state`
+    // ушёл бы из `connected` по событию о чужом канале.
+    //
+    // Догрузка удерживается намеренно: отпущенная, она завершилась бы в ту же
+    // микротаску и вернула бы `connected` **уже после** ошибочного перехода, —
+    // то есть проверка зеленела бы и на дефекте. Здесь важен именно факт
+    // перехода, а не то, чем он кончился.
+    const { fake, state, syncReason } = setup({
+      conversations: [conversationOf({ id: "c1" })],
+      loadPage: () => new Promise(() => {}),
+    });
+
+    await act(async () => {
+      fake.clientHandlers["connected"]?.({});
+    });
+    await waitFor(() => expect(state()).toBe("connected"));
+
+    await act(async () => {
+      fake.clientHandlers["subscribed"]?.({
+        channel: VIEWER_CHANNEL,
+        wasRecovering: true,
+        recovered: false,
+      });
+    });
+
+    expect(state()).toBe("connected");
+    expect(syncReason()).toBeNull();
+  });
+
+  it("выход из разрыва — второй повод сверки", async () => {
+    // `disconnected` — состояние, в котором события могли не дойти. Возврат
+    // из него и есть повод; «мы сейчас в connected» поводом не является
+    // (см. тест выше про монтирование).
+    const { fake, calls } = setup({ conversations: [conversationOf({ id: "c1" })] });
+
+    await act(async () => {
+      fake.clientHandlers["connected"]?.({});
+    });
+    expect(calls.refreshes).toBe(0);
+
+    await act(async () => {
+      fake.clientHandlers["disconnected"]?.({ code: 3001 });
+    });
+    // Разрыв сам по себе — не повод: истину берут **после** него.
+    expect(calls.refreshes).toBe(0);
+
+    await act(async () => {
+      fake.clientHandlers["connected"]?.({});
+    });
+
+    await waitFor(() => expect(calls.refreshes).toBe(1));
+  });
+
+  it("число для беседы, которой нет в списке, ничего не рисует", async () => {
+    // Показать её нечем, а завести беседу из одного числа значило бы выдумать
+    // содержимое. Падать при этом нельзя: публикация приходит из сети.
+    const { fake, unread, container } = setup({ conversations: [conversationOf({ id: "c1" })] });
+
+    await publishUnread(fake, "c2", 3);
+
+    expect(unread("c1")).toBeNull();
+    expect(container.querySelector('[data-conversation-id="c2"]')).toBeNull();
   });
 });
 

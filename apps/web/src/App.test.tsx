@@ -116,6 +116,13 @@ function shell(state: BootState, api: HistoryApi = historyApi) {
     session: sessionOf(state),
     onRetry: () => {},
     historyApi: api,
+    // Сверка списка (`D11`) — операция той же природы, что `onRetry`, и живёт
+    // в `main.tsx`; здесь она должна быть, но звать её эти тесты не обязаны.
+    refreshConversations: async () => ({
+      items: [],
+      nextBeforeActivityAt: null,
+      nextBeforeConversationId: null,
+    }),
     readCentrifugoUrl: () => "wss://rt.example.test/connection/websocket",
     issueTicket: async () => "ticket-for-the-hunt",
     createCentrifuge: givenFakeCentrifuge().factory,

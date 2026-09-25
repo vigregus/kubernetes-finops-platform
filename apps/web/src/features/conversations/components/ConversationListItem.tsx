@@ -33,6 +33,15 @@ export function ConversationListItem({ conversation, active, onSelect }: Convers
       // опознавала бы беседу по имени, то есть по строке, которую может
       // совпасть у двух разных бесед.
       data-conversation-id={id}
+      /**
+       * Число непрочитанного — **в разметке**, и отсутствие атрибута здесь
+       * значит ровно то, чем является: «сервер числа не назвал». `undefined`
+       * React в атрибут не пишет, а `0` пишется как `0`, поэтому приёмка
+       * различает три состояния (`нет`, `0`, `N`), не заглядывая в `Badge`
+       * и не считая иконки. Число, взятое из разметки, — то же, что видит
+       * человек: `Badge` рисуется по тому же значению.
+       */
+      data-unread-count={unreadCount}
       onClick={() => onSelect(id)}
       className={clsx(
         "group relative flex w-full items-center gap-3 rounded-xl p-3 text-left transition-all",

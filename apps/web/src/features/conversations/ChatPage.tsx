@@ -1,6 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { ConversationSidebar } from "./components/ConversationSidebar"
 import { ChatHeader } from "./components/ChatHeader"
+import { adaptConversations } from "./adapter"
+import { adaptUnreadChanged, withUnreadOverlay } from "./unreadOverlay"
+import type { ConversationListPage } from "../../api/generated"
 import { adaptPublication } from "../messages/message-adapter"
 import { MessageList } from "../messages/components/MessageList"
 import type { HistorySource } from "../messages/history"
@@ -14,9 +17,26 @@ import { useRealtimeConnection } from "../realtime/useRealtimeConnection"
 import { MessengerLayout } from "../../shared/ui/MessengerLayout"
 import type { Conversation, CurrentUser } from "../../shared/lib/types"
 
+/**
+ * Пустой оверлей — **одна** карта на модуль, а не новая на каждый сброс.
+ *
+ * Свежая карта на каждый `setOverlay(new Map())` была бы новым состоянием при
+ * том же значении: React сравнивает ссылки, и каждый сброс вызывал бы лишний
+ * рендер списка на ровном месте.
+ */
+const EMPTY_OVERLAY: ReadonlyMap<string, number> = new Map()
+
 interface ChatPageProps {
   /** Беседы из `GET /conversations`. Фикстур здесь нет и быть не может. */
   conversations: Conversation[]
+  /**
+   * Перечитать список бесед — повод сверки (`D11`).
+   *
+   * Отдаёт **клиентский** тип: адаптация под зрителя идёт здесь, там же, где
+   * лежит `currentUserId`, — тем же `adaptConversations`, что и на загрузке.
+   * Второго способа собрать список не появляется.
+   */
+  refreshConversations: () => Promise<ConversationListPage>
   currentUser: CurrentUser
   /** Зритель в терминах домена: им `sender_id` переводится в `"me"`. */
   currentUserId: string
@@ -51,9 +71,25 @@ interface ChatPageProps {
  * `SyncIndicator` и `ConnectionStateBanner` сюда не подключены: они остаются
  * проектным запасом (закрытый список B13). Лента — минимальная, её задача не
  * оформление, а наблюдаемая поверхность.
+ *
+ * **Список бесед живёт здесь двумя половинами: базой и оверлеем.** База — то,
+ * что принёс REST; оверлей — числа из `unread.changed`, пришедшие в личный
+ * канал вкладки. Две половины, а не одно накопительное число, потому что
+ * транспорт у них разный: событие доставляется best-effort и может не прийти
+ * вовсе, а ответ REST приходит всегда. Сверка (`D11`) **заменяет** базу и
+ * обнуляет оверлей, а не правит прежнее число относительно нового: потерянную
+ * публикацию накопление не чинит, а замена чинит целиком. Пути к истине у
+ * счётчика поэтому три: событие, сверка при возврате вкладки и перезагрузка.
+ *
+ * Повод сверки берётся **по переходу**, а не по факту «мы подключены»: панель
+ * беседы пересоздаётся на каждой смене беседы (`key` ниже), и сверка на
+ * монтирование давала бы по лишнему кругу REST на каждое переключение. Сверяем
+ * на возврат видимости (`visibilitychange → visible`, здесь) и на выход из
+ * `disconnected`/`degraded` (там же, где видно состояние соединения).
  */
 export function ChatPage({
   conversations,
+  refreshConversations,
   currentUser,
   currentUserId,
   history,
@@ -65,13 +101,102 @@ export function ChatPage({
   // значения у настоящих данных нет, а пустой список — законный ответ сервера.
   const [activeId, setActiveId] = useState<string | null>(() => conversations[0]?.id ?? null)
 
-  const activeConversation = conversations.find((c) => c.id === activeId) ?? null
+  /**
+   * База — из пропсов, и это не дублирование состояния: пропсы приходят из
+   * `BootState` и меняются загрузкой (повтор после отказа), тогда как база
+   * меняется ещё и сверкой.
+   */
+  const [base, setBase] = useState<Conversation[]>(conversations)
+  const [overlay, setOverlay] = useState<ReadonlyMap<string, number>>(EMPTY_OVERLAY)
+  /** Какой ответ загрузки база с оверлеем уже приняли — по ссылке на массив. */
+  const [loadedFrom, setLoadedFrom] = useState(conversations)
+
+  if (loadedFrom !== conversations) {
+    // Пришли новые данные загрузки — оверлей снимается вместе с ними: ответ
+    // REST и есть истина, а наложенное поверх него число было бы утверждением
+    // старше только что полученного (D11).
+    //
+    // Правка **при рендере**, а не эффектом, и это не вкусовщина: эффект
+    // срабатывает после отрисовки, то есть кадр со старым числом успевает
+    // показаться — ровно то утверждение, которое D11 и запрещает. Синхроннее
+    // здесь нечего: пришли те же данные заново, и React знает об этом раньше,
+    // чем о сработавшем эффекте. Сравнение по ссылке, а не по содержимому:
+    // список приходит новым массивом тогда, когда его читали заново.
+    setLoadedFrom(conversations)
+    setBase(conversations)
+    setOverlay(EMPTY_OVERLAY)
+  }
+
+  /**
+   * Число из личного канала: **ставится**, а не прибавляется.
+   *
+   * Публикация best-effort, и повтор доставки возможен — пачка Kafka приезжает
+   * второй раз. Сложение на повторе сдвинуло бы счётчик вверх ровно там, где
+   * исправить его нечем.
+   */
+  const onUnreadPublication = useCallback((payload: unknown) => {
+    const change = adaptUnreadChanged(payload)
+    if (change === null) return
+
+    setOverlay((current) => {
+      const next = new Map(current)
+      next.set(change.conversationId, change.unreadCount)
+      return next
+    })
+  }, [])
+
+  /** Сверка: круг REST за истиной. Общий на оба повода — ответ один и тот же. */
+  const refreshing = useRef(false)
+  const refresh = useCallback(async () => {
+    // Два повода могут совпасть (возврат видимости сразу за выходом из
+    // разрыва). Второй круг при этом не отменяется, а **не начинается**:
+    // ответ на него был бы тем же, а первый ещё в пути.
+    if (refreshing.current) return
+    refreshing.current = true
+    try {
+      const page = await refreshConversations()
+      // Момент времени — свой, а не тот, что был на загрузке: список
+      // перечитывается сейчас, и display-время обязано считаться от этого
+      // момента, иначе «14:22» уехало бы в прошлое от самой сверки.
+      setBase(adaptConversations(page, currentUserId, new Date()))
+      setOverlay(EMPTY_OVERLAY)
+    } catch {
+      // Отказ сверки оставлен без строки на экране, и это не «проглочено»:
+      // сверка не обещает ничего нового — она заменяет уже показанное более
+      // свежим. Неудача оставляет ровно то, что человек и видел, ложного
+      // утверждения на экране не появляется, а следующий повод сходит за
+      // истиной снова. Строка «не удалось обновить» сообщала бы о нашей
+      // неудаче там, где ни одно число не стало неправдой.
+    } finally {
+      refreshing.current = false
+    }
+  }, [refreshConversations, currentUserId])
+
+  useEffect(() => {
+    // Обработчик зовётся и на уход в фон — «видимость кончилась» не повод
+    // идти за списком: сверка нужна там, где вкладка могла пропустить
+    // события, а не там, где она от них ушла.
+    const onVisibilityChange = () => {
+      if (document.visibilityState !== "visible") return
+      void refresh()
+    }
+
+    document.addEventListener("visibilitychange", onVisibilityChange)
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange)
+  }, [refresh])
+
+  // Слияние — на каждом рендере списка, а не при приходе события: иначе
+  // пришлось бы держать согласие между двумя состояниями в руках, и число
+  // отставало бы от базы ровно на один рендер.
+  const merged = useMemo(() => withUnreadOverlay(base, overlay), [base, overlay])
+
+  const activeConversation = merged.find((c) => c.id === activeId) ?? null
 
   return (
     <MessengerLayout
       sidebar={
         <ConversationSidebar
-          conversations={conversations}
+          conversations={merged}
           activeConversationId={activeConversation?.id ?? null}
           currentUser={currentUser}
           onSelectConversation={setActiveId}
@@ -105,6 +230,8 @@ export function ChatPage({
           centrifugoUrl={centrifugoUrl}
           issueTicket={issueTicket}
           createCentrifuge={createCentrifuge}
+          onUnreadPublication={onUnreadPublication}
+          onReconcile={refresh}
         />
       )}
     </MessengerLayout>
@@ -118,6 +245,10 @@ interface ConversationPaneProps {
   centrifugoUrl: string
   issueTicket: () => Promise<string>
   createCentrifuge?: CentrifugeFactory
+  /** Публикация личного канала — наверх, к списку: число принадлежит не беседе. */
+  onUnreadPublication: (payload: unknown) => void
+  /** Выход из разрыва — повод сверки списка. */
+  onReconcile: () => void
 }
 
 /**
@@ -133,6 +264,8 @@ function ConversationPane({
   centrifugoUrl,
   issueTicket,
   createCentrifuge,
+  onUnreadPublication,
+  onReconcile,
 }: ConversationPaneProps) {
   /**
    * Лента этого окна — в ссылке, потому что публикации достаются обработчику,
@@ -166,8 +299,14 @@ function ConversationPane({
     // Имя канала — `conversation:{id}`: `conversation_id` в тело публикации не
     // едет вовсе, привязка к беседе и есть подписка (`services/realtime_delivery.py`).
     channel: `conversation:${conversation.id}`,
+    // Второй канал того же тикета — личный, вкладки, а не беседы. Собирается
+    // он тем же правилом, что и на сервере (`services/realtime_delivery.py`,
+    // `user_channel_for`), и берётся из зрителя: у одного человека он один на
+    // все беседы, и смена беседы его не меняет.
+    userChannel: `user:${currentUserId}`,
     issueTicket,
     onPublication,
+    onUserPublication: onUnreadPublication,
     createCentrifuge,
   })
 
@@ -224,6 +363,30 @@ function ConversationPane({
     if (connection.state !== "syncing") return
     void startSync()
   }, [connection.state, startSync])
+
+  /**
+   * Выход из разрыва — второй повод сверки списка (`D11`).
+   *
+   * Повод берётся **по переходу**: сравнение с прежним состоянием, а не
+   * проверка «сейчас `connected`». Разница не косметическая — состояние
+   * читается и на монтировании, а панель пересоздаётся на каждой смене беседы
+   * (`key` выше), поэтому проверка «сейчас `connected`» сходила бы за списком
+   * на каждое переключение беседы.
+   *
+   * `degraded` и `disconnected` — ровно те два состояния, в которых события
+   * могли не дойти: первое значит «связь есть, но данные под вопросом», второе
+   * — «связи нет». Возврат в `connecting` тоже считается выходом: этого
+   * достаточно, потому что за истиной мы идём **после** разрыва, а не вместо
+   * восстановления соединения.
+   */
+  const previousConnectionState = useRef(connection.state)
+  useEffect(() => {
+    const previous = previousConnectionState.current
+    previousConnectionState.current = connection.state
+    if (previous !== connection.state && (previous === "disconnected" || previous === "degraded")) {
+      onReconcile()
+    }
+  }, [connection.state, onReconcile])
 
   return (
     <div

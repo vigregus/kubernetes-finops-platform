@@ -15,6 +15,8 @@ import { useRealtimeConnection } from "./useRealtimeConnection";
 
 const CENTRIFUGO = "wss://rt.finops.local/connection/websocket";
 const CHANNEL = "conversation:3f6b0d1e-0f4e-4a1f-9d2b-3ad0d1e6a111";
+/** Второй канал той же выдачи: `user:{id}` (`services/realtime.py:83`). */
+const USER_CHANNEL = "user:8c1f2a34-5b6d-4e7f-8a90-1b2c3d4e5f60";
 
 function givenHook() {
   const fake = givenFakeCentrifuge();
@@ -24,8 +26,10 @@ function givenHook() {
     useRealtimeConnection({
       centrifugoUrl: CENTRIFUGO,
       channel: CHANNEL,
+      userChannel: USER_CHANNEL,
       issueTicket: tickets.issueTicket,
       onPublication: () => {},
+      onUserPublication: () => {},
       createCentrifuge: fake.factory,
     }),
   );
@@ -128,6 +132,64 @@ describe("факт, увиденный над SDK, доходит до авто�
 
     expect(result.current.state).toBe("connected");
     expect(result.current.syncReason).toBeNull();
+  });
+});
+
+describe("личный канал доходит до списка, не трогая соединение", () => {
+  it("публикация личного канала зовёт свой обработчик", () => {
+    const fake = givenFakeCentrifuge();
+    const tickets = givenTicketIssuer();
+    const seen: unknown[] = [];
+
+    renderHook(() =>
+      useRealtimeConnection({
+        centrifugoUrl: CENTRIFUGO,
+        channel: CHANNEL,
+        userChannel: USER_CHANNEL,
+        issueTicket: tickets.issueTicket,
+        onPublication: () => {},
+        onUserPublication: (payload) => seen.push(payload),
+        createCentrifuge: fake.factory,
+      }),
+    );
+
+    act(() => {
+      fake.clientHandlers["publication"]?.({
+        channel: USER_CHANNEL,
+        data: { type: "unread.changed", conversation_id: "c-1", unread_count: 3 },
+      });
+    });
+
+    expect(seen).toEqual([{ type: "unread.changed", conversation_id: "c-1", unread_count: 3 }]);
+  });
+
+  it("новый обработчик списка не пересоздаёт соединение", () => {
+    // Обработчик читается из ссылки (`userPublicationRef`) — по той же причине,
+    // что и обработчик ленты: соединение обязано жить дольше одного рендера.
+    // Без ссылки смена обработчика (а сверка меняет его вместе с `currentUserId`)
+    // рвала бы сокет и поднимала новый — то есть вкладка теряла бы как раз те
+    // публикации, ради которых личный канал и впущен.
+    const fake = givenFakeCentrifuge();
+    const tickets = givenTicketIssuer();
+
+    const view = renderHook(
+      (props: { onUserPublication: (payload: unknown) => void }) =>
+        useRealtimeConnection({
+          centrifugoUrl: CENTRIFUGO,
+          channel: CHANNEL,
+          userChannel: USER_CHANNEL,
+          issueTicket: tickets.issueTicket,
+          onPublication: () => {},
+          onUserPublication: props.onUserPublication,
+          createCentrifuge: fake.factory,
+        }),
+      { initialProps: { onUserPublication: () => {} } },
+    );
+
+    view.rerender({ onUserPublication: () => {} });
+
+    expect(fake.calls.connect).toBe(1);
+    expect(fake.calls.disconnect).toBe(0);
   });
 });
 

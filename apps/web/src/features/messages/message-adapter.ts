@@ -180,8 +180,13 @@ function attachmentOf(dto: MessageDto, attachment: AttachmentDto): MessageAttach
  * Публикация приходит из сети, поэтому «объект ли это» — первая проверка, а не
  * подробность: `null.message_id` уронил бы обработчик публикации, а падение
  * внутри него уносит соединение.
+ *
+ * Отдаётся наружу, потому что входов из сети стало **два**: к публикации канала
+ * беседы добавилось событие личного канала (`conversations/unreadOverlay.ts`).
+ * Второй такой же проверки, написанной по месту, здесь не заводится: она
+ * разошлась бы с этой ровно так же, как любой второй экземпляр правила.
  */
-function isRecord(value: unknown): value is Record<string, unknown> {
+export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null
 }
 
