@@ -19,23 +19,33 @@ const CHANNEL = "conversation:3f6b0d1e-0f4e-4a1f-9d2b-3ad0d1e6a111";
 /** Второй канал той же выдачи сервера: он подписывает клиента и на `user:{id}`. */
 const OTHER_CHANNEL = "user:8c1f2a34-5b6d-4e7f-8a90-1b2c3d4e5f60";
 
-/** Адаптер с двойником и записью всего, что он отдаёт наружу. */
+/**
+ * Адаптер с двойником и записью всего, что он отдаёт наружу.
+ *
+ * Две записи, а не одна, и это не симметрия ради симметрии: публикации двух
+ * каналов обязаны быть различимы, иначе «событие личного канала доехало» и
+ * «событие личного канала попало в ленту беседы» выглядели бы одинаково
+ * зелёными.
+ */
 function givenClient() {
   const events: ConnectionEvent[] = [];
   const publications: unknown[] = [];
+  const userPublications: unknown[] = [];
   const fake = givenFakeCentrifuge();
   const tickets = givenTicketIssuer();
 
   const client = createRealtimeClient({
     centrifugoUrl: CENTRIFUGO,
     channel: CHANNEL,
+    userChannel: OTHER_CHANNEL,
     issueTicket: tickets.issueTicket,
     onEvent: (event) => events.push(event),
     onPublication: (payload) => publications.push(payload),
+    onUserPublication: (payload) => userPublications.push(payload),
     createCentrifuge: fake.factory,
   });
 
-  return { client, fake, tickets, events, publications };
+  return { client, fake, tickets, events, publications, userPublications };
 }
 
 describe("свежий тикет на каждую попытку соединения", () => {
@@ -211,13 +221,48 @@ describe("server-side подписка: канал выдаёт сервер, к
     expect(publications).toEqual([payload]);
   });
 
-  it("публикация чужого канала в ленту не попадает", () => {
+  it("публикация личного канала в ленту беседы не попадает", () => {
+    // Личный канал — не «чужой»: его публикации обслуживает свой обработчик
+    // (`D5`). Но в ленту беседы они не идут ни при каких условиях: `seq` у
+    // `unread.changed` нет вовсе, а применённый как сообщение он сдвинул бы
+    // границу слияния.
     const { client, fake, publications } = givenClient();
     client.start();
 
     fake.clientHandlers["publication"]?.({ channel: OTHER_CHANNEL, data: { seq: 42 } });
 
     expect(publications).toEqual([]);
+  });
+
+  it("публикация личного канала доходит до своего обработчика", () => {
+    // Та самая правка, ради которой канал впущен. Прежде здесь стоял фильтр
+    // «наш канал или ничего», и `unread.changed` не доходил до клиента вовсе:
+    // вкладка узнавала своё число только перезагрузкой.
+    const { client, fake, userPublications } = givenClient();
+    client.start();
+
+    const payload = {
+      type: "unread.changed",
+      conversation_id: "3f6b0d1e-0f4e-4a1f-9d2b-3ad0d1e6a111",
+      unread_count: 3,
+    };
+    fake.clientHandlers["publication"]?.({ channel: OTHER_CHANNEL, data: payload });
+
+    expect(userPublications).toEqual([payload]);
+  });
+
+  it("публикация неизвестного канала не уходит никуда", () => {
+    // Сервер выдаёт ровно два канала, и третьего имени в выдаче взяться
+    // неоткуда. Отдать такую публикацию первому попавшемуся обработчику
+    // значило бы приписать событие не тому каналу — а различить их после
+    // этого нечем: `conversation_id` в тело публикации беседы не едет вовсе.
+    const { client, fake, publications, userPublications } = givenClient();
+    client.start();
+
+    fake.clientHandlers["publication"]?.({ channel: "conversation:чужая", data: { seq: 42 } });
+
+    expect(publications).toEqual([]);
+    expect(userPublications).toEqual([]);
   });
 
   it("снятия подписки адаптер не слушает вовсе", () => {

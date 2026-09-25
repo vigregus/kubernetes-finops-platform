@@ -10,6 +10,7 @@ import { ensureDeviceId, loadDeviceId, saveDeviceId } from "./features/auth/devi
 import { CALLBACK_PATH } from "./features/auth/session";
 import { createSessionState } from "./features/auth/sessionState";
 import type { HistoryApi } from "./features/messages/history";
+import type { SendReceipt } from "./features/receipts/useReceipts";
 import { loadRuntimeConfig } from "./runtime-config";
 
 /**
@@ -56,6 +57,48 @@ const bootstrapDeps = {
   loadAccount: () => authApi.whoAmI(),
   loadConversations: () => conversationsApi.listConversations(),
 };
+
+/**
+ * Сверка: перечитать список бесед — операция, собранная рядом с загрузкой.
+ *
+ * Клиенту списка сегодня **нечем** его перечитать: `loadConversations` живёт
+ * здесь, а панель получает уже разобранный массив. Без этого пропа сверка была
+ * бы словом в докстринге: у счётчика непрочитанного событие — транспорт
+ * best-effort, и после потерянной публикации истину взять неоткуда.
+ *
+ * Тикет здесь не перевыпускается, устройство не переспрашивается и `/me` не
+ * повторяется: список бесед несёт и счётчики, и отметки квитанций, то есть всё,
+ * что сверяется. Второй круг за тем, что не меняется, был бы платой за
+ * симметрию (`D11`).
+ *
+ * Отдаётся **клиентским** типом (`ConversationListPage`), а не моделью
+ * интерфейса: адаптация — работа `ReadyScreen`, и здесь её негде взять
+ * (`currentUserId` известен только после `/me`).
+ */
+const refreshConversations = () => conversationsApi.listConversations();
+
+/**
+ * Квитанция вкладки (`POST /conversations/{id}/receipts`) — операция рядом с
+ * остальными клиентами API, и по той же причине: у панели нет ни адреса, ни
+ * токена.
+ *
+ * Тело собирает **вызывающий** (`receiptToSend` в `useReceipts`): сюда приходит
+ * уже только то, что сдвинулось, и лишних полей в запросе не бывает. Это не
+ * украшение, а условие законности ответа: у запроса `additionalProperties:
+ * false`, и лишнее поле получило бы отказ, а не тишину.
+ *
+ * Обёртка, а не голая ссылка на метод: метод класса, отданный без `this`,
+ * потерял бы `configuration` — та же причина, что у `historyApi` выше.
+ *
+ * Ссылка **устойчива** (модульная константа): её смена перезапускает дребезг в
+ * `useReceipts`, и нестабильная ссылка откладывала бы отправку на каждом
+ * рендере — вкладка не сообщила бы ничего и никогда.
+ */
+const sendReceipts: SendReceipt = (conversationId, receipt) =>
+  messagesApi.setReceipts({
+    conversationId,
+    setReceiptsRequest: { ...receipt },
+  });
 
 async function start(): Promise<void> {
   // Идентификатор заводится **до** первого запроса — и до ветки: на `/callback`
@@ -109,6 +152,8 @@ createRoot(document.getElementById("root")!).render(
       session={session}
       onRetry={retry}
       historyApi={historyApi}
+      refreshConversations={refreshConversations}
+      sendReceipts={sendReceipts}
       readCentrifugoUrl={readCentrifugoUrl}
       issueTicket={issueTicket}
     />

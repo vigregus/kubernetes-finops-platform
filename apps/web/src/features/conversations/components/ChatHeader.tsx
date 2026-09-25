@@ -17,19 +17,26 @@ interface ChatHeaderProps {
 /**
  * Подзаголовок говорит только то, что сервер утверждал **положительно**.
  *
- * Ветвей `lastSeenAt` и «Offline» здесь нет, и обе убраны по одной причине.
+ * Ветви `lastSeenAt` здесь нет, и это то же правило, что и раньше.
  * `users.last_seen_at` — «когда человек последний раз был подтверждён в сети»
- * (`03-v1-scope.md:77-83`), и наружу он отдаётся отметкой, без признака
- * «онлайн» (`README.md:78`). «Last seen 16:20» в обычной семантике мессенджера
- * читается как «сейчас офлайн» — то есть как факт, которого сервер не сообщал, а
- * отметка не означает и момента перехода в офлайн: человек может быть в сети
- * прямо сейчас. «Offline» при отсутствии всяких данных — то же утверждение,
- * только короче: оно выводится из молчания сервера, а молчание не факт.
+ * (`03-v1-scope.md:77-83`), и «Last seen 16:20» в обычной семантике мессенджера
+ * читается как «сейчас офлайн» — то есть как факт, которого отметка не
+ * сообщает: человек может быть в сети прямо сейчас. Отметка и признак — два
+ * разных ответа о человеке, и второй не выводится из первого.
  *
- * `presence` адаптер G3-005 не выставляет никогда (realtime вне объёма), поэтому
- * до G3-007 шапка показывает только имя. Ветви `online`/`away` оставлены: они
- * рисуются ровно тогда, когда присутствие действительно пришло, и это и есть
- * положительное утверждение сервера.
+ * Ветка `offline` при этом **есть**, и она не противоречит сказанному: слово
+ * рисуется ровно тогда, когда сервер сказал `online: false` сам, — то есть
+ * когда за ним стоит предикат по времени ответа (`domain/presence.py`, окно
+ * 180 с), а не молчание. «Offline» из отсутствия данных — по-прежнему ложь;
+ * «Offline» из утверждения сервера — правда, хотя и приблизительная: сервер
+ * говорит «активности не подтверждено окно», а не «соединения нет».
+ *
+ * Ветки `away` больше нет: производителя у неё не осталось. Адаптер — единственный,
+ * кто выставляет `presence` из ответа сервера, и он отдаёт только `online` и
+ * `offline` (`conversations/adapter.ts::presenceOf`). Ветка, в которую нечего
+ * прийти, — тот же указатель в никуда, что маркер на чужой гейт. Сам словарь
+ * `PresenceStatus` не сужен: `away` остаётся его частью и рисуется `StatusDot`
+ * и `Avatar` — просто не от этого сервера.
  */
 function subtitle(conversation: Conversation) {
   if (conversation.typingNames?.length) {
@@ -39,7 +46,9 @@ function subtitle(conversation: Conversation) {
     }
   }
   if (conversation.presence === "online") return { text: "Online", dotClass: "bg-status-success" }
-  if (conversation.presence === "away") return { text: "Away", dotClass: "bg-status-warning" }
+  // Цвет тот же, что у `StatusDot` для этого слова (`shared/ui/StatusDot.tsx:7`):
+  // одно значение словаря — один цвет во всех местах, где оно появляется.
+  if (conversation.presence === "offline") return { text: "Offline", dotClass: "bg-text-warm-muted" }
   return undefined
 }
 
@@ -49,7 +58,15 @@ export function ChatHeader({ conversation, onSearch, onOpenDetails, onVoiceCall,
   const text = blocked ? "Unavailable" : subtitleValue?.text
 
   return (
-    <header className="z-20 flex h-20 flex-shrink-0 items-center justify-between bg-surface/90 px-6 shadow-[0_1px_8px_rgba(41,37,36,0.04)] backdrop-blur-md">
+    // `data-presence` — то, чем приёмка читает присутствие, не разбирая текст
+    // подзаголовка: значение словаря, а не слово интерфейса. Присутствия нет —
+    // нет и атрибута (React опускает `undefined`), и это различает «сервер
+    // сказал `false`» (`data-presence="offline"`) и «сервер не сказал ничего»
+    // (атрибута нет) — то самое различие, ради которого ветвей три, а не две.
+    <header
+      data-presence={blocked ? undefined : conversation.presence}
+      className="z-20 flex h-20 flex-shrink-0 items-center justify-between bg-surface/90 px-6 shadow-[0_1px_8px_rgba(41,37,36,0.04)] backdrop-blur-md"
+    >
       <div className="flex min-w-0 flex-1 items-center gap-3">
         <Avatar name={conversation.name} src={conversation.avatarUrl} presence={blocked ? undefined : conversation.presence} />
         <div className="min-w-0 flex-1">

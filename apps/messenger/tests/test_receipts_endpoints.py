@@ -10,6 +10,13 @@
 в `tests/integration/receipts_check.py`. Пересказывать одно другим значило
 бы получить два описания одного правила, расходящихся при первой же правке
 контракта.
+
+С `G3-007` к формам добавляется **решение о публикации**: обработчик
+решает, уходит ли `message.read` в канал беседы, и решает по фактам,
+принесённым сервисом (сдвинулось ли состояние, есть ли блокировка) — в
+базу он ходить не вправе (`scripts/check-layers.py`). Здесь проверяется
+именно это решение и то, **когда** оно исполняется: после закрытия
+соединения, а не внутри транзакции.
 """
 from __future__ import annotations
 
@@ -23,9 +30,9 @@ from fastapi.testclient import TestClient
 from messenger.api import main
 from messenger.api.main import app
 from messenger.domain.errors import Reason, Visibility
-from messenger.domain.ids import ConversationSeq, UserId
+from messenger.domain.ids import ConversationId, ConversationSeq, UserId
 from messenger.domain.receipts import InvalidReceipt, ReadState
-from messenger.domain.unread import UnreadCount
+from messenger.domain.unread import UnreadCount, UnreadNotice
 from messenger.domain.user import User
 from messenger.services import identity
 from messenger.services import receipts as service
@@ -37,14 +44,42 @@ NOW = datetime(2026, 9, 19, tzinfo=UTC)
 URL = f"/conversations/{CONVERSATION_ID}/receipts"
 
 
+class FakeRealtime:
+    """Записывает публикации в канал беседы, отвечая успехом, как настроено.
+
+    `log` — общий журнал с подменённым соединением: им проверяется, что
+    публикация идёт **после** закрытия транзакции, а не внутри неё.
+    """
+
+    def __init__(self, *, ok: bool = True, log: list[str] | None = None) -> None:
+        self.ok = ok
+        self.log = log
+        self.published: list[tuple[str, dict]] = []
+
+    async def publish(self, channel, data):
+        if self.log is not None:
+            self.log.append("публикация")
+        self.published.append((channel, data))
+        return self.ok
+
+
 class Runtime:
-    """Владелец соединений, считающий, сколько раз за ним пришли."""
+    """Владелец соединений, считающий, сколько раз за ним пришли.
+
+    `centrifugo` объявлен здесь не для полноты: обработчик публикует
+    квитанцию в канал беседы, и без клиента он падал бы `AttributeError`
+    на каждом успешном пути. У настоящего владельца поле есть всегда, и
+    `None` в нём — не ошибка: `centrifugo_client_from_env` отдаёт `None`,
+    когда стенд поднят без realtime-слоя, и квитанция обязана остаться
+    рабочей.
+    """
 
     keys = None
     oidc_settings = None
 
-    def __init__(self) -> None:
+    def __init__(self, *, realtime=None) -> None:
         self.opened = 0
+        self.centrifugo = FakeRealtime() if realtime is None else realtime
 
     @asynccontextmanager
     async def connection(self, mode=None):
@@ -355,3 +390,291 @@ def test_не_целое_и_явный_null_это_422(client, monkeypatch, runt
     r = client.post(URL, json=тело)
     assert r.status_code == 422
     assert runtime.opened == 0
+
+
+# ---------------------------------------------------------------------------
+# Публикация: уходит ли событие собеседнику
+# ---------------------------------------------------------------------------
+
+
+def test_сдвиг_уходит_в_канал_беседы(client, monkeypatch, runtime):
+    """Ронит молчание обработчика: квитанция до собеседника не доезжает.
+
+    До `G3-007` сервис не публиковал вовсе, и `message.read` был объявлен
+    в контракте каналов и не уходил ни разу. Проверяется не «публикация
+    вызвана», а что именно ушло: канал беседы, тип и **оба** номера —
+    по ним клиент и отличает «доставлено» от «прочитано», не ходя
+    в REST за вторым числом.
+    """
+    authenticated(monkeypatch)
+    отвечает(
+        monkeypatch,
+        service.SetReceiptsResult(state=_state(7, 7), previous=_state(2, 2)),
+    )
+
+    r = client.post(URL, json={"read_seq": 7})
+
+    assert r.status_code == 200
+    assert runtime.centrifugo.published == [
+        (
+            f"conversation:{CONVERSATION_ID}",
+            {
+                "type": "message.read",
+                "reader_id": str(ACTOR_ID),
+                "read_seq": 7,
+                "delivered_seq": 7,
+            },
+        )
+    ]
+
+
+def test_отставшая_квитанция_молчит(client, monkeypatch, runtime):
+    """Второй конец пары: запись состоялась, события нет.
+
+    Прежнее равно записанному — `GREATEST` ничего не сдвинул, и рассылать
+    нечего. Ответ при этом несёт **текущее** состояние, а не присланное:
+    иначе клиент счёл бы применённым то, что отвергнуто монотонностью.
+    """
+    authenticated(monkeypatch)
+    отвечает(
+        monkeypatch,
+        service.SetReceiptsResult(state=_state(9, 9), previous=_state(9, 9)),
+    )
+
+    r = client.post(URL, json={"read_seq": 2})
+
+    assert r.status_code == 200
+    assert r.json() == {"delivered_seq": 9, "read_seq": 9}
+    assert runtime.centrifugo.published == []
+
+
+def test_блокировка_глушит_канал_целиком(client, monkeypatch, runtime):
+    """`D14`: маска, которую обходит канал, — не маска.
+
+    Заблокированный остаётся участником и остаётся подписанным (`BLK-004`
+    подписку не отменяет), поэтому `message.read` в `conversation:{id}`
+    донёс бы ему о чтении ровно то, что REST ему не отдаёт. Канал —
+    рассылка, адресата у неё нет, и «всем, кроме одного» на ней не
+    выражается; поэтому событие не уходит вовсе. Цена названа — в
+    групповой беседе с одной блокировкой живой квитанции не увидит
+    никто, — и проверяется она здесь же: молчит весь канал, а не «тот
+    подписчик».
+    """
+    authenticated(monkeypatch)
+    отвечает(
+        monkeypatch,
+        service.SetReceiptsResult(
+            state=_state(7, 7),
+            previous=_state(2, 2),
+            blocked_with=frozenset({ACTOR_ID}),
+        ),
+    )
+
+    r = client.post(URL, json={"read_seq": 7})
+
+    assert r.status_code == 200
+    assert runtime.centrifugo.published == []
+
+
+def test_первый_нулевой_запрос_не_публикуется(client, monkeypatch, runtime):
+    """Первый законный `{read_seq: 0}` вставляет строку и молчит.
+
+    Строки не было, а запрос разрешён (`minimum: 0` — у обоих полей),
+    и `upsert` вставит пару нулей. Событие о непродвинувшемся watermark
+    было бы утверждением, которого никто не делал; что `previous is None`
+    здесь **не** то же самое, что ноль, видно по `advanced`.
+    """
+    authenticated(monkeypatch)
+    отвечает(
+        monkeypatch, service.SetReceiptsResult(state=_state(0, 0), previous=None)
+    )
+
+    r = client.post(URL, json={"read_seq": 0})
+
+    assert r.status_code == 200
+    assert runtime.centrifugo.published == []
+
+
+def test_отказ_не_публикуется(client, monkeypatch, runtime):
+    """У отказа нет состояния, и публиковать по нему нечего.
+
+    Проверка не формальная: `advanced` на отказе обязан быть ложным, а не
+    «не вызываться» — иначе обработчик опубликовал бы событие о беседе,
+    в чтении которой отказано.
+    """
+    authenticated(monkeypatch)
+    отвечает(monkeypatch, service.SetReceiptsResult(rejection=Reason.NOT_A_MEMBER))
+
+    r = client.post(URL, json={"read_seq": 3})
+
+    assert r.status_code == 404
+    assert runtime.centrifugo.published == []
+
+
+def test_число_непрочитанного_уходит_читателю_в_личный_канал(
+    client, monkeypatch, runtime
+):
+    """`D7`: второй адресат — сам читатель, и канал у него **личный**.
+
+    Событие о числе идёт не в беседу, а в `user:{id}`: число принадлежит
+    одному человеку, и рассылка его всей беседе была бы утечкой чужого
+    счётчика. Канал берётся из `realtime_delivery.user_channel_for` — тем
+    же правилом, по которому выдаётся тикет: имя, собранное по месту,
+    разошлось бы с выданным молча, а публикация в несуществующий канал
+    не ошибка, а тишина.
+
+    Ронит публикацию «второго числа тем же событием»: тело собирает
+    `domain.unread.changed_event`, и оно несёт **абсолютное** число —
+    клиент ставит его, а не прибавляет, потому что повторная доставка
+    иначе сдвинула бы счётчик.
+    """
+    authenticated(monkeypatch)
+    отвечает(
+        monkeypatch,
+        service.SetReceiptsResult(
+            state=_state(7, 7),
+            previous=_state(2, 2),
+            unread_count=UnreadCount(3),
+            notices=(
+                UnreadNotice(
+                    user_id=ACTOR_ID,
+                    conversation_id=ConversationId(CONVERSATION_ID),
+                    unread_count=UnreadCount(3),
+                ),
+            ),
+        ),
+    )
+
+    r = client.post(URL, json={"read_seq": 7})
+
+    assert r.status_code == 200
+    assert runtime.centrifugo.published == [
+        (
+            f"conversation:{CONVERSATION_ID}",
+            {
+                "type": "message.read",
+                "reader_id": str(ACTOR_ID),
+                "read_seq": 7,
+                "delivered_seq": 7,
+            },
+        ),
+        (
+            f"user:{ACTOR_ID}",
+            {
+                "type": "unread.changed",
+                "conversation_id": str(CONVERSATION_ID),
+                "unread_count": 3,
+            },
+        ),
+    ]
+
+
+def test_блокировка_глушит_беседу_но_не_свой_счётчик(client, monkeypatch, runtime):
+    """Маска закрывает чужое, а не собственное, — и цена названа.
+
+    `message.read` при блокировке молчит целиком: канал беседы — рассылка,
+    и утаить событие от одного подписчика на ней нечем (`D14`). Личный
+    канал устроен наоборот: в нём адресат один и это сам читатель, поэтому
+    маскировать в нём нечего — счётчик его собственный. Правило «маскируется
+    только чужое» здесь и проверяется: одно и то же состояние даёт молчание
+    в беседе и событие в личном канале.
+
+    Ронит применение маски к обоим каналам разом — тогда вкладка читателя
+    не узнала бы о **своём** числе до сверки, и блокировка наказывала бы
+    того, кого она защищает.
+    """
+    authenticated(monkeypatch)
+    отвечает(
+        monkeypatch,
+        service.SetReceiptsResult(
+            state=_state(7, 7),
+            previous=_state(2, 2),
+            blocked_with=frozenset({ACTOR_ID}),
+            notices=(
+                UnreadNotice(
+                    user_id=ACTOR_ID,
+                    conversation_id=ConversationId(CONVERSATION_ID),
+                    unread_count=UnreadCount(0),
+                ),
+            ),
+        ),
+    )
+
+    client.post(URL, json={"read_seq": 7})
+
+    assert runtime.centrifugo.published == [
+        (
+            f"user:{ACTOR_ID}",
+            {
+                "type": "unread.changed",
+                "conversation_id": str(CONVERSATION_ID),
+                "unread_count": 0,
+            },
+        )
+    ]
+
+
+def test_публикация_идёт_после_закрытия_соединения(client, monkeypatch, runtime):
+    """Ронит публикацию **внутри** транзакции.
+
+    Событие несёт уже закоммиченное состояние, и порядок здесь — предмет,
+    а не подробность: ушедшее раньше коммита событие пережило бы откат
+    транзакции, а `publish` отменить нечем — канал и истина разошлись бы
+    в ту сторону, из которой восстановления нет (сверка приведёт клиента
+    к REST, а второго события о том же сдвиге не будет).
+
+    Оба адресата проверяются вместе: у них общий момент — граница
+    транзакции, — и перенос внутрь любого из двух вызовов виден здесь
+    одним и тем же журналом.
+    """
+    journal: list[str] = []
+    runtime.centrifugo = FakeRealtime(log=journal)
+
+    @asynccontextmanager
+    async def _соединение(mode=None):
+        journal.append("открыто")
+        try:
+            yield None
+        finally:
+            journal.append("закрыто")
+
+    runtime.connection = _соединение
+    authenticated(monkeypatch)
+    отвечает(
+        monkeypatch,
+        service.SetReceiptsResult(
+            state=_state(7, 7),
+            previous=_state(2, 2),
+            notices=(
+                UnreadNotice(
+                    user_id=ACTOR_ID,
+                    conversation_id=ConversationId(CONVERSATION_ID),
+                    unread_count=UnreadCount(0),
+                ),
+            ),
+        ),
+    )
+
+    client.post(URL, json={"read_seq": 7})
+
+    assert journal == ["открыто", "закрыто", "публикация", "публикация"]
+
+
+def test_без_realtime_квитанция_остаётся_рабочей(client, monkeypatch, runtime):
+    """`None` вместо клиента — стенд без realtime-слоя, а не ошибка.
+
+    `runtime.centrifugo_client_from_env` отдаёт `None`, когда Centrifugo
+    не настроен; квитанция обязана отвечать `200` и записывать состояние,
+    потому что её предмет — запись, а публикация лишь ускоряет доставку.
+    """
+    runtime.centrifugo = None
+    authenticated(monkeypatch)
+    отвечает(
+        monkeypatch,
+        service.SetReceiptsResult(state=_state(7, 7), previous=_state(2, 2)),
+    )
+
+    r = client.post(URL, json={"read_seq": 7})
+
+    assert r.status_code == 200
+    assert r.json() == {"delivered_seq": 7, "read_seq": 7}

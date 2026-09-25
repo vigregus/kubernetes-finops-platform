@@ -94,6 +94,10 @@ SECRET
 # по правам должен находиться здесь, а не в проде.
 # Метка `component: test` снимает вывод этого пода со сбора журналов:
 # он для человека в терминале, а не для хранилища.
+# Три переменные Centrifugo HTTP API нужны проверке квитанций: она поднимает
+# ветку API прямо здесь (`ASGITransport`), а `centrifugo_client_from_env`
+# без этой тройки возвращает `None` — и тишина в канале перестала бы
+# отличаться от отсутствия публикатора.
 kubectl -n "$NS" run "$POD" --restart=Never \
     --labels="finops.internal/component=test" \
     --image="$IMAGE" \
@@ -120,6 +124,9 @@ kubectl -n "$NS" run "$POD" --restart=Never \
         {"name":"KAFKA_USERNAME","value":"messenger-outbox"},
         {"name":"KAFKA_PASSWORD","valueFrom":{"secretKeyRef":{"name":"messenger-outbox","key":"password"}}},
         {"name":"CENTRIFUGO_CLIENT_URL","value":"$CENTRIFUGO_ENDPOINT"},
+        {"name":"CENTRIFUGO_API_URL","value":"http://messenger-centrifugo.messenger.svc.cluster.local:9000/api"},
+        {"name":"CENTRIFUGO_HTTP_API_KEY","valueFrom":{"secretKeyRef":{"name":"messenger-centrifugo","key":"CENTRIFUGO_HTTP_API_KEY"}}},
+        {"name":"CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY","valueFrom":{"secretKeyRef":{"name":"messenger-centrifugo","key":"CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY"}}},
         {"name":"INTEGRATION_ONLY","value":"${INTEGRATION_ONLY:-}"},
         {"name":"KEEP_ACCOUNTS","value":"${KEEP_ACCOUNTS:-}"},
         {"name":"BACKCHANNEL_TEST_URL","value":"${BACKCHANNEL_TEST_URL:-}"},

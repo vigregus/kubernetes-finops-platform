@@ -16,6 +16,7 @@ from messenger.domain.conversation_list import (
     ConversationSummary,
 )
 from messenger.domain.ids import ConversationId, ConversationSeq, UserId
+from messenger.domain.receipts import ParticipantReadState, ReadState
 from messenger.domain.user import UserSummary
 
 
@@ -44,12 +45,15 @@ def _to_member(row: asyncpg.Record) -> ConversationMember:
 # и число параметров, поэтому у них общий текст, а не три копии боковых
 # соединений.
 #
-# Участники собираются двумя массивами, а не `json_agg`: `json` драйвер
+# Участники собираются массивами, а не `json_agg`: `json` драйвер
 # отдаёт строкой, и разбирать её пришлось бы рядом со сборкой модели —
-# там же, где ошибка разбора и обнаружилась бы. `uuid[]` и `text[]` он
-# отдаёт готовыми списками. Порядок `joined_at, user_id` — тот же, что
-# у `list_active_members`: своего порядка у участников нет, и выдача
-# без него менялась бы между одинаковыми запросами.
+# там же, где ошибка разбора и обнаружилась бы. `uuid[]`, `text[]`
+# и `bigint[]` он отдаёт готовыми списками. Порядок `joined_at, user_id` —
+# тот же, что у `list_active_members`: своего порядка у участников нет,
+# и выдача без него менялась бы между одинаковыми запросами. Число этих
+# массивов здесь не названо намеренно — оно названо там, где из него
+# следует обязательство (`_to_summary`, `zip(..., strict=True)`), и
+# второе такое место разошлось бы с первым на первой же правке.
 #
 # `COALESCE` здесь не перестраховка. `array_agg` по нулю строк даёт NULL,
 # а не пустой массив, и беседа без действующих участников уронила бы
@@ -62,7 +66,9 @@ _SELECT = """
            c.created_at, c.updated_at,
            participants.ids   AS participant_ids,
            participants.names AS participant_names,
-           participants.seen  AS participant_last_seen
+           participants.seen  AS participant_last_seen,
+           participants.read_seqs      AS participant_read_seqs,
+           participants.delivered_seqs AS participant_delivered_seqs
       FROM conversation_members cm
       JOIN conversations c ON c.conversation_id = cm.conversation_id
       LEFT JOIN LATERAL (
@@ -87,9 +93,37 @@ _SELECT = """
                  COALESCE(
                      array_agg(u.last_seen_at ORDER BY cm2.joined_at, cm2.user_id),
                      ARRAY[]::timestamptz[]
-                 ) AS seen
+                 ) AS seen,
+                 -- Состояние чтения едет тем же подзапросом и по тому же
+                 -- доводу, что и отметка: строки участников уже соединены,
+                 -- а третий круг за двумя числами на беседу был бы платой
+                 -- за то, что здесь уже лежит.
+                 --
+                 -- Соединение **левое**, и в этом весь смысл: строки
+                 -- `read_states` у человека может не быть вовсе, и она
+                 -- отличается от строки из двух нулей. `JOIN` выбросил бы
+                 -- такого человека из участников, а `COALESCE(..., 0)`
+                 -- выдал бы за него квитанцию, которой он не присылал.
+                 -- `LEFT JOIN` оставляет в колонке NULL, а `array_agg`
+                 -- NULL-элементы сохраняет — значит различить их можно
+                 -- уже в `_to_summary`, что там и делается.
+                 --
+                 -- Сортировка та же, что у остальных массивов: состояния
+                 -- обязаны идти в порядке участников, иначе `zip` свёл бы
+                 -- номер одного человека с идентификатором другого.
+                 COALESCE(
+                     array_agg(rs.last_read_seq ORDER BY cm2.joined_at, cm2.user_id),
+                     ARRAY[]::bigint[]
+                 ) AS read_seqs,
+                 COALESCE(
+                     array_agg(rs.last_delivered_seq ORDER BY cm2.joined_at, cm2.user_id),
+                     ARRAY[]::bigint[]
+                 ) AS delivered_seqs
             FROM conversation_members cm2
             JOIN users u ON u.user_id = cm2.user_id
+            LEFT JOIN read_states rs
+                   ON rs.conversation_id = c.conversation_id
+                  AND rs.user_id = cm2.user_id
            WHERE cm2.conversation_id = c.conversation_id
              AND cm2.left_at IS NULL
       ) AS participants ON TRUE
@@ -128,10 +162,23 @@ def _to_summary(row: asyncpg.Record) -> ConversationSummary:
 
     `zip(..., strict=True)` — страховка от расхождения длин массивов:
     молча укороченный список участников выглядел бы как беседа, из
-    которой кто-то вышел, а не как испорченный запрос. Три массива
+    которой кто-то вышел, а не как испорченный запрос. Пять массивов
     собираются одним подзапросом с одной сортировкой, поэтому расхождение
     возможно только при испорченном запросе — и тогда лучше отказ, чем
     участник не с тем временем.
+
+    Числа называются здесь так, как лежат в таблице, а не так, как их
+    зовёт домен: `last_read_seq` против `ReadState.read_seq`. Перевод
+    происходит один раз и выше (`api/main._conversation_body`), по тому же
+    правилу, по которому `_to_read_state` переводит имена базы в имена
+    домена: репозиторий стоит на стороне базы и говорит её именами.
+
+    Состояния чтения приходят **разреженными**, и `zip` их не выравнивает:
+    `LEFT JOIN read_states` для человека без строки оставляет `NULL`
+    в обеих колонках, и такой элемент в результат не попадает. Подставить
+    здесь ноль (`COALESCE(read_seqs[i], 0)`) значило бы объявить квитанцию
+    у того, кто её не присылал, — различие, ради которого в `_SELECT`
+    соединение и сделано левым.
     """
     return ConversationSummary(
         conversation=_to_conversation(row),
@@ -147,6 +194,22 @@ def _to_summary(row: asyncpg.Record) -> ConversationSummary:
                 row["participant_last_seen"],
                 strict=True,
             )
+        ),
+        read_states=tuple(
+            ParticipantReadState(
+                user_id=UserId(user_id),
+                state=ReadState(
+                    delivered_seq=ConversationSeq(delivered_seq),
+                    read_seq=ConversationSeq(read_seq),
+                ),
+            )
+            for user_id, read_seq, delivered_seq in zip(
+                row["participant_ids"],
+                row["participant_read_seqs"],
+                row["participant_delivered_seqs"],
+                strict=True,
+            )
+            if read_seq is not None
         ),
     )
 
@@ -303,6 +366,75 @@ async def creation_blocked_between(
             second,
         )
     )
+
+
+async def blocked_with(
+    conn: asyncpg.Connection,
+    *,
+    viewer: UserId,
+    conversation_id: ConversationId | None = None,
+) -> frozenset[UserId]:
+    """С кем у зрителя блокировка — в любую сторону, одним запросом.
+
+    Симметрия здесь — **новое решение**, а не чтение записанного правила
+    (`docs/messenger/04-decisions.md`, privacy-инвариант `G3-007`). В
+    `08-authorization.md` симметрия объявлена только у записи сообщений
+    (`:101`, раздел «Блокировка симметрична по записи»); у присутствия
+    названо одно направление — `blocked` не видит `blocker` (`:87`, `:97`),
+    — а про заблокировавшего сказано лишь, что ему разрешено читать беседу
+    (`:100`). Правило «блокировка в любую сторону ↔ метаданных активности
+    нет» шире документа и записано как новое.
+
+    Довод тот же, что у `creation_blocked_between`, и он не про таблицу:
+    асимметричная маска оставила бы односторонний канал преследования в
+    **обе** стороны. Движение `last_seen_at` заблокированного — такой же
+    сигнал, как движение `last_seen_at` заблокировавшего, а
+    `11-threat-model.md` называет угрозу «слежка за присутствием», не
+    уточняя, кто за кем следит.
+
+    Форма одна на два вопроса, потому что правило одно. Без
+    `conversation_id` возвращаются все, с кем зритель в блокировке, — так
+    маскируется тело беседы (присутствие и `read_states` каждого участника,
+    срез 3). С ним — только те, кто состоит в названной беседе сейчас, и
+    это ответ на другой вопрос: уйдёт ли событие в канал (`message.read`
+    не публикуется, если блокировка есть с любым участником, — рассылка
+    адресата не имеет). Два вопроса, одно правило, один предикат.
+
+    Цена названа: `OR` в предикате — скан `blocks`. Первичный ключ
+    `(blocker_id, blocked_id)` покрывает прямое направление, обратное — нет,
+    и запрос такой же формы уже ходит на пути создания беседы, то есть
+    ступень не новая. Индекс на `blocked_id` потребовал бы `CONCURRENTLY`,
+    несовместимого с `psql --single-transaction` (`db/migrate.sh`), — та же
+    стена, что у обещанного индекса `0012`; а таблица мала: её размер равен
+    числу блокировок.
+
+    Левый участник пары — всегда **другой**: `CASE` берёт сторону, не
+    равную зрителю, поэтому себя в ответе он не увидит. Отбор участников
+    повторяет список активных (`left_at IS NULL`) — тот же, по которому
+    собирается беседа: маска обязана накрывать ровно тех, кто в теле
+    ответа, иначе одного из двоих она пропустит.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT DISTINCT CASE WHEN b.blocker_id = $1
+                             THEN b.blocked_id
+                             ELSE b.blocker_id
+                        END AS other
+          FROM blocks b
+          LEFT JOIN conversation_members m
+            ON m.user_id = CASE WHEN b.blocker_id = $1
+                                THEN b.blocked_id
+                                ELSE b.blocker_id
+                           END
+           AND m.conversation_id = $2
+           AND m.left_at IS NULL
+         WHERE (b.blocker_id = $1 OR b.blocked_id = $1)
+           AND ($2::uuid IS NULL OR m.user_id IS NOT NULL)
+        """,
+        viewer,
+        conversation_id,
+    )
+    return frozenset(UserId(row["other"]) for row in rows)
 
 
 async def add_member(

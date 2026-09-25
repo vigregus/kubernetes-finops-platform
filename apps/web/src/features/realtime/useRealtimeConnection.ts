@@ -20,6 +20,8 @@ import { createRealtimeClient } from "./realtimeClient";
 export interface UseRealtimeConnectionOptions {
   readonly centrifugoUrl: string;
   readonly channel: string;
+  /** Личный канал `user:{id}` — второй выданный канал того же тикета (`D5`). */
+  readonly userChannel: string;
   /**
    * Добытчик тикетов. Обязан быть **стабильным** между рендерами: новое
    * значение пересоздало бы соединение. Создаётся один раз вместе с
@@ -28,6 +30,13 @@ export interface UseRealtimeConnectionOptions {
   readonly issueTicket: RealtimeClientOptions["issueTicket"];
   /** Публикации канала — наружу, в срез 3. Не толкуются здесь. */
   readonly onPublication: (payload: unknown) => void;
+  /**
+   * Публикации **личного** канала — наружу, к списку бесед. Не толкуются здесь.
+   *
+   * Обработчик один и на страницу: соединение живёт в панели беседы, а число
+   * непрочитанного — факт списка, и адресован он вкладке, а не открытой беседе.
+   */
+  readonly onUserPublication: (payload: unknown) => void;
   /** Подмена SDK — для тестов обвязки; в production не задаётся. */
   readonly createCentrifuge?: RealtimeClientOptions["createCentrifuge"];
 }
@@ -93,17 +102,26 @@ export function useRealtimeConnection(
     publicationRef.current = options.onPublication;
   }, [options.onPublication]);
 
+  // И тот же приём для личного канала: соединение одно и живёт дольше рендера,
+  // а обработчик списка меняется вместе с беседой (сверка ходит за списком).
+  const userPublicationRef = useRef(options.onUserPublication);
+  useEffect(() => {
+    userPublicationRef.current = options.onUserPublication;
+  }, [options.onUserPublication]);
+
   const clientRef = useRef<RealtimeClient | null>(null);
 
-  const { centrifugoUrl, channel, issueTicket, createCentrifuge } = options;
+  const { centrifugoUrl, channel, userChannel, issueTicket, createCentrifuge } = options;
 
   useEffect(() => {
     const client = createRealtimeClient({
       centrifugoUrl,
       channel,
+      userChannel,
       issueTicket,
       onEvent: dispatch,
       onPublication: (payload) => publicationRef.current(payload),
+      onUserPublication: (payload) => userPublicationRef.current(payload),
       createCentrifuge,
     });
 
@@ -114,7 +132,7 @@ export function useRealtimeConnection(
       clientRef.current = null;
       client.stop();
     };
-  }, [centrifugoUrl, channel, issueTicket, createCentrifuge]);
+  }, [centrifugoUrl, channel, userChannel, issueTicket, createCentrifuge]);
 
   useEffect(() => {
     const goOffline = () => dispatch({ type: "browser-offline" });

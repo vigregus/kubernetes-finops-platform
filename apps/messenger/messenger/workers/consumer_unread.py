@@ -17,6 +17,16 @@ Kafka**. `messenger-unread` имеет Read/Describe только на пото�
 записью проекции и сдвигом чекпойнта оставил бы расхождение, которое
 нашлось бы только сверкой. Подробности — в `services/unread.py`.
 
+**Публикация — вне блока соединения, и это то же правило.** Тот, кто
+записал проекцию, обязан сказать об этом адресату: без события вторая
+вкладка не сойдётся с первой, а сходимость и есть выходной критерий
+гейта (`RCP-002`). Соединение закрывается вместе с транзакцией сервиса,
+поэтому публикация стоит **после** `async with postgres.connection(...)`:
+событие, ушедшее внутри, пережило бы откат — `publish` отменить нельзя, —
+и канал разошёлся бы с базой в ту сторону, из которой восстановления
+нет. Отказ Centrifugo исход события не меняет: запись состоялась, а
+потерянное событие клиент добегает сверкой по REST (`D11`).
+
 **Транзакция на событие, фиксация смещения на пачку.** Одна транзакция
 на пачку дешевле, но связала бы судьбы событий разных бесед: отказ на
 одном откатил бы уже применённые чужие. Группировка по `conversation_id`
@@ -114,6 +124,12 @@ def consumer_settings_from_env() -> kafka.ConsumerSettings:
 
 async def run(stop: asyncio.Event) -> None:
     subscriber = kafka.Subscriber(settings=consumer_settings_from_env())
+    # Публикация непрочитанного — вторая половина работы процесса, и клиент
+    # у неё один на процесс, как у соседа (`consumer_realtime`). Строится
+    # он здесь, а не лениво вместе с пулом: `None` от него означает не
+    # «подождать», а «Centrifugo не сконфигурирован», и в этом случае
+    # проекция всё равно считается, а числа доезжают списком бесед.
+    realtime = runtime.centrifugo_client_from_env()
     pool = None
 
     log.info("потребитель запущен", extra={"event": "service_start", "result": "success"})
@@ -192,6 +208,15 @@ async def run(stop: asyncio.Event) -> None:
                             # разных бесед нельзя.
                             async with postgres.connection(pool) as conn:
                                 outcome = await unread.apply_event(conn, body=current.body)
+                            # Публикация — после закрытия соединения, то
+                            # есть после коммита. Пустой список адресатов
+                            # (повтор, чужое событие, беседа без
+                            # собеседников) не стоит ничего: цикл по
+                            # пустому кортежу, а не развилка, которую
+                            # пришлось бы держать в согласии с исходом.
+                            await unread.announce_changed(
+                                realtime=realtime, notices=outcome.notices
+                            )
                             _report(topic=current.topic, outcome=outcome)
                         await subscriber.commit()
                         metrics.consumer_processing_duration(

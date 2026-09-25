@@ -29,6 +29,7 @@ from messenger.domain.ids import (
     direct_key,
 )
 from messenger.domain.message import Message, MessageKind, MessagePayload
+from messenger.domain.receipts import ParticipantReadState, ReadState
 from messenger.domain.unread import UnreadCount
 from messenger.domain.user import User, UserSummary
 from messenger.services import conversations as service
@@ -87,6 +88,48 @@ def _отметки(
         return dict(seen or {})
 
     monkeypatch.setattr(service.users, "fetch_last_seen_at", _fetch)
+    return asked
+
+
+def _квитанции(
+    monkeypatch, states: dict[UserId, ReadState] | None = None
+) -> list[UserId]:
+    """Подменяет чтение состояний чтения: проверяется вызов, не SQL.
+
+    Как и у отметок, видно, что запрос идёт **пачкой** по обоим участникам.
+    Возвращается ровно то, что передали: отсутствие пары для человека —
+    это и есть «строки нет», и подставлять на её место пару нулей нельзя,
+    иначе участник без квитанций стал бы участником с нулевой.
+    """
+    asked: list[UserId] = []
+
+    async def _fetch(conn, *, conversation_id, user_ids):
+        asked.extend(user_ids)
+        return dict(states or {})
+
+    monkeypatch.setattr(service.read_states, "fetch_read_states", _fetch)
+    return asked
+
+
+def _блокировки(
+    monkeypatch, blocked: set[UserId] | None = None
+) -> list[UserId]:
+    """Подменяет предикат блокировок — и записывает, кого о нём спросили.
+
+    Возвращается список спрошенных зрителей, а не счётчик: у предиката нет
+    ни беседы, ни страницы в аргументах, и «спросили дважды» здесь значило
+    бы не удвоение, а **того же человека дважды** — то есть запрос,
+    повторившийся по числу строк ответа. Правило при этом одно на весь
+    ответ, и разойтись значения не могут по построению запроса; интересно
+    ровно то, что он задан.
+    """
+    asked: list[UserId] = []
+
+    async def _fetch(conn, *, viewer):
+        asked.append(viewer)
+        return frozenset(blocked or ())
+
+    monkeypatch.setattr(service.conversations, "blocked_with", _fetch)
     return asked
 
 
@@ -167,6 +210,14 @@ def test_первый_запрос_атомарно_создаёт_беседу_
     monkeypatch.setattr(service.conversations, "ensure_direct_conversation", _ensure)
     monkeypatch.setattr(service.conversations, "add_member", _add)
     asked = _отметки(monkeypatch, {OTHER_ID: NOW})
+    заблокированные = _блокировки(monkeypatch, {OTHER_ID})
+
+    async def _не_спрашивать(*args, **kwargs):
+        raise AssertionError(
+            "состояние спрошено у беседы, созданной этой же транзакцией"
+        )
+
+    monkeypatch.setattr(service.read_states, "fetch_read_states", _не_спрашивать)
 
     result = asyncio.run(
         service.create_direct(conn, actor=_user(ACTOR_ID), participant_id=OTHER_ID)
@@ -181,6 +232,19 @@ def test_первый_запрос_атомарно_создаёт_беседу_
         (ACTOR_ID, None),
         (OTHER_ID, NOW),
     ]
+    # Состояние — пустое и **без** запроса: у беседы, созданной этой же
+    # транзакцией, квитанций быть не может, и поход в базу за известным
+    # ответом был бы ритуалом. Пустой кортеж, а не `None`: состояние
+    # спрошено, и его нет, — иначе ответ на создание отличался бы от
+    # ответа списка там, где отличаться нечем.
+    assert result.read_states == ()
+    # Предикат блокировок читается и на этом маршруте — **до** обеих веток,
+    # потому что зритель у них один: маска, собранная только на ветке
+    # «беседа была», оставила бы ответ о только что созданной беседе без
+    # неё. Здесь ветка как раз «создана», то есть та, где поля легко
+    # забыть.
+    assert заблокированные == [ACTOR_ID]
+    assert result.blocked_with == frozenset({OTHER_ID})
 
 
 def test_последовательный_повтор_возвращает_существующую(monkeypatch):
@@ -199,6 +263,11 @@ def test_последовательный_повтор_возвращает_су
     monkeypatch.setattr(service.conversations, "ensure_direct_conversation", _ensure)
     monkeypatch.setattr(service.conversations, "add_member", _не_добавлять)
     asked = _отметки(monkeypatch)
+    заблокированные = _блокировки(monkeypatch, {OTHER_ID})
+    stored = ReadState(
+        delivered_seq=ConversationSeq(5), read_seq=ConversationSeq(4)
+    )
+    states_asked = _квитанции(monkeypatch, {OTHER_ID: stored})
 
     result = asyncio.run(
         service.create_direct(Connection(), actor=_user(ACTOR_ID), participant_id=OTHER_ID)
@@ -206,6 +275,23 @@ def test_последовательный_повтор_возвращает_су
     assert result.ok and not result.created and result.conversation == expected
     assert [user.user_id for user in result.participants] == [ACTOR_ID, OTHER_ID]
     assert asked == [ACTOR_ID, OTHER_ID]
+    # Состояние чтения спрашивается на этой ветке, и именно на ней одной:
+    # беседа вернулась существующей, значит квитанции в ней могут быть,
+    # и умолчание о них отдало бы про ту же беседу другую правду, чем
+    # список бесед. Читается пачкой по обоим участникам.
+    assert states_asked == [ACTOR_ID, OTHER_ID]
+    # Элемент один: у второго участника строки нет, и это не то же самое,
+    # что строка из двух нулей, — поэтому ноль на её месте здесь не
+    # появляется, а участник просто не попадает в массив.
+    assert result.read_states == (
+        ParticipantReadState(user_id=OTHER_ID, state=stored),
+    )
+    # И маска на этой ветке та же: предикат читается один раз до ветвления,
+    # а не по разу на каждую. Проверяются обе ветки по отдельности, потому
+    # что два возврата — две точки, и передача, забытая на одной из них,
+    # не покраснела бы на другой.
+    assert заблокированные == [ACTOR_ID]
+    assert result.blocked_with == frozenset({OTHER_ID})
 
 
 # --- список бесед ----------------------------------------------------------
@@ -225,6 +311,7 @@ def _summary(conversation_id: ConversationId, *, updated_at: datetime = NOW):
             updated_at=updated_at,
         ),
         participants=(UserSummary(user_id=ACTOR_ID, display_name="Аня"),),
+        read_states=(),
     )
 
 
@@ -246,9 +333,18 @@ def _stub_page(
     page: ConversationPage,
     latest: dict | None = None,
     counts: dict | None = None,
+    blocked: set[UserId] | None = None,
 ):
-    """Подменяет все три выборки и записывает, с чем их позвали."""
-    позвали: dict = {}
+    """Подменяет все четыре обращения к базе и записывает, с чем их позвали.
+
+    Список бесед читает их пачкой на страницу: строку бесед, последние
+    сообщения, счётчики непрочитанного и предикат блокировок. Четвёртое
+    появилось вместе с маской (`G3-007`), и подменяется оно здесь же, а не
+    в каждом тесте отдельно: поход в базу у него настоящий, и подставленное
+    соединение ответило бы на него `AttributeError` — то есть тест упал бы
+    по отсутствию заглушки, а не по предмету.
+    """
+    позвали: dict = {"blocked": _блокировки(monkeypatch, blocked)}
 
     async def _page(*args, **kwargs):
         позвали.update(kwargs)
@@ -276,13 +372,17 @@ def _stub_page(
     return позвали
 
 
-def test_страница_собирается_из_трёх_выборок(monkeypatch):
+def test_страница_собирается_из_четырёх_обращений(monkeypatch):
     message = _message(FIRST_ID)
     page = ConversationPage(
         items=(_summary(FIRST_ID), _summary(SECOND_ID)), has_more=True
     )
     позвали = _stub_page(
-        monkeypatch, page, {FIRST_ID: message}, {FIRST_ID: UnreadCount(2)}
+        monkeypatch,
+        page,
+        {FIRST_ID: message},
+        {FIRST_ID: UnreadCount(2)},
+        blocked={OTHER_ID},
     )
 
     result = asyncio.run(
@@ -302,6 +402,16 @@ def test_страница_собирается_из_трёх_выборок(monk
     assert позвали["restore"] == (ACTOR_ID, [FIRST_ID, SECOND_ID])
     assert result.page.items[0].unread_count == 2
     assert result.page.items[1].unread_count is None
+    # Предикат блокировок спрашивается **один** раз на ответ и про
+    # спрашивающего: правило одно на всю страницу, и запрос по беседе дал
+    # бы по строке на каждую — то есть то же значение, взятое дороже.
+    assert позвали["blocked"] == [ACTOR_ID]
+    # И он доезжает до результата. Это отдельное утверждение, потому что
+    # у поля есть умолчание `frozenset()`: забытая передача оставила бы
+    # маску пустой и не покраснела бы нигде — ни типами, ни прежними
+    # проверками, — а утечка была бы тихой и полной: присутствие человека,
+    # с которым у зрителя блокировка, поехало бы ему наружу.
+    assert result.blocked_with == frozenset({OTHER_ID})
 
 
 def test_отсутствие_числа_у_источника_истины_не_превращается_в_ноль(monkeypatch):
