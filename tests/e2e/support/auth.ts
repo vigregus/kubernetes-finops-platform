@@ -141,6 +141,101 @@ export async function signIn(browser: Browser, fixture: Fixture): Promise<Signed
 	}
 }
 
+/** Сколько ждём обмен кода на токен: это чужой процесс (Keycloak), не наш. */
+const CALLBACK_TIMEOUT = 30_000
+
+/**
+ * Сколько ждём кнопку входа, прежде чем решить, что её нет.
+ *
+ * Короткое намеренно и по несимметричной причине: у вкладки того же контекста
+ * кнопки — **отсутствие**, то есть ожидаемый исход, и ждать на нём полный
+ * бюджет обмена значило бы платить полминуты за каждый второй вход. Полный
+ * бюджет нужен ровно там, где кнопка есть и мы ждём ответа на неё, — то есть у
+ * самого обмена.
+ */
+const FORM_TIMEOUT = 5_000
+
+/**
+ * Обмен, дающий токен доступа: **два** настоящих входа, и оба наши.
+ *
+ * `signIn` проходит удостоверяющий центр и берёт токен на возврате
+ * (`/auth/callback`). Вкладка того же контекста туда не ходит вовсе: cookie
+ * обновления уже лежит в контексте, и приложение обменивает его на токен само
+ * (`/auth/refresh`). Это не догадка о поведении клиента, а объявленное:
+ * «Токен доступа живёт в памяти вкладки и исчезает при перезагрузке, поэтому
+ * клиент при старте обменяет cookie на новый. Несколько вкладок обменяют
+ * каждая свой» (`openapi.yaml`, `/auth/refresh`).
+ *
+ * Отбор по коду ответа здесь несущий: первый обмен страницы идёт **до** входа
+ * и отвечает `401` — это не вход, а его отсутствие, и принять его за вход
+ * значило бы вернуть пустой токен.
+ */
+const givesAccessToken = (response: Response): boolean =>
+	isCallback(response) ||
+	(response.request().method() === "POST" &&
+		response.url().includes("/auth/refresh") &&
+		response.status() === 200)
+
+/**
+ * Вход **второй вкладки** того же человека.
+ *
+ * От `signIn` отличается не удобством, а тем, что делает браузер: у свежего
+ * контекста cookie обновления нет, и человек проходит удостоверяющий центр
+ * целиком. У вкладки того же контекста cookie общий и живой, и приложение
+ * входит **само**, не показывая ни формы, ни удостоверяющего центра, — обмен
+ * объявлен контрактом (`givesAccessToken`).
+ *
+ * Поэтому ожидание ставится **до** навигации и сразу на оба исхода, а не на
+ * один: обмен вкладки может пройти раньше, чем вернётся управление, и подписка
+ * после него его бы не увидела. Ветка с кнопкой остаётся для случая, когда
+ * cookie всё-таки нет (страница открыта первой) — тогда путь тот же, что у
+ * `signIn`, включая форму, если удостоверяющий центр её покажет.
+ *
+ * Страница обязана быть **чистой**: навигация внутри, а не снаружи, и иначе
+ * обмен мог бы состояться до того, как ожидание поставлено.
+ *
+ * Своё удостоверение устройства здесь не кладётся: `addInitScript` задан
+ * контексту, а не странице, — значит вторая вкладка встаёт на то же
+ * устройство, и `devices` от неё не растут. Это и есть «одна сессия живёт
+ * сразу в нескольких вкладках» (`0006_realtime_connections.sql`): у вкладок
+ * один `session_id`, а различает их `client_id`, который чеканит Centrifugo.
+ */
+export async function signInTab(page: Page, fixture: Fixture): Promise<string> {
+	const entered = page.waitForResponse(givesAccessToken, { timeout: CALLBACK_TIMEOUT })
+	await page.goto("/")
+
+	// Кнопка входа — признак того, что cookie не сработал. Её отсутствие это
+	// ожидаемый исход, поэтому ожидание короткое и через `waitFor`, а не
+	// `click`: клик по несуществующей кнопке ждал бы её до конца бюджета теста
+	// и падал бы сообщением о клике, скрывая настоящее положение дел.
+	const button = page.getByRole("button", { name: "Continue with Vector ID" })
+	const shown = await button
+		.waitFor({ state: "visible", timeout: FORM_TIMEOUT })
+		.then(() => true, () => false)
+
+	if (shown) {
+		await button.click()
+
+		const form = await page
+			.waitForSelector("#username", { timeout: FORM_TIMEOUT })
+			.catch(() => null)
+
+		if (form !== null) {
+			await page.fill("#username", fixture.email)
+			await page.fill("#password", fixture.password)
+			await page.click("#kc-login")
+		}
+	}
+
+	const response = await entered
+	expect(response.status(), `обмен на токен доступа для ${fixture.email}`).toBe(200)
+
+	const body = (await response.json()) as { access_token?: unknown }
+	expect(typeof body.access_token, "тело обмена несёт access_token").toBe("string")
+
+	return body.access_token as string
+}
+
 /** `user_id` стороны: поиска пользователей в контракте нет, каждый берётся из своего `/me`. */
 export async function whoAmI(signedIn: SignedIn, fixture: Fixture): Promise<string> {
 	const response = await signedIn.page.request.get(`${API}/me`, {
