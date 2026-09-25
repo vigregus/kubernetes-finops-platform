@@ -51,10 +51,27 @@
 возвращается в поток (`Subscriber.rewind`). И он не пишет в
 журнал — правило слоя; исход возвращается значением, а записывает его
 тот, кто знает и топик, и номер попытки.
+
+**Публикация — вторая половина записи, и она вне транзакции.** Тот, кто
+записал проекцию, обязан ещё и сказать об этом клиенту, иначе вторая
+вкладка не сходится с первой. Адресаты и числа сервис не публикует сам,
+а возвращает исходом (`notices`): `publish` отменить нельзя, поэтому
+отправлять событие внутри транзакции значило бы пережить её откат и
+разойтись с базой в ту сторону, из которой восстановления нет — второго
+события о том же сдвиге не будет. Публикует `announce_changed`
+**после** возврата соединения, и довод тот же, что у квитанции
+(`services/receipts.py::announce_read`).
+
+**Адресат события — не записанная строка.** Множества совпадают не
+всегда, и отождествить их — самая правдоподобная ошибка этого места:
+строка отправителя с нулевым приращением записана, потому что её читает
+список бесед, а событие о собственном сообщении ему не шлётся. Отбор
+идёт по **входным** приращениям, числа — из ответа оператора (`D7`).
 """
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import asyncpg
@@ -64,6 +81,7 @@ from messenger.domain.ids import ConversationId, UserId
 from messenger.domain.unread import (
     UnreadCount,
     UnreadDelta,
+    UnreadNotice,
     UnreadOutcome,
     UnreadOutcomeKind,
 )
@@ -76,6 +94,8 @@ from messenger.repositories.unread import (
     rebuild,
     set_offsets,
 )
+from messenger.services import realtime_delivery
+from messenger.telemetry import metrics
 
 # Почему пришлось пересобирать. Не перечисление, а короткие коды: их
 # видно в журнале рядом с `result="rebuilt"`, и по ним отличают разрыв
@@ -181,7 +201,7 @@ async def apply_event(
                 conn, event, users=users, lost=lost
             )
 
-        written = await _bump(conn, event, users=users)
+        bumped = await _bump(conn, event, users=users)
         await set_offsets(
             conn,
             conversation_id=event.conversation_id,
@@ -191,7 +211,8 @@ async def apply_event(
             kind=UnreadOutcomeKind.APPLIED,
             conversation_id=event.conversation_id,
             conversation_seq=event.conversation_seq,
-            affected=written,
+            affected=bumped.written,
+            notices=bumped.notices,
         )
 
 
@@ -342,7 +363,7 @@ async def _bump(
     event: unread.MessageCreated,
     *,
     users: Sequence[UserId],
-) -> int:
+) -> _Bumped:
     """Приращение на каждого названного: ноль или единица.
 
     Дельты считаются здесь, а не запросом: прочитанные номера получателей
@@ -355,6 +376,17 @@ async def _bump(
     исключён отдельной веткой, а потому, что `counts_as_unread` для
     собственного сообщения ложна. Исключение его здесь развело бы
     предикат на две редакции: «для получателей» и «для отправителя».
+    А вот **адресатом события он не становится** — и это уже отдельное
+    решение, а не следствие предиката: адресаты отбираются по входу
+    (`delta != 0`), а числа берутся из ответа оператора (`D7`). Нулевая
+    дельта означает «число не менялось», и событие о ней было бы событием
+    ни о чём — притом о собственном сообщении отправителя.
+
+    Число из ответа, а не сама дельта: они совпадают на шаге в единицу и
+    расходятся ровно там, где проекцию чинят, — а `unread.changed` несёт
+    абсолютное значение. Приращение, которого нет в ответе, — не ноль,
+    а расхождение двух утверждений об одном операторе; `KeyError` здесь
+    громче и честнее подстановки.
     """
     reads = await read_states.fetch_read_states(
         conn, conversation_id=event.conversation_id, user_ids=users
@@ -389,8 +421,61 @@ async def _bump(
         )
         for user in users
     )
-    return await bump_unread(
+    numbers = await bump_unread(
         conn, conversation_id=event.conversation_id, deltas=deltas
+    )
+    return _Bumped(
+        written=len(numbers),
+        notices=tuple(
+            UnreadNotice(
+                user_id=delta.user_id,
+                conversation_id=event.conversation_id,
+                unread_count=numbers[delta.user_id],
+            )
+            for delta in deltas
+            if delta.delta != 0
+        ),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _Bumped:
+    """Что вышло из приращения: сколько строк записано и кому это событие.
+
+    Два поля, а не одно, потому что это два разных множества, и различие
+    неочевидно ровно настолько, чтобы оставлять его комментарием на месте
+    вызова: у отправителя своего сообщения строка записана, а событие
+    ему не адресовано. Свернуть их в одно поле значило бы вернуть ту
+    ошибку, от которой `D7` и предостерегает.
+    """
+
+    written: int
+    notices: tuple[UnreadNotice, ...]
+
+
+def _notices_of(
+    numbers: Mapping[UserId, UnreadCount], *, conversation_id: ConversationId
+) -> tuple[UnreadNotice, ...]:
+    """Адресаты по записанным абсолютным числам — все, кому записали.
+
+    Пересборку нечем фильтровать по приращению: у неё его нет, она пишет
+    абсолютные значения, и пишет именно потому, что прежнему верить
+    нельзя. Значит её ответ может **исправить** уже существующее
+    расхождение, и умолчать об этом нельзя: участник, чьё число
+    пересборка изменила, обязан узнать. Строка отправителя с нулём тоже
+    входит: здесь работает правило «кому принадлежит число», а не «у кого
+    оно выросло».
+
+    Порядок — тот, каким строки вернул `RETURNING`, и он не договор:
+    адресаты независимы, событие каждому своё, а порядок публикаций
+    ни на что не влияет. Сортировать его значило бы обещать
+    воспроизводимость, которой никто не проверяет.
+    """
+    return tuple(
+        UnreadNotice(
+            user_id=user_id, conversation_id=conversation_id, unread_count=count
+        )
+        for user_id, count in numbers.items()
     )
 
 
@@ -407,6 +492,10 @@ async def _rebuilt(
     его неучтённым, а `set_offsets` объявил бы применённым. Сдвиг
     чекпойнта идёт последним шагом и только после того, как записано
     то, что он объявляет записанным.
+
+    Адресаты — все пересобранные, а не одни получатели: число изменилось
+    у каждого, кого пересборка тронула, и об этом узнаёт каждый. Довод —
+    в `_notices_of`.
     """
     restored = await rebuild(
         conn,
@@ -423,6 +512,7 @@ async def _rebuilt(
         conversation_id=event.conversation_id,
         conversation_seq=event.conversation_seq,
         affected=len(restored),
+        notices=_notices_of(restored, conversation_id=event.conversation_id),
         reason=reason,
     )
 
@@ -446,6 +536,13 @@ async def _rebuild_lost(
     прибавляет его же тем, кто уцелел. Поэтому верхняя граница пересборки
     здесь — номер события, а не чекпойнт, и добавить к пересобранным
     единицу сверху было бы двойным счётом.
+
+    Адресатов у этой ветки два разных рода, и оба названы по отдельности:
+    пересобранным — все, кому пересборка записала (её ответ мог исправить
+    расхождение, и умолчать о нём нечем), уцелевшим — те, у кого число
+    выросло, как у обычного приращения. Складывать их в одно правило
+    значило бы либо разослать событие получателю, которого пересборка
+    не касалась, либо промолчать о починенном числе.
     """
     restored = await rebuild(
         conn,
@@ -454,7 +551,7 @@ async def _rebuild_lost(
         user_ids=lost,
     )
     surviving = tuple(user for user in users if user not in set(lost))
-    written = await _bump(conn, event, users=surviving)
+    bumped = await _bump(conn, event, users=surviving)
     await set_offsets(
         conn,
         conversation_id=event.conversation_id,
@@ -464,6 +561,57 @@ async def _rebuild_lost(
         kind=UnreadOutcomeKind.REBUILT,
         conversation_id=event.conversation_id,
         conversation_seq=event.conversation_seq,
-        affected=len(restored) + written,
+        affected=len(restored) + bumped.written,
+        notices=(
+            *_notices_of(restored, conversation_id=event.conversation_id),
+            *bumped.notices,
+        ),
         reason=REASON_MISSING_ROWS,
     )
+
+
+async def announce_changed(
+    *,
+    realtime,
+    notices: Sequence[UnreadNotice],
+) -> int:
+    """Сообщает адресатам новые числа непрочитанного. Best-effort, после коммита.
+
+    Событие уходит в **личный** канал адресата, а не в канал беседы:
+    число у каждого своё, а `conversation:{id}` — рассылка без адресата,
+    и положить в неё чужое число значило бы показать его всем участникам
+    беседы. Тем же свойством канала объясняется и то, что квитанция
+    в него молчит при блокировке, — здесь маскировать нечего: событие
+    и так не видит никто, кроме своего.
+
+    Вызывается **вне** блока соединения, и это не размещение, а условие:
+    событие, ушедшее внутри транзакции, пережило бы её откат — `publish`
+    отменить нельзя, — и канал разошёлся бы с базой в ту сторону, из
+    которой восстановления нет. Сверка приведёт клиента к REST, но
+    второго события о том же сдвиге не будет.
+
+    Отказ публикации не роняет ни обработку события, ни записанную
+    проекцию: запись состоялась, и это главное. Потерянное событие
+    не потеряно навсегда — число приходит из REST при возврате вкладки
+    (`D11`), и на этом же стоит отсутствие гарантии доставки у обоих
+    событий гейта. Считается исходом метрики, как у отзыва сессии
+    и у квитанции.
+
+    Отказ одного адресата не отменяет остальных: публикации независимы,
+    и остановка на первой ошибке лишила бы события всех, кто шёл следом.
+
+    `None` вместо клиента — не ошибка: Centrifugo необязателен
+    (`runtime.centrifugo_client_from_env`), и без него потребитель обязан
+    работать, а число — доезжать списком бесед.
+    """
+    if realtime is None:
+        return 0
+    published = 0
+    for notice in notices:
+        accepted = await realtime.publish(
+            realtime_delivery.user_channel_for(str(notice.user_id)),
+            unread.changed_event(notice=notice),
+        )
+        metrics.realtime_published("ok" if accepted else "failed")
+        published += 1 if accepted else 0
+    return published

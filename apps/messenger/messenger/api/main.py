@@ -63,6 +63,7 @@ from messenger.services import realtime as realtime_service
 from messenger.services import receipts as receipts_service
 from messenger.services import runtime as runtime_service
 from messenger.services import session_management as session_service
+from messenger.services import unread as unread_service
 from messenger.services import verification as verification_service
 from messenger.telemetry import logging as logging_envelope
 from messenger.telemetry import metrics, trace, tracing
@@ -1830,6 +1831,19 @@ async def set_receipts(
             reader_id=auth.user.user_id,
             state=result.state,
         )
+
+    # Второй адресат — сам читатель, и он получает **своё** число. Две
+    # публикации стоят рядом, потому что обе родились одним вызовом
+    # устройства, но маска у них разная, и это не рассогласование:
+    # `message.read` идёт в канал беседы, где подписан заблокированный,
+    # поэтому молчит при блокировке целиком (канал — рассылка, «всем,
+    # кроме одного» на ней не выражается); `unread.changed` идёт в **личный**
+    # канал читателя, и маскировать в нём нечего — это его собственные
+    # данные. Общее у них — только то, что публикуются они после коммита
+    # и не роняют квитанцию отказом.
+    await unread_service.announce_changed(
+        realtime=runtime.centrifugo, notices=result.notices
+    )
 
     with tracing.span("response"):
         body_out = _receipts_body(result.state)

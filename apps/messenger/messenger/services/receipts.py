@@ -102,7 +102,7 @@ from messenger.domain.receipts import (
     validate_receipt_bound,
     validate_receipts,
 )
-from messenger.domain.unread import UnreadCount
+from messenger.domain.unread import UnreadCount, UnreadNotice
 from messenger.domain.user import User
 from messenger.repositories import conversations, read_states
 from messenger.repositories.unread import lock_offsets, recount_unread
@@ -135,6 +135,23 @@ class SetReceiptsResult:
     обработчик, у которого есть чем публиковать. Обработчику он и нужен
     потому, что в базу `api` ходить не вправе (`scripts/check-layers.py`),
     а предикат читается там, где уже есть соединение и замок.
+
+    `notices` — адресат `unread.changed` от этого писателя, и он **один**:
+    тот, кто прислал квитанцию. Второй писатель проекции (приращение
+    потребителя) шлёт **получателям** и шлёт своё (см. `services/unread`),
+    потому что «кто записал строку» и «кому принадлежит число» — разные
+    множества; здесь они совпадают, и это свойство пути, а не правило,
+    которое стоит запоминать: абсолютное число после пересчёта принадлежит
+    ровно тому, по чьей квитанции он считался.
+
+    Событие уходит **не только на сдвиге**, в отличие от `message.read`, и
+    это не рассогласование двух решений. `message.read` — утверждение о
+    прочитанном, и утверждать непродвинувшееся незачем; `unread.changed`
+    несёт **абсолютное** число, а пересчёт его мог **исправить**, даже
+    когда `last_read_seq` не двинулся: второе устройство того же человека
+    пишет в ту же строку приращением, и проигравшая квитанция пересчитывает
+    проекцию по тому, что в строке лежит. Молчать в этот момент значило бы
+    оставить вкладку со старым числом до следующей сверки.
     """
 
     state: ReadState | None = None
@@ -143,6 +160,7 @@ class SetReceiptsResult:
     unread_count: UnreadCount | None = None
     previous: ReadState | None = None
     blocked_with: frozenset[UserId] = frozenset()
+    notices: tuple[UnreadNotice, ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -341,6 +359,19 @@ async def set_receipts(
         previous=previous,
         unread_count=count,
         blocked_with=blocked,
+        # Адресат собирается здесь, а не в обработчике: беседа известна
+        # только тут, а обработчик получил её идентификатор как параметр
+        # маршрута — то есть собрал бы событие из того же самого числа,
+        # но из чужого знания. Число берётся пересчитанное, а не `stored`:
+        # проекцию записал `recount_unread`, и её `RETURNING` — то самое
+        # абсолютное значение, которое обязано доехать до вкладки.
+        notices=(
+            UnreadNotice(
+                user_id=viewer.user_id,
+                conversation_id=conversation_id,
+                unread_count=count,
+            ),
+        ),
     )
 
 

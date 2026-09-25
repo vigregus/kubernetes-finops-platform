@@ -30,9 +30,9 @@ from fastapi.testclient import TestClient
 from messenger.api import main
 from messenger.api.main import app
 from messenger.domain.errors import Reason, Visibility
-from messenger.domain.ids import ConversationSeq, UserId
+from messenger.domain.ids import ConversationId, ConversationSeq, UserId
 from messenger.domain.receipts import InvalidReceipt, ReadState
-from messenger.domain.unread import UnreadCount
+from messenger.domain.unread import UnreadCount, UnreadNotice
 from messenger.domain.user import User
 from messenger.services import identity
 from messenger.services import receipts as service
@@ -511,6 +511,109 @@ def test_отказ_не_публикуется(client, monkeypatch, runtime):
     assert runtime.centrifugo.published == []
 
 
+def test_число_непрочитанного_уходит_читателю_в_личный_канал(
+    client, monkeypatch, runtime
+):
+    """`D7`: второй адресат — сам читатель, и канал у него **личный**.
+
+    Событие о числе идёт не в беседу, а в `user:{id}`: число принадлежит
+    одному человеку, и рассылка его всей беседе была бы утечкой чужого
+    счётчика. Канал берётся из `realtime_delivery.user_channel_for` — тем
+    же правилом, по которому выдаётся тикет: имя, собранное по месту,
+    разошлось бы с выданным молча, а публикация в несуществующий канал
+    не ошибка, а тишина.
+
+    Ронит публикацию «второго числа тем же событием»: тело собирает
+    `domain.unread.changed_event`, и оно несёт **абсолютное** число —
+    клиент ставит его, а не прибавляет, потому что повторная доставка
+    иначе сдвинула бы счётчик.
+    """
+    authenticated(monkeypatch)
+    отвечает(
+        monkeypatch,
+        service.SetReceiptsResult(
+            state=_state(7, 7),
+            previous=_state(2, 2),
+            unread_count=UnreadCount(3),
+            notices=(
+                UnreadNotice(
+                    user_id=ACTOR_ID,
+                    conversation_id=ConversationId(CONVERSATION_ID),
+                    unread_count=UnreadCount(3),
+                ),
+            ),
+        ),
+    )
+
+    r = client.post(URL, json={"read_seq": 7})
+
+    assert r.status_code == 200
+    assert runtime.centrifugo.published == [
+        (
+            f"conversation:{CONVERSATION_ID}",
+            {
+                "type": "message.read",
+                "reader_id": str(ACTOR_ID),
+                "read_seq": 7,
+                "delivered_seq": 7,
+            },
+        ),
+        (
+            f"user:{ACTOR_ID}",
+            {
+                "type": "unread.changed",
+                "conversation_id": str(CONVERSATION_ID),
+                "unread_count": 3,
+            },
+        ),
+    ]
+
+
+def test_блокировка_глушит_беседу_но_не_свой_счётчик(client, monkeypatch, runtime):
+    """Маска закрывает чужое, а не собственное, — и цена названа.
+
+    `message.read` при блокировке молчит целиком: канал беседы — рассылка,
+    и утаить событие от одного подписчика на ней нечем (`D14`). Личный
+    канал устроен наоборот: в нём адресат один и это сам читатель, поэтому
+    маскировать в нём нечего — счётчик его собственный. Правило «маскируется
+    только чужое» здесь и проверяется: одно и то же состояние даёт молчание
+    в беседе и событие в личном канале.
+
+    Ронит применение маски к обоим каналам разом — тогда вкладка читателя
+    не узнала бы о **своём** числе до сверки, и блокировка наказывала бы
+    того, кого она защищает.
+    """
+    authenticated(monkeypatch)
+    отвечает(
+        monkeypatch,
+        service.SetReceiptsResult(
+            state=_state(7, 7),
+            previous=_state(2, 2),
+            blocked_with=frozenset({ACTOR_ID}),
+            notices=(
+                UnreadNotice(
+                    user_id=ACTOR_ID,
+                    conversation_id=ConversationId(CONVERSATION_ID),
+                    unread_count=UnreadCount(0),
+                ),
+            ),
+        ),
+    )
+
+    client.post(URL, json={"read_seq": 7})
+
+    assert runtime.centrifugo.published == [
+        (
+            f"user:{ACTOR_ID}",
+            {
+                "type": "unread.changed",
+                "conversation_id": str(CONVERSATION_ID),
+                "unread_count": 0,
+            },
+        )
+    ]
+
+
 def test_публикация_идёт_после_закрытия_соединения(client, monkeypatch, runtime):
     """Ронит публикацию **внутри** транзакции.
 
@@ -519,6 +622,10 @@ def test_публикация_идёт_после_закрытия_соедин�
     транзакции, а `publish` отменить нечем — канал и истина разошлись бы
     в ту сторону, из которой восстановления нет (сверка приведёт клиента
     к REST, а второго события о том же сдвиге не будет).
+
+    Оба адресата проверяются вместе: у них общий момент — граница
+    транзакции, — и перенос внутрь любого из двух вызовов виден здесь
+    одним и тем же журналом.
     """
     journal: list[str] = []
     runtime.centrifugo = FakeRealtime(log=journal)
@@ -535,12 +642,22 @@ def test_публикация_идёт_после_закрытия_соедин�
     authenticated(monkeypatch)
     отвечает(
         monkeypatch,
-        service.SetReceiptsResult(state=_state(7, 7), previous=_state(2, 2)),
+        service.SetReceiptsResult(
+            state=_state(7, 7),
+            previous=_state(2, 2),
+            notices=(
+                UnreadNotice(
+                    user_id=ACTOR_ID,
+                    conversation_id=ConversationId(CONVERSATION_ID),
+                    unread_count=UnreadCount(0),
+                ),
+            ),
+        ),
     )
 
     client.post(URL, json={"read_seq": 7})
 
-    assert journal == ["открыто", "закрыто", "публикация"]
+    assert journal == ["открыто", "закрыто", "публикация", "публикация"]
 
 
 def test_без_realtime_квитанция_остаётся_рабочей(client, monkeypatch, runtime):

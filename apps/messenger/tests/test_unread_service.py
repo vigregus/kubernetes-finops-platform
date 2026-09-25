@@ -87,11 +87,23 @@ def _stand(
     reads: dict[UserId, int] | None = None,
     missing: tuple[UserId, ...] = (),
     restored: tuple[UserId, ...] = (),
+    prior: int = 0,
+    numbers: dict[UserId, int] | None = None,
     gone: bool = False,
 ) -> tuple[Connection, Stand]:
     conn = Connection()
     stand = Stand()
-    state = {"reads": reads or {}, "missing": missing, "restored": restored}
+    state = {
+        "reads": reads or {},
+        "missing": missing,
+        "restored": restored,
+        # Числа, которые вернёт приращение: `numbers` — поимённо, `prior` —
+        # умолчание для прочих. Нужны, чтобы абсолютное значение из ответа
+        # отличалось от приращения: на совпадающих числах проверка «число
+        # берётся из `RETURNING`» зелена на дефекте.
+        "prior": prior,
+        "numbers": numbers or {},
+    }
 
     async def _lock(conn_: Connection, *, conversation_id: ConversationId):
         conn_.calls.append("lock_offsets")
@@ -113,9 +125,26 @@ def _stand(
     async def _bump(conn_: Connection, *, conversation_id, deltas):
         conn_.calls.append("bump_unread")
         stand.deltas.extend(deltas)
-        # Живой запрос возвращает число записанных строк: нулевые
-        # приращения в него не входят (`WHERE EXCLUDED.unread_count <> 0`).
-        return sum(1 for delta in deltas if delta.delta != 0)
+        # Ответ оператора — карта «кому и сколько», и стенд повторяет её
+        # устройство, а не подставляет удобное число. Строка попадает
+        # в ответ либо потому, что приращение ненулевое (ветка `DO UPDATE`
+        # с `WHERE EXCLUDED.unread_count <> 0`), либо потому, что строки
+        # не было и её создала вставка, — а вставка `WHERE` не имеет
+        # вовсе. Отправитель с нулём поэтому **вставляется** и в ответ
+        # входит, но только на своей первой строке: прежнее
+        # `return sum(...)` описывало одну ветку из двух, и как раз ту,
+        # которая адресата не создаёт.
+        #
+        # Число берётся из `numbers`, а не из приращения: на шаге в
+        # единицу они совпадают, а расходятся ровно там, где проверка
+        # и живёт, — поэтому умолчание `prior` даёт число больше дельты.
+        return {
+            delta.user_id: UnreadCount(
+                state["numbers"].get(delta.user_id, state["prior"] + int(delta.delta))
+            )
+            for delta in deltas
+            if delta.delta != 0 or delta.user_id in state["missing"]
+        }
 
     async def _rebuild(conn_: Connection, *, conversation_id, through_seq, user_ids=None):
         conn_.calls.append("rebuild")
@@ -261,6 +290,124 @@ def test_чужому_единица_своему_ноль(monkeypatch):
     }
     assert outcome.affected == 1  # записана одна строка: нулевая — не запись
     assert stand.offsets == [5]
+
+
+def test_адресаты_приращения_несут_абсолютное_число_из_ответа(monkeypatch):
+    """`D7`: число события — из `RETURNING`, а не приращение.
+
+    У получателя в проекции уже лежит `4`, событие прибавляет единицу.
+    Событие обязано нести `5`: клиент **ставит** пришедшее число, а не
+    прибавляет его, и приращение, отправленное вместо абсолютного,
+    откатило бы счётчик вкладки до единицы.
+
+    Ронит подстановку `delta.delta` на место числа из ответа: на шаге
+    в единицу они совпадают, и проверка, у которой приращение равно числу,
+    зелена на этом дефекте — поэтому здесь они и разведены (`prior`).
+    """
+    conn, stand = _stand(monkeypatch, watermark=4, prior=4)
+
+    outcome = _apply(conn, conversation_seq=5)
+
+    assert outcome.kind is UnreadOutcomeKind.APPLIED
+    assert [(str(n.user_id), int(n.unread_count)) for n in outcome.notices] == [
+        (str(ANYA), 5)
+    ]
+    # Беседа едет в самом уведомлении, а не параметром публикатора: у
+    # пересборки и у приращения она одна и та же, и второй источник того же
+    # числа разошёлся бы с первым молча.
+    assert {str(n.conversation_id) for n in outcome.notices} == {str(CONVERSATION)}
+    assert int(stand.deltas[0].delta) == 1
+
+
+def test_отправитель_своего_сообщения_события_не_получает(monkeypatch):
+    """`D7`: адресат — тот, кому число принадлежит, а не чья строка записана.
+
+    Отправитель приходит в наборе и получает ноль (`counts_as_unread` для
+    него ложна), строка у него уже есть, поэтому `DO UPDATE` с `WHERE
+    EXCLUDED.unread_count <> 0` его не трогает, и в ответ оператора он
+    не входит. Событие `unread.changed {unread_count: 0}` было бы событием
+    о его собственном сообщении.
+
+    Ронит замену отбора по входу на отбор **по всем названным** — самый
+    правдоподобный вид этой ошибки: `for user in users` вместо
+    `for delta in deltas if delta.delta != 0`.
+
+    Граница названа: это правило **приращения**. Пересборка извещает всех
+    пересобранных, включая отправителя с нулём, — и это не та же самая
+    ветка (см. `test_пересборка_извещает_и_отправителя`).
+    """
+    conn, stand = _stand(monkeypatch, watermark=4, prior=4)
+
+    outcome = _apply(conn, conversation_seq=5)
+
+    assert (BORIS, int(stand.deltas[1].delta)) == (BORIS, 0)
+    assert [n.user_id for n in outcome.notices] == [ANYA]
+
+
+def test_пересборка_извещает_и_отправителя(monkeypatch):
+    """Отступление от буквы плана, названное числом.
+
+    План говорит «отправитель своего сообщения события не получает **и при
+    первой вставке** своей строки тоже». Для ветки пересборки это неверно
+    и неверно по построению: на первой беседе строка отправителя **не
+    существует**, значит он попадает в потерянные (`missing_projection`),
+    значит его строку создаёт `rebuild`, а пересборка извещает **всех**,
+    кому записала. Утаить её ответ нечем: абсолютное значение могло
+    исправить расхождение, а расхождение — то, ради чего пересборка и
+    позвана (`D7`).
+
+    Событие при этом честное: строка создана, число ноль, и клиент
+    поставит ноль — ровно то, что у отправителя и есть. Цена названа:
+    лишняя публикация на первого сообщения каждой новой беседы.
+    """
+    conn, _ = _stand(monkeypatch, watermark=3, restored=(ANYA, BORIS))
+
+    outcome = _apply(conn, conversation_seq=5)
+
+    assert outcome.kind is UnreadOutcomeKind.REBUILT
+    assert {(str(n.user_id), int(n.unread_count)) for n in outcome.notices} == {
+        (str(ANYA), 0),
+        (str(BORIS), 0),
+    }
+
+
+def test_писатель_проекции_не_публикует_сам(monkeypatch):
+    """`D7`: публикация — вне транзакции писателя, и это про откат.
+
+    Ронит перенос публикации внутрь `async with conn.transaction()` —
+    туда, где её хочется поставить рядом с записью проекции. Следующий
+    за публикацией шаг здесь падает (`set_offsets`), транзакция
+    откатывается, и состояние в базе остаётся прежним. Событие, ушедшее
+    до этого, вернуть нечем: `publish` не отменяется, а второго события
+    о том же сдвиге не будет — канал разошёлся бы с истиной в ту сторону,
+    из которой восстановления нет (`D11`). Поэтому у писателя нет
+    и не должно быть ручки на публикацию: её берёт вызывающий, **после**
+    закрытия соединения.
+
+    Красный приходит от дефекта, а не от уборки: падение здесь — часть
+    проверяемого сценария (откат), и оно поднято из `set_offsets`, то есть
+    после записи проекции.
+    """
+    conn, _ = _stand(monkeypatch, watermark=4)
+    publications: list[object] = []
+
+    async def _publish(**kwargs: object) -> int:
+        publications.append(kwargs)
+        return 1
+
+    async def _set_failing(conn_: Connection, *, conversation_id, applied_through_seq):
+        raise ConnectionError("отказ после записи проекции")
+
+    monkeypatch.setattr(service, "set_offsets", _set_failing)
+    monkeypatch.setattr(service, "announce_changed", _publish)
+
+    with pytest.raises(ConnectionError):
+        _apply(conn, conversation_seq=5)
+
+    assert publications == []
+    # Запись проекции состоялась, чекпойнт — нет: транзакция откатывается
+    # целиком, и это и есть то состояние, о котором нельзя было сообщать.
+    assert conn.calls[-1] == "bump_unread"
 
 
 def test_прочитанное_не_прибавляется(monkeypatch):
