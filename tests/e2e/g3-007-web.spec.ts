@@ -101,9 +101,12 @@ import type { Fixture, SignedIn, State } from "./support/auth"
  * `index-BJ4Nc9PU.js`), `data-applied-through-seq` и `data-connection-state` есть — то
  * есть поверхности `G3-006` в нём на месте, — а `data-presence`,
  * `data-unread-count`, `data-peer-read-seq`, `data-my-read-seq` и
- * `data-message-state` не встречаются ни разу. До стенда код доезжает только
- * диджестом CI в `main` (D9), и 8а зелен ровно потому, что утверждает только о
- * поверхностях, которые в этой сборке есть.
+ * `data-message-state` не встречаются ни разу. Отстаёт не только веб: нагрузки
+ * стенда запущены образом `messenger-api@sha256:6810735…` (читается из
+ * `kubectl -n messenger get deploy`), а он старше серверных коммитов этой ветки —
+ * значит, `online`, `read_states` и публикаций `unread.changed` на стенде нет
+ * тоже. Диджест в `main` приносит обе половины одним движением (D9), и 8а зелен
+ * ровно потому, что утверждает только о том, что в нынешней сборке есть.
  *
  * Падение этой причины узнаётся по подписи: оно приходит на **первом** чтении
  * новой поверхности (`element(s) not found` для `data-presence`, `read=null` для
