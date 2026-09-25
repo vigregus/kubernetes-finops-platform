@@ -15,7 +15,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Literal
 from urllib.parse import parse_qs
 
@@ -45,6 +45,7 @@ from messenger.domain.message import (
     MessagePayload,
     validate_message_payload,
 )
+from messenger.domain.presence import is_online
 from messenger.domain.receipts import (
     InvalidReceipt,
     ReadState,
@@ -999,7 +1000,10 @@ async def create_direct_conversation(
     # маршрут умеет вернуть существующую беседу, и умолчание о квитанциях
     # было бы другой правдой о той же беседе.
     return _conversation_body(
-        result.conversation, result.participants, result.read_states
+        result.conversation,
+        result.participants,
+        result.read_states,
+        result.blocked_with,
     )
 
 
@@ -1212,33 +1216,76 @@ def _message_body(message) -> dict[str, object]:
     }
 
 
-def _user_summary(participant) -> dict[str, object]:
+def _user_summary(
+    participant, *, now: datetime, blocked: bool = False
+) -> dict[str, object]:
     """Участник беседы в форме контракта.
 
     Одна сборка на оба маршрута — список бесед и создание. Разойдись они,
     один и тот же участник выглядел бы по-разному в ответе на создание
     и в списке, и заметил бы это клиент, а не сервер.
 
-    `last_seen_at` — durable факт, а не presence: отметка времени из
-    Postgres, означающая последнее подтверждённое соединение человека.
-    Ключ появляется **только** когда значение есть, и это то же правило,
-    что у `last_message` и `unread_count`: «ни разу не был в сети» — не
-    отметка времени, и `null` на её месте был бы ответом, которого
-    контракт не объявляет (поле необязательное, а не нулевое).
+    `last_seen_at` — durable факт: отметка времени из Postgres, означающая
+    последнее подтверждённое соединение человека. Ключ появляется **только**
+    когда значение есть, и это то же правило, что у `last_message`
+    и `unread_count`: «ни разу не был в сети» — не отметка времени, и `null`
+    на её месте был бы ответом, которого контракт не объявляет (поле
+    необязательное, а не нулевое).
 
-    «Онлайн» здесь не отдаётся вовсе и отдаваться не должен: он остаётся
-    серверным агрегатом — предикатом по времени над `realtime_connections`
-    (`domain/presence.py`), — и живёт в Postgres, а не в Redis. Redis
-    и Centrifugo тут только транспорт: по нему приходит продление, которым
-    соединение остаётся живым. Отметка же — факт, который переживает и
-    потерю realtime-слоя, и перезапуск Centrifugo.
+    **`online` отдаётся, и это перемена решения, а не подробность.** Раньше
+    здесь было написано «онлайн не отдаётся вовсе и отдаваться не должен»,
+    и довод был верный **для того гейта**: присутствие не читал никто,
+    а `G3-005` показывал час последней активности, из которого «сейчас в
+    сети» не следует. `G3-007` закрывает «A видит присутствие собеседника»
+    (`RCP-002`), и жить этому наблюдению больше негде: список бесед —
+    единственное место, где сервер отвечает о собеседнике, и отдельного
+    запроса за одним булевым полем контракт не заводит.
+
+    Считает его **сервер**, и считается он тем же предикатом, что у
+    уборщика соединений, — `domain/presence.is_online`, окно 180 секунд.
+    Второй константы здесь нет намеренно: окно уже объявлено дважды (Python
+    и SQL в `repositories/sessions.py`), и третья копия разошлась бы с ними
+    молча. Клиент не считает его вовсе — он не знает ни окна, ни часов
+    сервера, и «сейчас» у него своё.
+
+    Redis и Centrifugo тут только транспорт: по нему приходит продление,
+    которым соединение остаётся живым. Отметка — факт, который переживает
+    и потерю realtime-слоя, и перезапуск Centrifugo, и потому перезагрузка
+    страницы не превращает онлайн в офлайн.
+
+    `now` — параметр, а не `datetime.now()` внутри. Сборка тела одна на весь
+    ответ, и все участники обязаны судиться **одним** мгновением: с часами
+    внутри каждого вызова два человека на границе окна получили бы ответы,
+    посчитанные по разным «сейчас», а на длинной странице это перестало бы
+    быть теорией.
+
+    Событие смены присутствия не публикуется — по решению, а не по
+    недосмотру. Значение верно на момент ответа, а не на текущую секунду,
+    и довод записан там же, где решение (`04-decisions.md`); следствие
+    называется честно: шапка показывает значение на момент последнего
+    ответа REST.
+
+    `blocked` снимает **обе** величины — и `online`, и `last_seen_at`, —
+    и снимает их отсутствием ключа, а не значением. `online: false` было бы
+    утверждением «активности не было», то есть ответом о человеке вместо
+    отказа отвечать; отсутствие же ключа контракт уже описывает как
+    «значение не отдаётся этому зрителю». Довод целиком — в
+    `04-decisions.md` (privacy-инвариант `G3-007`); здесь важно, что это
+    **одна** ветка на обе величины: скрой мы только `online`, отметка
+    времени выдавала бы то же самое другим полем.
+
+    Участник при этом остаётся в ответе: беседа читается (`BLK-004`),
+    и скрыть человека значило бы отнять у зрителя переписку, которую тот
+    вправе читать. Скрывается активность, а не собеседник.
     """
     body: dict[str, object] = {
         "user_id": str(participant.user_id),
         "display_name": participant.display_name,
     }
-    if participant.last_seen_at is not None:
-        body["last_seen_at"] = participant.last_seen_at
+    if not blocked:
+        body["online"] = is_online(participant.last_seen_at, now=now)
+        if participant.last_seen_at is not None:
+            body["last_seen_at"] = participant.last_seen_at
     return body
 
 
@@ -1246,6 +1293,7 @@ def _conversation_body(
     conversation,
     participants,
     read_states,
+    blocked_with,
     *,
     last_message=None,
     unread_count=None,
@@ -1299,6 +1347,21 @@ def _conversation_body(
     `last_delivered_seq`. Это то же правило, по которому `_user_summary`
     переводит `last_seen_at`: сборка одна, поэтому и перевод один.
 
+    `blocked_with` — **один аргумент на две маскировки**, и это выбор, а не
+    экономия подписи. Маскируются присутствие участника и квитанция
+    участника — две разные вещи одним правилом: у того, с кем у зрителя
+    блокировка в любую сторону, метаданных активности нет ни в том, ни
+    в другом виде. Разведи их на два аргумента — присутствие закрылось бы,
+    а квитанции остались, и заметить это было бы нечем: обе половины
+    выглядят правдоподобно по отдельности. Правило и его доводы —
+    в `04-decisions.md` (privacy-инвариант `G3-007`); симметрия там **новое
+    решение**, а не записанное `BLK-002`, о котором речь ниже.
+
+    Значение читается вызывающим **один раз на ответ** и приходит сюда уже
+    готовым (`services/conversations`): предикат — запрос к `blocks`,
+    и спрашивать его на беседу значило бы ходить в базу за одним и тем же
+    множеством столько раз, сколько бесед на странице.
+
     Массив **разреженный**: элемента нет у того, кто квитанции не
     присылал, — состояние приходит уже отфильтрованным
     (`ParticipantReadState`), и ноль на месте отсутствия здесь не
@@ -1309,10 +1372,19 @@ def _conversation_body(
     причине, что `payload or {}` в `_to_message`: выдать `[]` за ответ
     «состояний нет» нельзя даже там, куда попасть нельзя.
     """
+    # Часы берутся один раз на **ответ**, а не внутри сборки участника:
+    # два человека на границе окна получили бы ответы, посчитанные по разным
+    # «сейчас», и разница была бы тем заметнее, чем длиннее страница.
+    now = datetime.now(UTC)
     body: dict[str, object] = {
         "conversation_id": str(conversation.conversation_id),
         "type": conversation.type.value,
-        "participants": [_user_summary(user) for user in participants],
+        "participants": [
+            _user_summary(
+                user, now=now, blocked=user.user_id in blocked_with
+            )
+            for user in participants
+        ],
         "created_at": conversation.created_at,
     }
     if last_message is not None:
@@ -1327,6 +1399,13 @@ def _conversation_body(
                 "last_delivered_seq": int(item.state.delivered_seq),
             }
             for item in read_states
+            # Чужая квитанция маскируется тем же `blocked_with`, что и
+            # присутствие: движущийся `last_read_seq` говорит собеседнику,
+            # когда читавший открыл старую переписку, — то же наблюдение,
+            # что и движущийся `last_seen_at`, и правило на них одно. Своя
+            # запись не маскируется никогда: утечки в собственных данных
+            # нет, а лишать человека его же числа незачем.
+            if item.user_id not in blocked_with
         ]
     return body
 
@@ -1360,6 +1439,7 @@ def _conversation_list_body(
                 item.conversation,
                 item.participants,
                 item.read_states,
+                result.blocked_with,
                 last_message=item.last_message,
                 unread_count=item.unread_count,
             )

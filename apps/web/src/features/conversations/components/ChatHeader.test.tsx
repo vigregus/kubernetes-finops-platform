@@ -4,19 +4,18 @@ import { conversationOf } from "../../../test-support/fixtures";
 import { ChatHeader } from "./ChatHeader";
 
 /**
- * Подзаголовок шапки — то место, где интерфейс говорит о присутствии, и в
- * G3-005 говорить о нём нечего.
+ * Подзаголовок шапки — то место, где интерфейс говорит о присутствии.
  *
- * `users.last_seen_at` — «когда человек последний раз был подтверждён в сети»
- * (`03-v1-scope.md:77-83`), и наружу он отдаётся **отметкой**, без признака
- * «онлайн» (`README.md:78`). В обычной семантике мессенджера «Last seen 16:20»
- * читается как «сейчас офлайн» — то есть как факт, которого сервер не сообщал.
- * «Offline» при отсутствии всяких данных — то же самое утверждение, только
- * короче: оно выводится из молчания сервера, а молчание не факт.
+ * Два случая разведены намеренно, и это не формальность: «сервер о присутствии
+ * не сказал» и «сервер сказал `false`» — **разные** ответы, и до `G3-007` они
+ * были неразличимы, потому что сервер не говорил ни того, ни другого. Теперь
+ * `online: false` означает «подтверждённой активности не было окно», и это
+ * положительное утверждение — оно рисуется. Молчание не рисуется и рисоваться
+ * не должно: «Offline» из отсутствия данных — утверждение, выведенное из тишины.
  *
- * Тесты ниже различают два случая намеренно: `presence: "offline"` с отметкой
- * времени — это **не** защита от «Offline», а отдельная ветка `ChatHeader.tsx`,
- * и сведение её к одной означало бы, что половина дефекта осталась.
+ * Отметка времени (`lastSeenAt`) остаётся не нарисованной в обоих случаях:
+ * «Last seen 16:20» читается как «сейчас офлайн» ровно так же, как слово, — а
+ * отметка не сообщает о человеке ничего сегодняшнего (`03-v1-scope.md:77-83`).
  */
 describe("подзаголовок шапки беседы", () => {
   it("без присутствия и печатающих подзаголовка нет вовсе", () => {
@@ -25,16 +24,28 @@ describe("подзаголовок шапки беседы", () => {
     // Именно «нет узла», а не «нет знакомого текста»: пустой `<p>` — это место,
     // которое рано или поздно заполнят догадкой.
     expect(container.querySelector("header p")).toBeNull();
+    // И атрибута тоже нет: `data-presence` приёмка читает как значение сервера,
+    // и `false` на месте «сервер молчал» был бы тем же выводом из тишины.
+    expect(container.querySelector("header")?.getAttribute("data-presence")).toBeNull();
   });
 
   it("отметка времени не превращается в утверждение об офлайне", () => {
-    render(<ChatHeader conversation={conversationOf({ presence: "offline", lastSeenAt: "9:14 AM" })} />);
+    const { container } = render(<ChatHeader conversation={conversationOf({ lastSeenAt: "9:14 AM" })} />);
 
     // Ветка `lastSeenAt` ничуть не слабее «Offline»: она сообщает, когда
     // человека видели, тем же предложением, каким мессенджер сообщает, что его
-    // сейчас нет.
-    expect(screen.queryByText(/last seen/i)).toBeNull();
-    expect(screen.queryByText(/offline|online|away/i)).toBeNull();
+    // сейчас нет. Здесь ключа `online` нет вовсе — сервер о присутствии молчал.
+    expect(container.querySelector("header p")).toBeNull();
+    expect(screen.queryByText(/last seen|offline|online|away/i)).toBeNull();
+  });
+
+  it("presence: offline рисуется — сервер сказал это сам", () => {
+    const { container } = render(<ChatHeader conversation={conversationOf({ presence: "offline" })} />);
+
+    // Положительный контроль к тесту выше: то же отсутствие слова было бы
+    // зелёным и на шапке, которая подзаголовка не рисует никогда.
+    expect(screen.getByText("Offline")).toBeTruthy();
+    expect(container.querySelector("header")?.getAttribute("data-presence")).toBe("offline");
   });
 
   it("печатающие — то, что сервер утверждает положительно, и подзаголовок есть", () => {
@@ -46,9 +57,12 @@ describe("подзаголовок шапки беседы", () => {
   });
 
   it("presence: online — тоже утверждение сервера, и подзаголовок есть", () => {
-    render(<ChatHeader conversation={conversationOf({ presence: "online" })} />);
+    const { container } = render(<ChatHeader conversation={conversationOf({ presence: "online" })} />);
 
     expect(screen.getByText("Online")).toBeTruthy();
+    // `data-presence="online"` — то, чем приёмка отличает живое присутствие от
+    // подзаголовка с тем же словом, нарисованного по другому поводу.
+    expect(container.querySelector("header")?.getAttribute("data-presence")).toBe("online");
   });
 
   it("без обработчиков четырёх кнопок нет", () => {

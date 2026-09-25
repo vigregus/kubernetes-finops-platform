@@ -131,8 +131,11 @@ def test_создание_возвращает_201_и_участников(clien
         "conversation_id": str(CONVERSATION_ID),
         "type": "direct",
         "participants": [
-            {"user_id": str(ACTOR_ID), "display_name": "Аня"},
-            {"user_id": str(OTHER_ID), "display_name": "Борис"},
+            # Отметки нет ни у кого: `_success` их не передаёт, и `online`
+            # выходит `false` у обоих — «не подтверждался» это факт,
+            # о котором сервер знает.
+            {"user_id": str(ACTOR_ID), "display_name": "Аня", "online": False},
+            {"user_id": str(OTHER_ID), "display_name": "Борис", "online": False},
         ],
         "created_at": "2026-09-15T00:00:00Z",
     }
@@ -146,6 +149,12 @@ def test_отметка_жизни_есть_ровно_у_тех_кто_был_�
     значением «неизвестно», и контракт объявляет поле необязательным именно
     поэтому. `null` на месте ключа клиент прочитал бы как «время неизвестно»,
     то есть как другую величину.
+
+    Отметка здесь **старая** (`NOW` — сентябрь, а спрашивают об этом в момент
+    прогона), поэтому `online` у обоих `false`, и это не противоречие
+    с названием теста: он про наличие отметки, а не про свежесть. Свежая
+    отметка и её порог живут в `test_presence_endpoints.py` — там часы
+    считаются от текущего мгновения, потому что их считает сервер.
     """
     authenticated(monkeypatch)
 
@@ -160,10 +169,11 @@ def test_отметка_жизни_есть_ровно_у_тех_кто_был_�
     )
     assert response.status_code == 200
     assert response.json()["participants"] == [
-        {"user_id": str(ACTOR_ID), "display_name": "Аня"},
+        {"user_id": str(ACTOR_ID), "display_name": "Аня", "online": False},
         {
             "user_id": str(OTHER_ID),
             "display_name": "Борис",
+            "online": False,
             "last_seen_at": "2026-09-15T00:00:00Z",
         },
     ]
@@ -314,7 +324,12 @@ def test_список_отдаёт_беседу_без_сообщения(client
         {
             "conversation_id": str(CONVERSATION_ID),
             "type": "direct",
-            "participants": [{"user_id": str(ACTOR_ID), "display_name": "Аня"}],
+            "participants": [
+                # `online` есть у каждого — в том числе у того, кто не был
+                # в сети ни разу: `false` здесь положительное утверждение,
+                # а не отсутствие ответа (`test_presence_endpoints.py`).
+                {"user_id": str(ACTOR_ID), "display_name": "Аня", "online": False}
+            ],
             "created_at": "2026-09-15T00:00:00Z",
             "read_states": [],
         }
