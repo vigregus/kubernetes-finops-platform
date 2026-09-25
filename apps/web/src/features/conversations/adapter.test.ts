@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest"
 import { ConversationListPageFromJSON } from "../../api/generated"
-import type { Conversation as ConversationDto, Message as MessageDto, UserSummary } from "../../api/generated"
+import type {
+  Conversation as ConversationDto,
+  ConversationReadStatesInner,
+  Message as MessageDto,
+  UserSummary,
+} from "../../api/generated"
 import { adaptConversation, adaptConversations } from "./adapter"
 
 /**
@@ -242,6 +247,10 @@ describe("таблица соответствия /conversations", () => {
     // выше). Блокировка сюда не попадает по другой причине: маска приходит
     // **отсутствием** значения, а не флагом, и поля `blocked*` контракт не
     // объявляет вовсе.
+    //
+    // `peerUserId`/`peerReadState` — того же рода, что `presence`: источник у
+    // них серверный (`participants` и `read_states` того же ответа), и оба
+    // остаются пустыми, когда сервер молчит или беседа групповая.
     expect(Object.keys(adapt(conversation({ lastMessage: message() }))).sort()).toEqual([
       "hasMessages",
       "id",
@@ -249,9 +258,91 @@ describe("таблица соответствия /conversations", () => {
       "lastMessageTimestamp",
       "lastSeenAt",
       "name",
+      "peerReadState",
+      "peerUserId",
       "presence",
       "previewDeleted",
       "unreadCount",
     ])
+  })
+})
+
+describe("состояние чтения собеседника", () => {
+  function readStateOf(
+    userId: string,
+    readSeq: number,
+    deliveredSeq: number = readSeq,
+  ): ConversationReadStatesInner {
+    return { userId, lastReadSeq: readSeq, lastDeliveredSeq: deliveredSeq }
+  }
+
+  it("номер берётся у собеседника, а не у первого в массиве", () => {
+    // Тот же класс, что «имя из `participants[0]`»: массив приходит **включая
+    // зрителя** и в том же порядке, в каком участники входили в беседу, —
+    // значит зритель в нём первый, и `read_states[0]` показал бы человеку
+    // собственное прочтение как прочтение собеседника.
+    const result = adapt(
+      conversation({
+        readStates: [readStateOf(VIEWER, 900), readStateOf(ANNA, 495)],
+      }),
+    )
+
+    expect(result.peerReadState).toEqual({ readSeq: 495, deliveredSeq: 495 })
+  })
+
+  it("доставка приходит рядом с прочтением, а не вместо него", () => {
+    // Пара нужна обоим потребителям: `read` — словом состояния сообщения,
+    // `delivered` — тем, что «доставлено, но не прочитано». Вывести второе из
+    // первого нельзя: 480/495 — это разные состояния.
+    const result = adapt(conversation({ readStates: [readStateOf(ANNA, 480, 495)] }))
+
+    expect(result.peerReadState).toEqual({ readSeq: 480, deliveredSeq: 495 })
+  })
+
+  it("нули — настоящее состояние, а не отсутствие", () => {
+    // Запись есть, и она говорит «до нулевого номера» — это утверждение
+    // сервера, а не молчание. Отличать их обязательно: `absence ≠ 0` тот же
+    // инвариант, что у `unread_count` и `last_seen_at`.
+    const result = adapt(conversation({ readStates: [readStateOf(ANNA, 0, 0)] }))
+
+    expect(result.peerReadState).toEqual({ readSeq: 0, deliveredSeq: 0 })
+  })
+
+  it("записи собеседника нет — состояния нет, и это не пара нулей", () => {
+    // Массив разреженный: элемент есть только у того, кто квитанцию прислал.
+    // Дописать отсутствующему нули значило бы объявить прочтение, которого он
+    // не делал, и откатить уже показанную отметку.
+    const result = adapt(conversation({ readStates: [readStateOf(VIEWER, 900)] }))
+
+    expect(result.peerReadState).toBeUndefined()
+  })
+
+  it("поля read_states в ответе нет вовсе — тоже отсутствие", () => {
+    // Ответ старого сервера — второе направление совместимости (`CTR-003`):
+    // ключа нет, и модель обязана молчать, а не падать.
+    expect(adapt(conversation()).peerReadState).toBeUndefined()
+  })
+
+  it("собеседник назван по имени: по нему квитанция события узнаётся как его", () => {
+    // Номер в `read_states` обезличен порядком массива, а событие
+    // `message.read` несёт `reader_id`. Без имени собеседника в модели панель
+    // не могла бы отличить его квитанцию от собственной.
+    expect(adapt(conversation()).peerUserId).toBe(ANNA)
+  })
+
+  it("группе состояние собеседника не положено: собеседника у неё нет", () => {
+    // То же правило, что у отметки времени и присутствия: одно число на
+    // нескольких человек семантически бессмысленно. Запись в массиве при этом
+    // есть — и «прочтением собеседника» она стать не должна ни для кого.
+    const result = adapt(
+      conversation({
+        type: "group",
+        participants: [person(VIEWER, "David Miller"), ANNA_SUMMARY, MARCUS_SUMMARY],
+        readStates: [readStateOf(ANNA, 495)],
+      }),
+    )
+
+    expect(result.peerUserId).toBeUndefined()
+    expect(result.peerReadState).toBeUndefined()
   })
 })

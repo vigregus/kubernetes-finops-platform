@@ -123,6 +123,10 @@ function shell(state: BootState, api: HistoryApi = historyApi) {
       nextBeforeActivityAt: null,
       nextBeforeConversationId: null,
     }),
+    // Квитанция — операция той же природы. Тесты экранов загрузки её не
+    // дёргают: до ветки `ready` панели нет вовсе, а та, что монтируется в
+    // последнем наборе, до отправки не доходит — строки ленты не пересекаются.
+    sendReceipts: async () => ({}),
     readCentrifugoUrl: () => "wss://rt.example.test/connection/websocket",
     issueTicket: async () => "ticket-for-the-hunt",
     createCentrifuge: givenFakeCentrifuge().factory,

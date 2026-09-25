@@ -261,11 +261,14 @@ export function adaptMessage(
     // различается по флагу (`MessageTimeline.tsx:43`).
     deleted: dto.deletedAt != null,
 
-    // `deliveryState` не выставляется, и это не пропуск. Квитанции — G3-007;
-    // все состояния доставки, кроме клиентских (`sending`/`retrying`/`failed`),
-    // требуют ответа сервера о доставке и прочтении, которого этот ответ не
-    // несёт. Вывести «прочитано» из того, что сообщение лежит в истории,
-    // значило бы нарисовать галочку, которой никто не ставил.
+    // `deliveryState` не выставляется, и это не пропуск. Ответ истории несёт,
+    // что сообщение лежит в ленте, а «доставлено»/«прочитано» — утверждения
+    // **собеседника** о ней, и приезжают они другим путём: номер собеседника —
+    // из `Conversation.read_states` и события `message.read`, а состояние
+    // выводит `receiptWatermarks.deliveryStateOf` там, где лента рисуется.
+    // Собирать его здесь нечем: разбор ответа не знает, докуда собеседник
+    // дочитал, и «прочитано» из самого факта наличия записи в истории было бы
+    // галочкой, которой никто не ставил.
   }
 }
 
@@ -311,12 +314,15 @@ export function adaptMessages(
  * * **`deleted`** — `false`, и это факт, а не умолчание: надгробия приходят
  *   событием `message.deleted`, на котором ниже стоит `null`.
  * * **`deliveryState`** — по той же причине, что и в истории: `message.created`
- *   сообщает о создании, а не о доставке или прочтении (квитанции — G3-007).
+ *   сообщает о создании, а не о доставке или прочтении. Состояние выводится из
+ *   квитанции собеседника (`receiptWatermarks.deliveryStateOf`), а её несёт
+ *   другое событие — `message.read`, которое разбирает `adaptReadReceipt` ниже.
  */
 export function adaptPublication(event: unknown, currentUserId: string): ChatMessage | null {
-  // Только `message.created` — сообщение. `message.read` и `message.deleted`
-  // принадлежат другим возможностям (квитанции, надгробия — G3-007), и нарисовать
-  // их репликой значило бы показать чужое событие как текст.
+  // Только `message.created` — сообщение. `message.read` — квитанция, и её
+  // разбирает `adaptReadReceipt` ниже; `message.deleted` — надгробие, не этот
+  // гейт. Нарисовать любое из них репликой значило бы показать чужое событие
+  // как текст.
   if (!isRecord(event) || event.type !== "message.created") return null
 
   const id = event.message_id
@@ -348,5 +354,76 @@ export function adaptPublication(event: unknown, currentUserId: string): ChatMes
     attachment: undefined,
     timestamp: "",
     deleted: false,
+  }
+}
+
+/**
+ * Квитанция собеседника — то, что он оставил за собой: докуда доехало и докуда
+ * прочитано. Модель, а не `Watermarks`: последний — состояние **одной** стороны
+ * (`features/receipts/receiptWatermarks.ts`), и смешивать «свежее известие» с
+ * «накопленным знанием» незачем — их сводит `advance`.
+ */
+export interface ReadReceipt {
+  readonly readerId: string
+  readonly readSeq?: number
+  readonly deliveredSeq?: number
+}
+
+/**
+ * Поле-номер квитанции: отсутствие законно, всё прочее обязано быть целым
+ * неотрицательным.
+ *
+ * Предикат нужен именно такой формы, потому что у поля **три** исхода, а не
+ * два: `undefined` («поля нет») — это не то же, что `"5"`, `-1` или `2.5`
+ * («поле испорчено»). Первое разрешено схемой и осмысленно, второе — отказ.
+ */
+function numerable(value: unknown): value is number | undefined {
+  return (
+    value === undefined ||
+    (typeof value === "number" && Number.isInteger(value) && value >= 0)
+  )
+}
+
+/**
+ * Публикация `message.read` → модель. Разбор **защитный**, как и у сообщения:
+ * падение внутри обработчика публикации уносит соединение.
+ *
+ * Здесь два направления совместимости встречаются, и они **противоположны** —
+ * поэтому правило записано явно, а не выведено из общего «лишнее отбросить»:
+ *
+ * * **незнакомый ключ — не повод отбросить событие.** `additionalProperties` в
+ *   схеме канала нет, значит событие будущей версии (`read_at`, `device`, что
+ *   угодно) обязано **приниматься**, а лишнее поле — игнорироваться: это и есть
+ *   `CTR-003`. Прочитать незнакомый ключ значило бы выдумать значение, а
+ *   отбросить из-за него событие — превратить безобидное расширение сервера в
+ *   пропущенное прочтение;
+ * * **испорченное или недостающее поле — отказ, и `undefined` не становится
+ *   нулём.** Все три поля необязательные (того требует аддитивность), поэтому
+ *   схема разрешает `{"type":"message.read"}`; разрешать не то же, что
+ *   принимать. `0` — уверенное «прочитано ни до чего», утверждение о
+ *   собеседнике, которого он не делал, и на экране оно откатило бы отметку.
+ *   Отброшенное событие безопасно ровно потому, что истину приносит чтение
+ *   (D11): потеря — не потеря, а отсрочка.
+ */
+export function adaptReadReceipt(event: unknown): ReadReceipt | null {
+  if (!isRecord(event) || event.type !== "message.read") return null
+
+  const readerId = event.reader_id
+  if (typeof readerId !== "string" || readerId.length === 0) return null
+
+  const readSeq = event.read_seq
+  const deliveredSeq = event.delivered_seq
+  if (!numerable(readSeq) || !numerable(deliveredSeq)) return null
+
+  // Ни одного числа — «событие без известия»: тишина, а не квитанция до нуля.
+  if (readSeq === undefined && deliveredSeq === undefined) return null
+
+  // Отсутствующее поле не появляется в модели со значением `undefined`:
+  // «сервер не назвал» и «сервер назвал `undefined`» — разные вещи, и первое
+  // из них не должно пережить разбор.
+  return {
+    readerId,
+    ...(readSeq === undefined ? {} : { readSeq }),
+    ...(deliveredSeq === undefined ? {} : { deliveredSeq }),
   }
 }

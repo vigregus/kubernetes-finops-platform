@@ -21,10 +21,11 @@
 import type {
   Conversation as ConversationDto,
   ConversationListPage,
+  ConversationReadStatesInner,
   Message as MessageDto,
   UserSummary,
 } from "../../api/generated"
-import type { Conversation, PresenceStatus } from "../../shared/lib/types"
+import type { Conversation, PeerReadState, PresenceStatus } from "../../shared/lib/types"
 import { formatConversationTimestamp, type TimestampFormatOptions } from "./formatTimestamp"
 
 /**
@@ -107,6 +108,42 @@ function presenceOf(online: boolean | undefined): PresenceStatus | undefined {
 }
 
 /**
+ * Состояние чтения собеседника в `read_states` — ищется **по имени**, а не по
+ * месту в массиве.
+ *
+ * Массив приходит включая зрителя и в порядке входа в беседу, то есть зритель в
+ * нём первый: `read_states[0]` показал бы человеку его собственное прочтение как
+ * прочтение собеседника. Это ровно тот класс, что «имя из `participants[0]`», и
+ * лечится он тем же — сравнением `user_id`.
+ *
+ * Массив **разреженный**: элемента нет у того, кто квитанции не прислал
+ * (`NULL` в сборке сервера — не ноль). Отсутствие остаётся отсутствием:
+ * дописать отсутствующему пару нулей значило бы объявить прочтение, которого он
+ * не делал, и откатить уже показанную отметку — то же правило, что у
+ * `unreadCount` и `lastSeenAt`.
+ *
+ * Чужое состояние здесь не маскируется и не может: за блокировку маскирует
+ * **сервер** (её элемента в ответе просто нет), а клиент, достраивающий маску
+ * сам, разошёлся бы с REST при первой же правке правила.
+ *
+ * Группе состояния нет по той же причине, что и присутствия: одно число на
+ * нескольких человек семантически бессмысленно.
+ */
+function peerReadStateOf(
+  states: ConversationReadStatesInner[] | undefined,
+  counterpart: UserSummary | undefined,
+): PeerReadState | undefined {
+  if (counterpart === undefined || states === undefined) return undefined
+
+  const state = states.find((entry) => entry.userId === counterpart.userId)
+  if (state === undefined) return undefined
+
+  // Колоночные имена → имена модели. Перевод в одной точке, как у `_user_summary`
+  // на сервере: иначе `last_read_seq` и `readSeq` разъехались бы по файлам.
+  return { readSeq: state.lastReadSeq, deliveredSeq: state.lastDeliveredSeq }
+}
+
+/**
  * `now` — обязательный параметр, а не `new Date()` внутри.
  *
  * Форматтер времени принимает `now` явно, и скрывать его здесь значило бы
@@ -150,6 +187,16 @@ export function adaptConversation(
     // из отметки. Отметка переживает потерю realtime-слоя, присутствие —
     // предикат по времени ответа; это два разных ответа о человеке.
     lastSeenAt: counterpart?.lastSeenAt ?? undefined,
+
+    // Кто здесь собеседник — по имени, а не по месту: квитанция события несёт
+    // `reader_id`, и без этого имени панель не отличила бы его квитанцию от
+    // собственной, пришедшей на тот же канал.
+    peerUserId: counterpart?.userId,
+
+    // Номера собеседника — рядом с присутствием и по той же причине: это факт о
+    // **нём**, приходящий из того же ответа, и живут они независимо (квитанция
+    // переживает потерю realtime-слоя так же, как отметка времени).
+    peerReadState: peerReadStateOf(dto.readStates, counterpart),
 
     lastMessagePreview: previewOf(lastMessage),
     previewDeleted: Boolean(lastMessage?.deletedAt),

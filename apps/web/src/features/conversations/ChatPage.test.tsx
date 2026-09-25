@@ -1,11 +1,17 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
-import type { ConversationListPage } from "../../api/generated";
+import type { Conversation as ConversationDto, ConversationListPage } from "../../api/generated";
 import { givenFakeCentrifuge, givenTicketIssuer } from "../../test-support/centrifuge";
 import { VIEWER, conversationOf } from "../../test-support/fixtures";
+import {
+  FakeIntersectionObserver,
+  installObserverForJsdom,
+  restoreIntersectionObserver,
+} from "../../test-support/intersectionObserver";
 import type { ChatMessage } from "../../shared/lib/types";
 import type { Conversation } from "../../shared/lib/types";
+import type { OutgoingReceipt } from "../receipts/receiptWatermarks";
 import type { HistorySource, TailPage } from "../messages/history";
 import type { SyncPage, SyncPageResult } from "../messages/sync";
 import { ChatPage } from "./ChatPage";
@@ -26,9 +32,18 @@ import { ChatPage } from "./ChatPage";
  */
 
 const VIEWER_ID = "user-viewer";
+const ANNA_ID = "user-anna";
 const CENTRIFUGO_URL = "wss://rt.finops.local/connection/websocket";
 
-const ANNA = conversationOf({ id: "c1", name: "Anna Petrova", hasMessages: true });
+const ANNA = conversationOf({
+  id: "c1",
+  name: "Anna Petrova",
+  hasMessages: true,
+  // Собеседник назван по имени: по нему квитанция события (`reader_id`)
+  // узнаётся как его. Без него личная квитанция неотличима от собственной —
+  // обе приходят в один канал беседы.
+  peerUserId: ANNA_ID,
+});
 /**
  * Канал беседы `ANNA` — так его строит панель (`conversation:{id}`).
  *
@@ -83,18 +98,76 @@ function emptyPage(items: ConversationListPage["items"] = []): ConversationListP
   return { items, nextBeforeActivityAt: null, nextBeforeConversationId: null };
 }
 
+/**
+ * Ответ REST с одной личной беседой — то, чем отвечает сверка.
+ *
+ * Собирается по **контракту**, а не по модели: сверка адаптируется тем же
+ * `adaptConversations`, что и загрузка, и тест, подавший сюда модель вместо DTO,
+ * проверял бы ветку, которой в жизни не бывает. Собеседник назван тем же
+ * `user_id`, что и в `ANNA`: по нему панель узнаёт квитанцию события, и
+ * разошедшееся имя сделало бы «состояние собеседника в REST» неотличимым от
+ * состояния любого другого участника.
+ */
+function directPage(
+  conversationId: string,
+  overrides: Partial<ConversationDto> = {},
+): ConversationListPage {
+  return emptyPage([
+    {
+      conversationId,
+      type: "direct",
+      participants: [
+        { userId: VIEWER_ID, displayName: "David Miller" },
+        { userId: ANNA_ID, displayName: "Anna Petrova" },
+      ],
+      createdAt: "2026-09-01T00:00:00Z",
+      ...overrides,
+    },
+  ]);
+}
+
+/**
+ * Наблюдатель возвращается в исходное состояние после каждого теста.
+ *
+ * Подменённый `IntersectionObserver` — глобальный: оставленный, он попал бы в
+ * следующий файл прогона, и тот проверял бы двойника вместо окружения.
+ */
+afterEach(() => {
+  restoreIntersectionObserver();
+});
+
 interface SetupOptions {
   readonly conversations: Conversation[];
   readonly tail?: (conversationId: string) => Promise<TailPage>;
   readonly loadPage?: HistorySource["loadPage"];
   /** Ответ сверки. По умолчанию — пустая страница: сверка не обязана ничего менять. */
   readonly refresh?: () => Promise<ConversationListPage>;
+  /**
+   * Исход отправки квитанции. По умолчанию — успех.
+   *
+   * Отказ задаётся здесь, а не молчанием: политика «число записывается только
+   * после ответа» держится на этом `Promise`, и тест, не назвавший исход,
+   * проверял бы удачный транспорт, ничего о нём не зная.
+   */
+  readonly sendReceipts?: (conversationId: string, receipt: OutgoingReceipt) => Promise<unknown>;
 }
 
-function setup({ conversations, tail, loadPage, refresh }: SetupOptions) {
+function setup({ conversations, tail, loadPage, refresh, sendReceipts }: SetupOptions) {
   const fake = givenFakeCentrifuge();
   const tickets = givenTicketIssuer();
-  const calls = { tails: [] as string[], pages: [] as SyncPage[], refreshes: 0 };
+  const calls = {
+    tails: [] as string[],
+    pages: [] as SyncPage[],
+    refreshes: 0,
+    /**
+     * Отправленные квитанции — то, что вкладка **сообщила**, по порядку.
+     *
+     * Записываются, а не проверяются на месте: правило D6 читается по
+     * последовательности (доставка, потом прочтение, назад — никогда), а не по
+     * одному запросу.
+     */
+    receipts: [] as Array<{ conversationId: string; receipt: OutgoingReceipt }>,
+  };
 
   const history: HistorySource = {
     loadTail: (conversationId) => {
@@ -114,6 +187,14 @@ function setup({ conversations, tail, loadPage, refresh }: SetupOptions) {
     return refresh ? refresh() : Promise.resolve(emptyPage());
   };
 
+  // Устойчивая ссылка: смена функции перезапускала бы дребезг квитанции на
+  // каждом рендере, и отправка откладывалась бы вечно (см. `useReceipts`).
+  const send = (conversationId: string, receipt: OutgoingReceipt) => {
+    calls.receipts.push({ conversationId, receipt });
+
+    return sendReceipts ? sendReceipts(conversationId, receipt) : Promise.resolve();
+  };
+
   // Собирается функцией, а не литералом на месте: повтор загрузки приносит
   // **тот же** компонент с другим списком, и собрать его вторым литералом
   // значило бы разойтись с первым на первой же правке пропсов.
@@ -126,6 +207,7 @@ function setup({ conversations, tail, loadPage, refresh }: SetupOptions) {
       history={history}
       centrifugoUrl={CENTRIFUGO_URL}
       issueTicket={tickets.issueTicket}
+      sendReceipts={send}
       createCentrifuge={fake.factory}
     />
   );
@@ -166,6 +248,26 @@ function setup({ conversations, tail, loadPage, refresh }: SetupOptions) {
       view.container
         .querySelector(`[data-conversation-id="${conversationId}"]`)
         ?.getAttribute("data-unread-count") ?? null,
+    /**
+     * Что вкладка **сообщила** о прочтении — и только это.
+     *
+     * `null` здесь значит «не сообщала»: ноль в этом атрибуте означал бы
+     * «прочитано ни до чего», то есть утверждение, которого вкладка не делала.
+     * Отсутствие атрибута и `"0"` — разные состояния, и сливать их нельзя.
+     */
+    myRead: () => pane?.getAttribute("data-my-read-seq") ?? null,
+    /** Что сообщил собеседник о прочтении. `null` — он ещё ничего не сообщал. */
+    peerRead: () => pane?.getAttribute("data-peer-read-seq") ?? null,
+    /**
+     * Состояние **своего** сообщения. Читается по производственному
+     * `data-message-seq`, а не по порядку строк: порядок строк — то, что
+     * проверяется отдельно, и опираться на него здесь значило бы проверять
+     * одно через другое.
+     */
+    rowState: (seq: number) =>
+      view.container
+        .querySelector(`[data-message-seq="${seq}"]`)
+        ?.getAttribute("data-message-state") ?? null,
   };
 }
 
@@ -179,6 +281,49 @@ async function publishUnread(
     fake.clientHandlers["publication"]?.({
       channel: VIEWER_CHANNEL,
       data: { type: "unread.changed", conversation_id: conversationId, unread_count: unreadCount },
+    });
+  });
+}
+
+/**
+ * Публикация сообщения в канал беседы — тот же вход, каким он приходит в жизни.
+ *
+ * Отправитель назван собеседником: чужое сообщение — это и есть случай, ради
+ * которого квитанция существует (`RCP-001` — «A видит прочитанное»), и событие
+ * о собственном сообщении проверяло бы другую ветку.
+ */
+async function publishMessage(
+  fake: ReturnType<typeof givenFakeCentrifuge>,
+  seq: number,
+) {
+  await act(async () => {
+    fake.clientHandlers["publication"]?.({
+      channel: ANNA_CHANNEL,
+      data: {
+        type: "message.created",
+        message_id: `11111111-1111-1111-1111-1111111111${String(seq).padStart(2, "0")}`,
+        seq,
+        sender_id: ANNA_ID,
+        payload: { text: `message ${seq}` },
+      },
+    });
+  });
+}
+
+/**
+ * Публикация квитанции в канал беседы.
+ *
+ * Тело набирается здесь целиком — вместе с `reader_id`, потому что именно им
+ * панель отличает чужую квитанцию от собственной: обе приходят на один канал.
+ */
+async function publishRead(
+  fake: ReturnType<typeof givenFakeCentrifuge>,
+  body: { reader_id: string; read_seq?: number; delivered_seq?: number },
+) {
+  await act(async () => {
+    fake.clientHandlers["publication"]?.({
+      channel: ANNA_CHANNEL,
+      data: { type: "message.read", ...body },
     });
   });
 }
@@ -368,18 +513,7 @@ describe("состояние соединения наблюдаемо и наз
 describe("число непрочитанного: событие личного канала и сверка", () => {
   /** Страница сверки с одним числом — то, что несёт ответ REST. */
   function pageWith(conversationId: string, unreadCount: number): ConversationListPage {
-    return emptyPage([
-      {
-        conversationId,
-        type: "direct",
-        participants: [
-          { userId: VIEWER_ID, displayName: "David Miller" },
-          { userId: "user-anna", displayName: "Anna Petrova" },
-        ],
-        createdAt: "2026-09-01T00:00:00Z",
-        unreadCount,
-      },
-    ]);
+    return directPage(conversationId, { unreadCount });
   }
 
   it("событие личного канала ставит число, а не прибавляет его", async () => {
@@ -609,5 +743,218 @@ describe("штатного запаса в дереве нет", () => {
     await waitFor(() => expect(screen.getByText("message 1")).toBeTruthy());
     expect(screen.queryByRole("textbox")).toBeNull();
     expect(container.querySelector("[data-message-id]")).toBeTruthy();
+  });
+});
+
+/**
+ * Квитанция **вкладки**: что она сообщила и когда (D6).
+ *
+ * Проверяется не «отправка случилась», а **что именно** ушло: два числа живут по
+ * разным законам, и различие между ними — предмет гейта. `delivered` — свойство
+ * устройства (публикация доходит и применяется и в свёрнутой вкладке), `read` —
+ * свойство взгляда, и в фоне его не существует.
+ */
+describe("квитанция вкладки: что и когда уходит", () => {
+  it("целиком видимая строка двигает прочтение, а применённое — доставку", async () => {
+    // Две клетки таблицы D6 разом: до касания строк уходит только доставка
+    // (сообщение применено, и это свойство устройства), после — оба числа.
+    // Различие читается по разметке панели, а не по внутренностям хука.
+    installObserverForJsdom();
+    const { calls, myRead, boundary } = setup({
+      conversations: [ANNA],
+      tail: () => Promise.resolve(tailOf([messageOf(101), messageOf(102)])),
+    });
+
+    await waitFor(() => expect(boundary()).toBe("102"));
+    await waitFor(() =>
+      expect(calls.receipts).toEqual([{ conversationId: "c1", receipt: { deliveredSeq: 102 } }]),
+    );
+    // Доставка ушла, прочтения нет: строку ещё никто не видел.
+    expect(myRead()).toBeNull();
+
+    FakeIntersectionObserver.latest.intersectSeq(101, 1);
+    FakeIntersectionObserver.latest.intersectSeq(102, 1);
+
+    await waitFor(() => expect(myRead()).toBe("102"));
+    expect(calls.receipts.at(-1)).toEqual({
+      conversationId: "c1",
+      receipt: { readSeq: 102 },
+    });
+  });
+
+  it("в фоне уходит доставка, прочтение — нет; при возврате уходит свёрнутое", async () => {
+    // Четыре клетки D6 целиком, и утверждение названо точно: «в фоне отправок
+    // нет» — **ложно** и прошло бы зелёным на дефекте, потому что запрет
+    // отправок в фоне отнял бы у `RCP-001` половину смысла. Проверяется именно
+    // запрет на `read_seq` в фоне и его отправка после возврата.
+    //
+    // Свойство подменяется у **своего** `document`, а не у прототипа: прототип
+    // принадлежит прогону целиком, и оставленный на нём `hidden` сделал бы
+    // слепым следующий файл, а не убрался бы вместе с этим.
+    // Значение читается из переменной, а не из литерала: «вернуться» и «уйти в
+    // фон» — это **два** перехода, и подмена с постоянным `hidden` проверила бы
+    // только первый из них (а возврат получился бы мнимым).
+    let tabState: "hidden" | "visible" = "hidden";
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => tabState,
+    });
+
+    try {
+      installObserverForJsdom();
+      const { fake, calls, myRead, boundary } = setup({
+        conversations: [ANNA],
+        tail: () => Promise.resolve(tailOf([messageOf(101), messageOf(102)])),
+        // Возврат вкладки будит сверку, и список обязан остаться тем же: пустой
+        // ответ снял бы выбранную беседу вместе с панелью, а с ней и состояние
+        // квитанции — тест проверял бы пустоту.
+        refresh: () => Promise.resolve(directPage("c1")),
+      });
+
+      await waitFor(() => expect(boundary()).toBe("102"));
+      await waitFor(() =>
+        expect(calls.receipts.map((call) => call.receipt)).toEqual([{ deliveredSeq: 102 }]),
+      );
+
+      // Строки видит наблюдатель, а не вкладка: номер прочтения посчитан и
+      // лежит в панели. В фон он при этом не уходит — и это проверяется
+      // положительным утверждением, а не «ничего не пришло».
+      FakeIntersectionObserver.latest.intersectSeq(102, 1);
+      await publishMessage(fake, 103);
+
+      await waitFor(() =>
+        expect(calls.receipts.map((call) => call.receipt)).toEqual([
+          { deliveredSeq: 102 },
+          { deliveredSeq: 103 },
+        ]),
+      );
+      expect(myRead()).toBeNull();
+
+      tabState = "visible";
+      await returnToVisible();
+
+      // Свёрнутое прочтение — максимум видимого за всё отсутствие, а не первое
+      // число после возврата.
+      await waitFor(() => expect(myRead()).toBe("102"));
+      expect(calls.receipts.at(-1)).toEqual({
+        conversationId: "c1",
+        receipt: { readSeq: 102 },
+      });
+    } finally {
+      delete (document as unknown as Record<string, unknown>).visibilityState;
+      expect(document.visibilityState).toBe("visible");
+    }
+  });
+});
+
+/**
+ * Квитанция **собеседника**: приём события, проекция на свои сообщения и сверка.
+ *
+ * Обе половины `RCP-001` живут здесь: `message.read` ускоряет, но истину
+ * приносит REST (`D11`), и оба пути обязаны ставить **одно и то же** число.
+ */
+describe("квитанция собеседника: приём и отображение", () => {
+  it("отставшее событие собеседника числа не двигает", async () => {
+    const { fake, peerRead, boundary } = setup({
+      conversations: [ANNA],
+      tail: () => Promise.resolve(tailOf([messageOf(101), messageOf(102)])),
+    });
+
+    await waitFor(() => expect(boundary()).toBe("102"));
+
+    await publishRead(fake, { reader_id: ANNA_ID, read_seq: 495, delivered_seq: 480 });
+    expect(peerRead()).toBe("495");
+
+    // Старое устройство доедает очередь и присылает прежний номер. Принять его
+    // значило бы показать прочтение, которого не делали, и откатить уже
+    // показанную отметку (`D6а`).
+    await publishRead(fake, { reader_id: ANNA_ID, read_seq: 494, delivered_seq: 470 });
+
+    expect(peerRead()).toBe("495");
+  });
+
+  it("своя квитанция собеседником не становится", async () => {
+    // Своя приходит **на тот же канал беседы**, и различает их только
+    // `reader_id`. Прими вкладка свою за чужую — и человек увидел бы
+    // собственное прочтение как прочтение собеседника; это тот же класс, что
+    // «имя из `participants[0]`» в адаптере.
+    const { fake, peerRead } = setup({
+      conversations: [ANNA],
+      tail: () => Promise.resolve(tailOf([messageOf(101)])),
+    });
+
+    await publishRead(fake, { reader_id: ANNA_ID, read_seq: 495 });
+    expect(peerRead()).toBe("495");
+
+    await publishRead(fake, { reader_id: VIEWER_ID, read_seq: 900 });
+
+    expect(peerRead()).toBe("495");
+  });
+
+  it("беседе без названного собеседника квитанция не приписывается", async () => {
+    // Группе состояние собеседника не положено: их там несколько, и «его»
+    // номера не существует. Приписать событие любому участнику значило бы
+    // назвать собеседником случайного человека.
+    const { fake, peerRead } = setup({
+      conversations: [conversationOf({ id: "c1", name: "Team" })],
+      tail: () => Promise.resolve(tailOf([messageOf(101)])),
+    });
+
+    await publishRead(fake, { reader_id: ANNA_ID, read_seq: 495 });
+
+    expect(peerRead()).toBeNull();
+  });
+
+  it("номера собеседника из REST проецируются на свои сообщения", async () => {
+    // Три состояния одной ленты разом: собеседник прочитал до 480, его
+    // устройство доехало до 495, дальше — только отправлено. Состояние
+    // выводится из **его** номеров, а не из наших отправок: «доставлено» —
+    // факт собеседника.
+    const { rowState, boundary } = setup({
+      conversations: [
+        conversationOf({
+          id: "c1",
+          peerUserId: ANNA_ID,
+          peerReadState: { readSeq: 480, deliveredSeq: 495 },
+        }),
+      ],
+      tail: () => Promise.resolve(tailOf([messageOf(480), messageOf(495), messageOf(500)])),
+    });
+
+    await waitFor(() => expect(boundary()).toBe("500"));
+
+    expect(rowState(480)).toBe("read");
+    expect(rowState(495)).toBe("delivered");
+    expect(rowState(500)).toBe("sent");
+  });
+
+  it("сверка приносит номера собеседника из read_states", async () => {
+    // Ветка `D11` без события-повода: истину приносит ответ REST. До возврата
+    // вкладки о собеседнике не известно **ничего**, и это не пара нулей —
+    // массив `read_states` разреженный, и зритель в нём стоит первым: номер
+    // обязан быть найден по имени, а не по месту.
+    const { peerRead, rowState, calls } = setup({
+      conversations: [ANNA],
+      tail: () => Promise.resolve(tailOf([messageOf(101)])),
+      refresh: () =>
+        Promise.resolve(
+          directPage("c1", {
+            readStates: [
+              { userId: VIEWER_ID, lastReadSeq: 900, lastDeliveredSeq: 900 },
+              { userId: ANNA_ID, lastReadSeq: 495, lastDeliveredSeq: 480 },
+            ],
+          }),
+        ),
+    });
+
+    await waitFor(() => expect(calls.tails).toEqual(["c1"]));
+    expect(peerRead()).toBeNull();
+
+    await returnToVisible();
+
+    await waitFor(() => expect(peerRead()).toBe("495"));
+    expect(calls.refreshes).toBe(1);
+    // Тот же ответ двигает и состояние сообщений — числа у путей одни и те же.
+    expect(rowState(101)).toBe("read");
   });
 });

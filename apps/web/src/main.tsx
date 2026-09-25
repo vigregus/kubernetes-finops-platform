@@ -10,6 +10,7 @@ import { ensureDeviceId, loadDeviceId, saveDeviceId } from "./features/auth/devi
 import { CALLBACK_PATH } from "./features/auth/session";
 import { createSessionState } from "./features/auth/sessionState";
 import type { HistoryApi } from "./features/messages/history";
+import type { SendReceipt } from "./features/receipts/useReceipts";
 import { loadRuntimeConfig } from "./runtime-config";
 
 /**
@@ -76,6 +77,29 @@ const bootstrapDeps = {
  */
 const refreshConversations = () => conversationsApi.listConversations();
 
+/**
+ * Квитанция вкладки (`POST /conversations/{id}/receipts`) — операция рядом с
+ * остальными клиентами API, и по той же причине: у панели нет ни адреса, ни
+ * токена.
+ *
+ * Тело собирает **вызывающий** (`receiptToSend` в `useReceipts`): сюда приходит
+ * уже только то, что сдвинулось, и лишних полей в запросе не бывает. Это не
+ * украшение, а условие законности ответа: у запроса `additionalProperties:
+ * false`, и лишнее поле получило бы отказ, а не тишину.
+ *
+ * Обёртка, а не голая ссылка на метод: метод класса, отданный без `this`,
+ * потерял бы `configuration` — та же причина, что у `historyApi` выше.
+ *
+ * Ссылка **устойчива** (модульная константа): её смена перезапускает дребезг в
+ * `useReceipts`, и нестабильная ссылка откладывала бы отправку на каждом
+ * рендере — вкладка не сообщила бы ничего и никогда.
+ */
+const sendReceipts: SendReceipt = (conversationId, receipt) =>
+  messagesApi.setReceipts({
+    conversationId,
+    setReceiptsRequest: { ...receipt },
+  });
+
 async function start(): Promise<void> {
   // Идентификатор заводится **до** первого запроса — и до ветки: на `/callback`
   // первым запросом идёт обмен, и он тоже обязан нести `X-Device-Id`, иначе
@@ -129,6 +153,7 @@ createRoot(document.getElementById("root")!).render(
       onRetry={retry}
       historyApi={historyApi}
       refreshConversations={refreshConversations}
+      sendReceipts={sendReceipts}
       readCentrifugoUrl={readCentrifugoUrl}
       issueTicket={issueTicket}
     />

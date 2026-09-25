@@ -8,6 +8,7 @@ import { createHistorySource, type HistoryApi } from "./features/messages/histor
 import type { CentrifugeFactory } from "./features/realtime/realtimeClient";
 import type { RealtimeTicketIssuer } from "./api/realtimeToken";
 import type { ConversationListPage } from "./api/generated";
+import type { SendReceipt } from "./features/receipts/useReceipts";
 import type { BootState } from "./api/client";
 import type { SessionState } from "./features/auth/sessionState";
 
@@ -37,6 +38,15 @@ interface AppProps {
    * не было, сверять было нечем — вкладка оставалась при своём числе.
    */
   refreshConversations: () => Promise<ConversationListPage>;
+  /**
+   * Отправка квитанции — **операция**, как и `onRetry`, и по той же причине:
+   * собрана в `main.tsx`, где живёт клиент API.
+   *
+   * Между `App` и панелью она транзитом, и это не механическая передача: тело
+   * запроса собирает `useReceipts`, а сборку **операции** из клиента API у
+   * компонента взять негде — ему негде взять `configuration`.
+   */
+  sendReceipts: SendReceipt;
   /**
    * Адрес соединения — **функцией**, а не значением, и это не стилистика.
    *
@@ -81,6 +91,7 @@ export function App({
   onRetry,
   historyApi,
   refreshConversations,
+  sendReceipts,
   readCentrifugoUrl,
   issueTicket,
   createCentrifuge,
@@ -125,6 +136,7 @@ export function App({
           state={state}
           historyApi={historyApi}
           refreshConversations={refreshConversations}
+          sendReceipts={sendReceipts}
           readCentrifugoUrl={readCentrifugoUrl}
           issueTicket={issueTicket}
           createCentrifuge={createCentrifuge}
@@ -137,6 +149,7 @@ interface ReadyScreenProps {
   state: ReadyState;
   historyApi: HistoryApi;
   refreshConversations: () => Promise<ConversationListPage>;
+  sendReceipts: SendReceipt;
   readCentrifugoUrl: () => string;
   issueTicket: RealtimeTicketIssuer;
   createCentrifuge?: CentrifugeFactory;
@@ -146,6 +159,7 @@ function ReadyScreen({
   state,
   historyApi,
   refreshConversations,
+  sendReceipts,
   readCentrifugoUrl,
   issueTicket,
   createCentrifuge,
@@ -191,6 +205,7 @@ function ReadyScreen({
     <ChatPage
       conversations={conversations}
       refreshConversations={refreshConversations}
+      sendReceipts={sendReceipts}
       currentUser={viewer.user}
       currentUserId={viewer.userId}
       history={history}
