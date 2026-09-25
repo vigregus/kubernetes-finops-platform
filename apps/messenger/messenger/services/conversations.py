@@ -20,8 +20,14 @@ from messenger.domain.conversation_list import (
 )
 from messenger.domain.errors import Reason
 from messenger.domain.ids import ConversationId, UserId, direct_key
+from messenger.domain.receipts import ParticipantReadState
 from messenger.domain.user import User, UserSummary
-from messenger.repositories import conversations, messages, users
+from messenger.repositories import (
+    conversations,
+    messages,
+    read_states,
+    users,
+)
 from messenger.services import authorization
 from messenger.services.unread import restore_lost_counts
 
@@ -170,6 +176,14 @@ class CreateDirectResult:
     # выглядел бы по-разному в зависимости от того, каким маршрутом его
     # получили, и заметил бы это клиент, а не сервер.
     participants: tuple[UserSummary, ...] = field(default_factory=tuple)
+    # `None` значит «не спрашивали», и достижимо оно только на отказе, где
+    # беседы нет вовсе и тело ответа не собирается. Пустой кортеж значит
+    # другое: «спросили, квитанций нет». Различие то же, что у
+    # `ConversationSummary.read_states`, и оно не косметическое — маршрут
+    # создания умеет вернуть **существующую** беседу
+    # (`ensure_direct_conversation`), и пустой массив на ней был бы другой
+    # правдой о той же беседе, чем та, что отдаёт список.
+    read_states: tuple[ParticipantReadState, ...] | None = None
     created: bool = False
     rejection: Reason | None = None
 
@@ -221,9 +235,27 @@ async def create_direct(
             for member in (actor, participant)
         )
         if not ensured.created:
+            # Квитанции читаются только на этой ветке, и это не экономия,
+            # а точность: беседа возвращена существующей, значит строки
+            # `read_states` в ней могут быть, и умолчать о них значило бы
+            # отдать про ту же беседу другую правду, чем список.
+            # У только что созданной беседы строк быть не может — поход
+            # в базу за известным ответом там был бы ритуалом.
+            states = await read_states.fetch_read_states(
+                conn,
+                conversation_id=conversation.conversation_id,
+                user_ids=(actor.user_id, participant.user_id),
+            )
             return CreateDirectResult(
                 conversation=conversation,
                 participants=participants,
+                read_states=tuple(
+                    ParticipantReadState(
+                        user_id=member.user_id, state=states[member.user_id]
+                    )
+                    for member in (actor, participant)
+                    if member.user_id in states
+                ),
                 created=False,
             )
 
@@ -240,5 +272,8 @@ async def create_direct(
         return CreateDirectResult(
             conversation=conversation,
             participants=participants,
+            # Пусто, а не `None`: состояние спрошено и его нет — у беседы,
+            # созданной этой же транзакцией, квитанций быть не может.
+            read_states=(),
             created=True,
         )

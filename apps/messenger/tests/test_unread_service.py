@@ -22,6 +22,7 @@ import uuid
 import pytest
 
 from messenger.domain.ids import ConversationId, ConversationSeq, UserId
+from messenger.domain.receipts import ReadState
 from messenger.domain.unread import (
     EVENT_TYPE,
     UnreadCount,
@@ -126,8 +127,16 @@ def _stand(
 
     async def _reads(conn_: Connection, *, conversation_id, user_ids):
         conn_.calls.append("fetch_read_states")
+        # Состояние — пара чисел, и счёту нужен прочитанный номер: второй
+        # проверяется телом беседы, а не здесь. Доставка берётся равной
+        # прочитанному, а не отдельной настройкой стенда: у настоящей
+        # строки она не меньше по построению, и стенд, разрешающий
+        # обратное, дал бы проверке пройти по состоянию, которого не бывает.
         return {
-            user: ConversationSeq(state["reads"][user])
+            user: ReadState(
+                delivered_seq=ConversationSeq(state["reads"][user]),
+                read_seq=ConversationSeq(state["reads"][user]),
+            )
             for user in user_ids
             if user in state["reads"]
         }

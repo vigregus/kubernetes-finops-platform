@@ -29,6 +29,7 @@ from messenger.domain.ids import (
     direct_key,
 )
 from messenger.domain.message import Message, MessageKind, MessagePayload
+from messenger.domain.receipts import ParticipantReadState, ReadState
 from messenger.domain.unread import UnreadCount
 from messenger.domain.user import User, UserSummary
 from messenger.services import conversations as service
@@ -87,6 +88,26 @@ def _отметки(
         return dict(seen or {})
 
     monkeypatch.setattr(service.users, "fetch_last_seen_at", _fetch)
+    return asked
+
+
+def _квитанции(
+    monkeypatch, states: dict[UserId, ReadState] | None = None
+) -> list[UserId]:
+    """Подменяет чтение состояний чтения: проверяется вызов, не SQL.
+
+    Как и у отметок, видно, что запрос идёт **пачкой** по обоим участникам.
+    Возвращается ровно то, что передали: отсутствие пары для человека —
+    это и есть «строки нет», и подставлять на её место пару нулей нельзя,
+    иначе участник без квитанций стал бы участником с нулевой.
+    """
+    asked: list[UserId] = []
+
+    async def _fetch(conn, *, conversation_id, user_ids):
+        asked.extend(user_ids)
+        return dict(states or {})
+
+    monkeypatch.setattr(service.read_states, "fetch_read_states", _fetch)
     return asked
 
 
@@ -168,6 +189,13 @@ def test_первый_запрос_атомарно_создаёт_беседу_
     monkeypatch.setattr(service.conversations, "add_member", _add)
     asked = _отметки(monkeypatch, {OTHER_ID: NOW})
 
+    async def _не_спрашивать(*args, **kwargs):
+        raise AssertionError(
+            "состояние спрошено у беседы, созданной этой же транзакцией"
+        )
+
+    monkeypatch.setattr(service.read_states, "fetch_read_states", _не_спрашивать)
+
     result = asyncio.run(
         service.create_direct(conn, actor=_user(ACTOR_ID), participant_id=OTHER_ID)
     )
@@ -181,6 +209,12 @@ def test_первый_запрос_атомарно_создаёт_беседу_
         (ACTOR_ID, None),
         (OTHER_ID, NOW),
     ]
+    # Состояние — пустое и **без** запроса: у беседы, созданной этой же
+    # транзакцией, квитанций быть не может, и поход в базу за известным
+    # ответом был бы ритуалом. Пустой кортеж, а не `None`: состояние
+    # спрошено, и его нет, — иначе ответ на создание отличался бы от
+    # ответа списка там, где отличаться нечем.
+    assert result.read_states == ()
 
 
 def test_последовательный_повтор_возвращает_существующую(monkeypatch):
@@ -199,6 +233,10 @@ def test_последовательный_повтор_возвращает_су
     monkeypatch.setattr(service.conversations, "ensure_direct_conversation", _ensure)
     monkeypatch.setattr(service.conversations, "add_member", _не_добавлять)
     asked = _отметки(monkeypatch)
+    stored = ReadState(
+        delivered_seq=ConversationSeq(5), read_seq=ConversationSeq(4)
+    )
+    states_asked = _квитанции(monkeypatch, {OTHER_ID: stored})
 
     result = asyncio.run(
         service.create_direct(Connection(), actor=_user(ACTOR_ID), participant_id=OTHER_ID)
@@ -206,6 +244,17 @@ def test_последовательный_повтор_возвращает_су
     assert result.ok and not result.created and result.conversation == expected
     assert [user.user_id for user in result.participants] == [ACTOR_ID, OTHER_ID]
     assert asked == [ACTOR_ID, OTHER_ID]
+    # Состояние чтения спрашивается на этой ветке, и именно на ней одной:
+    # беседа вернулась существующей, значит квитанции в ней могут быть,
+    # и умолчание о них отдало бы про ту же беседу другую правду, чем
+    # список бесед. Читается пачкой по обоим участникам.
+    assert states_asked == [ACTOR_ID, OTHER_ID]
+    # Элемент один: у второго участника строки нет, и это не то же самое,
+    # что строка из двух нулей, — поэтому ноль на её месте здесь не
+    # появляется, а участник просто не попадает в массив.
+    assert result.read_states == (
+        ParticipantReadState(user_id=OTHER_ID, state=stored),
+    )
 
 
 # --- список бесед ----------------------------------------------------------
@@ -225,6 +274,7 @@ def _summary(conversation_id: ConversationId, *, updated_at: datetime = NOW):
             updated_at=updated_at,
         ),
         participants=(UserSummary(user_id=ACTOR_ID, display_name="Аня"),),
+        read_states=(),
     )
 
 

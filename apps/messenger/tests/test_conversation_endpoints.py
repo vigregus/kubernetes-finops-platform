@@ -25,6 +25,7 @@ from messenger.domain.ids import (
     UserId,
 )
 from messenger.domain.message import Message, MessageKind, MessagePayload
+from messenger.domain.receipts import ParticipantReadState, ReadState
 from messenger.domain.unread import UnreadCount
 from messenger.domain.user import User, UserSummary
 from messenger.services import conversations as service
@@ -254,7 +255,12 @@ MESSAGE_ID = MessageId(uuid.UUID("55555555-5555-5555-5555-555555555555"))
 CLIENT_MESSAGE_ID = ClientMessageId(uuid.UUID("66666666-6666-6666-6666-666666666666"))
 
 
-def _summary(conversation_id: ConversationId, *, updated_at: datetime = NOW):
+def _summary(
+    conversation_id: ConversationId,
+    *,
+    updated_at: datetime = NOW,
+    read_states: tuple[ParticipantReadState, ...] = (),
+):
     return ConversationSummary(
         conversation=Conversation(
             conversation_id=conversation_id,
@@ -265,6 +271,7 @@ def _summary(conversation_id: ConversationId, *, updated_at: datetime = NOW):
             updated_at=updated_at,
         ),
         participants=(UserSummary(user_id=ACTOR_ID, display_name="Аня"),),
+        read_states=read_states,
     )
 
 
@@ -309,6 +316,7 @@ def test_список_отдаёт_беседу_без_сообщения(client
             "type": "direct",
             "participants": [{"user_id": str(ACTOR_ID), "display_name": "Аня"}],
             "created_at": "2026-09-15T00:00:00Z",
+            "read_states": [],
         }
     ]
     # Ключа нет вовсе — не «есть, но null»: у беседы без сообщений
@@ -319,6 +327,11 @@ def test_список_отдаёт_беседу_без_сообщения(client
     # и соседний тест это показывает. Ноль вместо неизвестного был бы
     # уверенной ложью, и заметить её клиент не смог бы.
     assert "unread_count" not in body["items"][0]
+    # А у состояния чтения отсутствие ключа значит третье — «не
+    # спрашивали», — и его здесь быть не должно: пустой массив это
+    # «спросили, квитанций нет». Разные ответы, и различие держится тем,
+    # что список читает состояние всегда (обязательное поле сводки).
+    assert body["items"][0]["read_states"] == []
 
 
 def test_конец_списка_это_null_в_null(client, monkeypatch):
@@ -344,6 +357,7 @@ def test_последнее_сообщение_отдаётся_полным_т�
                 ConversationSummary(
                     conversation=_summary(CONVERSATION_ID).conversation,
                     participants=(UserSummary(user_id=ACTOR_ID, display_name="Аня"),),
+                    read_states=(),
                     last_message=message,
                 ),
             )
@@ -384,6 +398,7 @@ def test_счётчик_непрочитанного_доезжает_до_те�
                 ConversationSummary(
                     conversation=_summary(CONVERSATION_ID).conversation,
                     participants=(UserSummary(user_id=ACTOR_ID, display_name="Аня"),),
+                    read_states=(),
                     unread_count=UnreadCount(2),
                 ),
             )
@@ -413,6 +428,7 @@ def test_ноль_непрочитанного_отдаётся_нулём(clien
                 ConversationSummary(
                     conversation=_summary(CONVERSATION_ID).conversation,
                     participants=(UserSummary(user_id=ACTOR_ID, display_name="Аня"),),
+                    read_states=(),
                     unread_count=UnreadCount(0),
                 ),
             )
@@ -423,6 +439,61 @@ def test_ноль_непрочитанного_отдаётся_нулём(clien
         "/conversations", headers={"Authorization": "Bearer token"}
     ).json()
     assert body["items"][0]["unread_count"] == 0
+
+
+def test_состояние_чтения_доезжает_под_именами_колонок(client, monkeypatch):
+    """`RCP-001`: квитанция видна в списке — и названа так, как в контракте.
+
+    Домен зовёт числа `read_seq`/`delivered_seq`, а контракт —
+    `last_read_seq`/`last_delivered_seq`: там они названы по колонкам
+    таблицы, потому что поле описывает хранимое состояние, а не очередной
+    отчёт устройства. Перевод живёт в одной точке (`_conversation_body`),
+    и это ровно та точка, которую иначе не проверяет ничто: перепутай
+    имена — сборщик отдаст пустое место там, где клиент ждёт число, и
+    заметит это клиент, а не сервер.
+
+    Отдельный тест нужен по той же причине, что у счётчика выше: в
+    `ConversationSummary` состояние появляется раньше, и это ещё не значит,
+    что сборщик тела его передаёт — добавки он принимает необязательными
+    и молча обошлась бы без новой.
+
+    Числа взяты разными (`7` и `9`), а не равными: на равных перестановка
+    имён прошла бы незамеченной, а она и есть самая вероятная ошибка
+    в переводе. И проверяются они у одного участника, а не длиной списка:
+    массив разреженный, и длина об этом не говорит ничего.
+    """
+    authenticated(monkeypatch)
+    _список(
+        monkeypatch,
+        ConversationPage(
+            items=(
+                ConversationSummary(
+                    conversation=_summary(CONVERSATION_ID).conversation,
+                    participants=(UserSummary(user_id=ACTOR_ID, display_name="Аня"),),
+                    read_states=(
+                        ParticipantReadState(
+                            user_id=ACTOR_ID,
+                            state=ReadState(
+                                delivered_seq=ConversationSeq(9),
+                                read_seq=ConversationSeq(7),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+        ),
+    )
+
+    body = client.get(
+        "/conversations", headers={"Authorization": "Bearer token"}
+    ).json()
+    assert body["items"][0]["read_states"] == [
+        {
+            "user_id": str(ACTOR_ID),
+            "last_read_seq": 7,
+            "last_delivered_seq": 9,
+        }
+    ]
 
 
 def test_продолжение_отдаётся_парой_а_не_одним_временем(client, monkeypatch):

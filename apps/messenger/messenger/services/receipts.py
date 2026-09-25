@@ -1,10 +1,31 @@
 """Запись квитанции: право, голова беседы, состояние и пересчёт проекции.
 
-**Только запись.** Квитанция не рассылается: ни строки в `outbox`, ни
-топика Kafka, ни публикации в Centrifugo. Схемы события `receipt.*` не
-существует, канала под него нет, и выдумать его здесь значило бы выпустить
-в провод событие без владельца. Оповещение собеседника — отдельная задача,
-и она не входит в этот гейт.
+**Квитанция доезжает до собеседника, и ровно тогда, когда состояние
+сдвинулось.** До `G3-007` здесь было «только запись»: ни строки в `outbox`,
+ни публикации в Centrifugo, и довод был в том, что схемы события
+`receipt.*` не существует. Появилось не `receipt.*`, а **уже объявленный**
+`message.read` (`packages/contracts/websocket/channels.json`): он был в
+`enum` с самого начала и не публиковался ни разу, потому что публиковать
+его было нечем — состояния чтения не знал никто, кроме записавшего его
+устройства.
+
+Публикация **не безусловна**, и обе причины — не оптимизация:
+
+* событие уходит только на сдвиге. `upsert_read_state` возвращает
+  после-`GREATEST` состояние, прежнее читается **до** записи, и
+  сравниваются они приведёнными (`domain.receipts.advanced_from`). Без
+  этого отставшая квитанция второго устройства рассылала бы событие о
+  состоянии, которое не изменилось;
+* событие не уходит при блокировке между читателем и любым участником
+  беседы. `message.read` публикуется в `conversation:{id}`, а
+  заблокированный остаётся участником и остаётся подписанным — `BLK-004`
+  подписку не отменяет. Маскировать один REST значило бы оставить обходной
+  транспорт: маска, которую обходит второй путь, — не маска
+  (`docs/messenger/04-decisions.md`, privacy-инвариант `G3-007`).
+
+Сама запись от блокировки при этом **не** зависит (см. ниже): блокировка
+запрещает будущую запись, но не чтение старой истории. Разделение это и
+есть предмет решения — запись остаётся, молчит публикация.
 
 **Транзакция: почему её не было и почему она появилась.** До `G3-003`
 обёртка была не нужна, и это следствие, а не упущение: одна строка, одна
@@ -71,10 +92,12 @@ import asyncpg
 
 from messenger.domain.authorization import Action, ResourceRef, Subject
 from messenger.domain.errors import Reason, Visibility
-from messenger.domain.ids import ConversationId
+from messenger.domain.ids import ConversationId, UserId
 from messenger.domain.receipts import (
     ReadState,
     Receipts,
+    advanced_from,
+    read_event,
     state_of,
     validate_receipt_bound,
     validate_receipts,
@@ -83,7 +106,8 @@ from messenger.domain.unread import UnreadCount
 from messenger.domain.user import User
 from messenger.repositories import conversations, read_states
 from messenger.repositories.unread import lock_offsets, recount_unread
-from messenger.services import authorization
+from messenger.services import authorization, realtime_delivery
+from messenger.telemetry import metrics
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,16 +123,42 @@ class SetReceiptsResult:
     гейте не расширяется, а `CTR-002` обязан остаться зелёным. Поле нужно
     вызывающему внутри процесса и тестам, которые им же и проверяют, что
     пересчёт идёт от источника истины, а не вычитанием единицы.
+
+    `previous` — состояние строки **до** записи, и сдвиг выводится из него
+    свойством, а не отдельным полем. Два поля («прежнее» и «сдвинулось»)
+    могли бы разойтись: одно посчитано, другое записано. Здесь истина одна,
+    а приведение прежнего к нулю живёт в домене (`advanced_from`) — там же,
+    где и сравнение.
+
+    `blocked_with` — участники беседы, с которыми у читателя блокировка
+    **в любую сторону**. Это факт, а не решение: публикацию по нему гасит
+    обработчик, у которого есть чем публиковать. Обработчику он и нужен
+    потому, что в базу `api` ходить не вправе (`scripts/check-layers.py`),
+    а предикат читается там, где уже есть соединение и замок.
     """
 
     state: ReadState | None = None
     rejection: Reason | None = None
     visibility: Visibility = Visibility.HIDDEN
     unread_count: UnreadCount | None = None
+    previous: ReadState | None = None
+    blocked_with: frozenset[UserId] = frozenset()
 
     @property
     def ok(self) -> bool:
         return self.state is not None and self.rejection is None
+
+    @property
+    def advanced(self) -> bool:
+        """Сдвинулось ли состояние — то, ради чего публикуется событие.
+
+        Сравнение с **приведённым** прежним: у строки, которой не было,
+        прежнее — ноль, и законный первый запрос `{read_seq: 0}` не должен
+        выглядеть продвижением. Довод целиком — в `advanced_from`.
+        """
+        if self.state is None:
+            return False
+        return advanced_from(self.previous, self.state)
 
 
 async def set_receipts(
@@ -155,12 +205,31 @@ async def set_receipts(
     перестаёт быть границей доступного; это условие того, кто введёт
     частичную историю, — сегодня `left_at` на чтение ещё не влияет.
 
-    Блокировка сюда **не** относится, и сказано это не для полноты:
+    Блокировка **запись** не останавливает, и сказано это не для полноты:
     `docs/messenger/08-authorization.md:96,100` разрешает обеим сторонам
     читать старую историю целиком — блокировка запрещает будущую запись,
     presence и typing, но прошлого не стирает. Именно ради этого квитанция
     и спрашивает право на чтение, а не на запись. Ограничивать её по
     времени блокировки значило бы отменить то самое решение.
+
+    Блокировка останавливает **публикацию**, и это разные вещи: строка
+    `read_states` пишется всегда, а `message.read` в канал уходит только
+    без блокировки. Причина — не запись, а канал: `conversation:{id}` есть
+    рассылка, у неё нет адресата, и утаить событие от одного подписчика
+    на ней нечем. Заблокированный остаётся участником и остаётся
+    подписанным (`BLK-004` подписку не отменяет), поэтому узнал бы о
+    чтении из события, не видя `read_states` в REST, — то есть маска
+    обходилась бы вторым транспортом. Правило симметрично по сторонам
+    (блокировка в любую сторону) и является новым решением гейта, а не
+    чтением `BLK-002`, у которого названо одно направление; разбор —
+    в `docs/messenger/04-decisions.md`.
+
+    Цена названа: в групповой беседе с одной блокировкой живой квитанции
+    не увидит никто. В REST маскируется только пара «зритель ↔ участник»
+    (тело собирается под конкретного зрителя), а по-адресная доставка
+    потребовала бы писать в `user:{peer}` вместо канала беседы — то есть
+    другую модель доставки, от которой `message.read` как событие беседы
+    и отказался.
 
     Голова читается соединением писателя, и это несущее условие, а не
     аккуратность. Проверка границы односторонняя (`≤ head`), голова не
@@ -234,6 +303,13 @@ async def set_receipts(
                 rejection=Reason.CONVERSATION_NOT_FOUND,
                 visibility=decision.visibility,
             )
+        # Прежнее состояние — до записи и под тем же замком. Порядок здесь
+        # и есть условие: после `upsert` прежнего уже не достать, а
+        # сравнение с присланным вместо него перевёрнуто (см.
+        # `advanced_from`).
+        previous = await read_states.fetch_read_state(
+            conn, conversation_id=conversation_id, user_id=viewer.user_id
+        )
         stored = await read_states.upsert_read_state(
             conn,
             conversation_id=conversation_id,
@@ -251,4 +327,52 @@ async def set_receipts(
             above_seq=stored.read_seq,
             through_seq=watermark,
         )
-    return SetReceiptsResult(state=stored, unread_count=count)
+        # Предикат блокировки читается всегда, а не только на сдвиге, и
+        # это выбор в пользу простоты: условие здесь сэкономило бы скан
+        # `blocks` (маленькой таблицы) ценой развилки, которую пришлось бы
+        # держать в согласии с `advanced` из двух мест. Ответ на вопрос
+        # «молчит ли публикация» при этом не меняется: без сдвига событие
+        # не уходит ни при каком множестве.
+        blocked = await conversations.blocked_with(
+            conn, viewer=viewer.user_id, conversation_id=conversation_id
+        )
+    return SetReceiptsResult(
+        state=stored,
+        previous=previous,
+        unread_count=count,
+        blocked_with=blocked,
+    )
+
+
+async def announce_read(
+    *,
+    realtime,
+    conversation_id: ConversationId,
+    reader_id: UserId,
+    state: ReadState,
+) -> bool:
+    """Сообщает беседе о квитанции. Best-effort и **после** коммита.
+
+    Вызывается обработчиком **вне** блока соединения, и это не деталь
+    размещения. Событие, ушедшее до коммита, пережило бы откат транзакции:
+    `publish` отменить нельзя, а состояние в базе осталось бы прежним —
+    то есть канал и истина разошлись бы, и разошлись бы в ту сторону, из
+    которой восстановления нет (сверка приведёт клиента к REST, а второго
+    события о том же сдвиге уже не будет).
+
+    Отказ публикации квитанцию не роняет: запись состоялась, и это главное.
+    Исход считается метрикой — тот же образец, что у отзыва сессии
+    (`services/session_management.py`), где разрыв соединения тоже ускорение,
+    а не условие.
+
+    `None` вместо клиента — не ошибка: Centrifugo необязателен
+    (`runtime.centrifugo_client_from_env`), и без него под обязан работать.
+    """
+    if realtime is None:
+        return False
+    published = await realtime.publish(
+        realtime_delivery.channel_for(str(conversation_id)),
+        read_event(reader_id=reader_id, state=state),
+    )
+    metrics.realtime_published("ok" if published else "failed")
+    return published

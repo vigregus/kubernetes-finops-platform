@@ -994,8 +994,13 @@ async def create_direct_conversation(
     response.status_code = 201 if result.created else 200
     # Сборка общая со списком бесед: участники и поля конверта обязаны
     # выглядеть одинаково на обоих маршрутах, а вторая сборка на месте
-    # разошлась бы с первой при первой же правке контракта.
-    return _conversation_body(result.conversation, result.participants)
+    # разошлась бы с первой при первой же правке контракта. Состояние
+    # чтения передаётся тем же именем, что и в списке, и по той же причине:
+    # маршрут умеет вернуть существующую беседу, и умолчание о квитанциях
+    # было бы другой правдой о той же беседе.
+    return _conversation_body(
+        result.conversation, result.participants, result.read_states
+    )
 
 
 @app.get("/conversations", response_model=dict[str, object])
@@ -1238,7 +1243,12 @@ def _user_summary(participant) -> dict[str, object]:
 
 
 def _conversation_body(
-    conversation, participants, *, last_message=None, unread_count=None
+    conversation,
+    participants,
+    read_states,
+    *,
+    last_message=None,
+    unread_count=None,
 ) -> dict[str, object]:
     """Беседа в форме контракта — одной сборкой на оба маршрута.
 
@@ -1275,6 +1285,29 @@ def _conversation_body(
     Список значение передаёт, а маршрут создания беседы — нет: у только что
     созданной беседы сообщений нет, счётчика нет, и лишний поход в базу
     за нулём не нужен.
+
+    `read_states` — **отдельный аргумент**, а не поле беседы, и это то же
+    основание, по которому поле не живёт в `UserSummary`: состояние чтения
+    — факт беседы, а не сущности `conversations`, и в доменном
+    `Conversation` его нет. Оба маршрута передают его одним и тем же
+    именем, потому что сборка по-прежнему одна на оба: разойдись они —
+    один и тот же участник выглядел бы по-разному в зависимости от того,
+    каким маршрутом его получили.
+
+    Здесь же — **единственный** перевод имён базы в имена контракта:
+    `ReadState.read_seq`/`delivered_seq` → `last_read_seq`/
+    `last_delivered_seq`. Это то же правило, по которому `_user_summary`
+    переводит `last_seen_at`: сборка одна, поэтому и перевод один.
+
+    Массив **разреженный**: элемента нет у того, кто квитанции не
+    присылал, — состояние приходит уже отфильтрованным
+    (`ParticipantReadState`), и ноль на месте отсутствия здесь не
+    появляется. А вот отсутствие **ключа** значит третье — «состояния
+    не спрашивали»: у `CreateDirectResult` поле по умолчанию `None`,
+    потому что собрать результат можно и не спросив. Сегодня такого пути
+    нет (на отказе тела не строят вовсе), и проверка оставлена по той же
+    причине, что `payload or {}` в `_to_message`: выдать `[]` за ответ
+    «состояний нет» нельзя даже там, куда попасть нельзя.
     """
     body: dict[str, object] = {
         "conversation_id": str(conversation.conversation_id),
@@ -1286,6 +1319,15 @@ def _conversation_body(
         body["last_message"] = _message_body(last_message)
     if unread_count is not None:
         body["unread_count"] = int(unread_count)
+    if read_states is not None:
+        body["read_states"] = [
+            {
+                "user_id": str(item.user_id),
+                "last_read_seq": int(item.state.read_seq),
+                "last_delivered_seq": int(item.state.delivered_seq),
+            }
+            for item in read_states
+        ]
     return body
 
 
@@ -1317,6 +1359,7 @@ def _conversation_list_body(
             _conversation_body(
                 item.conversation,
                 item.participants,
+                item.read_states,
                 last_message=item.last_message,
                 unread_count=item.unread_count,
             )
@@ -1628,10 +1671,22 @@ async def set_receipts(
     монотонностью. `201` здесь нет и быть не может — квитанция ничего не
     создаёт, а описывает уже существующее.
 
-    **Только запись.** Ни строки в `outbox`, ни топика Kafka, ни
-    публикации в Centrifugo: схемы события `receipt.*` не существует, и
-    выдумать её здесь значило бы выпустить в провод событие без
-    владельца. Оповещение собеседника — отдельная задача бэклога.
+    Квитанция доезжает до беседы событием `message.read` — в **уже
+    объявленный** канал `conversation:{id}`, а не в придуманный
+    `receipt.*`. Публикация идёт **после** коммита и best-effort: отказ
+    Centrifugo квитанцию не роняет, а событие об откаченной транзакции
+    разошлось бы с базой навсегда.
+
+    Публикуется не всё, что записано, и обе причины названы:
+
+    * только сдвиг (`result.advanced`) — отставшая квитанция второго
+      устройства не событие, а молчание. «Сдвинулось ли» берётся из
+      состояния до и после записи, а не из присланного числа: сравнение
+      с присланным перевёрнуто и на обоих концах (`advanced_from`);
+    * только без блокировки (`result.blocked_with`) — заблокированный
+      остаётся подписанным, и маска, которую обходит канал, не маска.
+      Решение и его цена — в `services/receipts.py`, запись — в
+      `docs/messenger/04-decisions.md` (privacy-инвариант `G3-007`).
 
     Соединение **одно** на удостоверение и запись, в отличие от
     `list_messages` с его двумя. Там второе берётся под свой режим
@@ -1681,6 +1736,19 @@ async def set_receipts(
         return _problem_response(
             to_problem(result.rejection or Reason.INTERNAL, result.visibility),
             response,
+        )
+
+    # Публикация — вне блока соединения: транзакция квитанции закрыта
+    # сервисом, но событие об уже закоммиченном состоянии, ушедшее раньше
+    # коммита, пережило бы откат. Оба условия — отказ от публикации, а не
+    # от записи: строка `read_states` уже лежит, и клиент узнает о ней из
+    # ответа и из REST.
+    if result.advanced and not result.blocked_with:
+        await receipts_service.announce_read(
+            realtime=runtime.centrifugo,
+            conversation_id=ConversationId(conversation_id),
+            reader_id=auth.user.user_id,
+            state=result.state,
         )
 
     with tracing.span("response"):

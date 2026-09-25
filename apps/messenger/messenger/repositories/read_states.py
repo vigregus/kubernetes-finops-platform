@@ -97,19 +97,62 @@ async def upsert_read_state(
     return _to_read_state(row)
 
 
+async def fetch_read_state(
+    conn: asyncpg.Connection,
+    *,
+    conversation_id: ConversationId,
+    user_id: UserId,
+) -> ReadState | None:
+    """Прежнее состояние одного человека — то, чем он был **до** записи.
+
+    Возвращается именно состояние строки, а не пара нулей: `None` значит
+    «строки не было», и это вопрос вызывающего, а не этого чтения. Для
+    сравнения продвижения `None` и `(0, 0)` неразличимы, и решение об этом
+    принято в `domain.receipts.advanced_from` — здесь остаётся ровно то,
+    что лежит в таблице, как и у `fetch_read_states`.
+
+    Читается **до** `upsert_read_state` и в той же транзакции, и это не
+    вопрос вкуса: писатели одной строки сериализуются замком беседы,
+    который квитанция берёт первой, а под `READ COMMITTED` каждый оператор
+    видит свежий снимок — значит к моменту этого чтения победитель уже
+    закоммичен, и прочитанное прежнее не окажется чужим «будущим».
+
+    По первичному ключу `(conversation_id, user_id)`, то есть по индексу:
+    читается ровно одна строка той пары, которую собирается писать
+    вызывающий.
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT last_delivered_seq, last_read_seq
+          FROM read_states
+         WHERE conversation_id = $1
+           AND user_id = $2
+        """,
+        conversation_id,
+        user_id,
+    )
+    return _to_read_state(row) if row else None
+
+
 async def fetch_read_states(
     conn: asyncpg.Connection,
     *,
     conversation_id: ConversationId,
     user_ids: Sequence[UserId],
-) -> dict[UserId, ConversationSeq]:
-    """Прочитанные номера названных участников — одним запросом.
+) -> dict[UserId, ReadState]:
+    """Состояния чтения названных участников — одним запросом.
 
-    Отсутствие пользователя в ответе означает ноль, и это **не** то же
-    самое, что ноль в строке: `COALESCE` внутри запроса вернул бы строку и
-    для того, кто квитанции не присылал, — то есть соврал бы о наличии
-    состояния. Различие живёт у вызывающего, где оно и проверяемо, а здесь
-    остаётся ровно то, что лежит в таблице.
+    Отсутствие пользователя в ответе означает «строки нет», и это **не**
+    то же самое, что `(0, 0)` в строке: `COALESCE` внутри запроса вернул бы
+    строку и для того, кто квитанции не присылал, — то есть соврал бы
+    о наличии состояния. Различие живёт у вызывающего, где оно и
+    проверяемо, а здесь остаётся ровно то, что лежит в таблице.
+
+    Отдаётся состояние целиком, а не один прочитанный номер, потому что
+    номеров у квитанции два и оба она несёт одним вызовом устройства.
+    Читателю проекции нужен первый, телу беседы — оба, и второй запрос за
+    второй колонкой той же строки был бы кругом за тем, что уже прочитано;
+    перевод в имена контракта всё равно один и происходит он выше.
 
     Условие отбора идёт по первичному ключу `(conversation_id, user_id)`,
     то есть по индексу, а не сканированием: на событие беседы читаются
@@ -121,7 +164,7 @@ async def fetch_read_states(
         return {}
     rows = await conn.fetch(
         """
-        SELECT user_id, last_read_seq
+        SELECT user_id, last_delivered_seq, last_read_seq
           FROM read_states
          WHERE conversation_id = $1
            AND user_id = ANY($2::uuid[])
@@ -130,6 +173,5 @@ async def fetch_read_states(
         list(user_ids),
     )
     return {
-        UserId(row["user_id"]): ConversationSeq(row["last_read_seq"])
-        for row in rows
+        UserId(row["user_id"]): _to_read_state(row) for row in rows
     }
