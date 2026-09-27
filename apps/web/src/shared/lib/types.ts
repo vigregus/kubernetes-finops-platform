@@ -72,6 +72,15 @@ export interface Conversation {
    * держалось бы на договорённости таблицы превью, а не на факте.
    */
   hasMessages: boolean
+  /**
+   * Превью — своё сообщение, которого сервер ещё не подтвердил.
+   *
+   * Ключа нет — «подтверждённым не помечено», и это не `false`: у строки, до
+   * которой очередь не касалась, пометки не существует вовсе, и одинаково
+   * выглядеть они обязаны. Отличие несущее: неподтверждённое превью — то, что
+   * уйдёт при перезагрузке, если сервер так и не ответит.
+   */
+  pendingPreview?: boolean
   /** names currently sending typing:start heartbeats (RT-001..004) */
   typingNames?: string[]
   /** 08-authorization.md — symmetric block: no write, no presence/typing, history stays readable */

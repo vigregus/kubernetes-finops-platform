@@ -234,3 +234,78 @@ export function adaptConversations(
 ): Conversation[] {
   return page.items.map((dto) => adaptConversation(dto, currentUserId, now, timestampOptions))
 }
+
+/**
+ * Своё сообщение в строке списка — **своим** фактом, а не ожиданием события.
+ *
+ * Список обязан показать отправленное, не дожидаясь `message.created` (D13), и
+ * не потому, что событие медленное, а потому, что оно **необязательное**:
+ * публикация best-effort (`G3-007` D11), и при потерянной публикации строка
+ * осталась бы со старым превью до следующей сверки — то есть человек видел бы
+ * «ничего не отправлено» там, где отправлено. Отсюда правило: событие ускоряет,
+ * отправка решает.
+ *
+ * Функция **чистая**, и это не украшение: её предмет — три поля строки и её
+ * место в списке, а не транспорт. Поэтому же она не трогает `unreadCount`:
+ * своё сообщение непрочитанного не прибавляет никогда, и прибавление здесь было
+ * бы утверждением «вы написали себе».
+ *
+ * `pending` — состояние **той же** строки, а не отдельной метки: пока сервер не
+ * ответил, превью помечено неподтверждённым, а после ответа пометка снимается
+ * той же функцией. Два разных поля разошлись бы: снятие пришлось бы помнить
+ * отдельно от простановки.
+ *
+ * Беседы, которой в списке нет, касаться нечего: `POST /conversations` кладёт
+ * новую беседу в список **отдельно** (`ChatPage`), и выдумывать здесь строку
+ * значило бы завести второе место, собирающее модель из ответа создания.
+ */
+export interface SentPreview {
+  readonly conversationId: string
+  readonly text: string
+  /** Момент, которым помечается строка: подтверждение — своё, нажатие — своё. */
+  readonly at: Date
+  /** Сервер ещё не подтвердил: сообщение держит очередь. */
+  readonly pending: boolean
+}
+
+export function withSentPreview(
+  conversations: readonly Conversation[],
+  sent: SentPreview,
+  timestampOptions: TimestampFormatOptions = {},
+): Conversation[] {
+  const index = conversations.findIndex((conversation) => conversation.id === sent.conversationId)
+  // Беседы нет — менять нечего. Не «добавим на всякий случай»: строка списка
+  // для беседы, которой сервер не называл, утверждала бы о ней больше, чем
+  // известно, а у `withSentPreview` нет ни имени собеседника, ни участников.
+  if (index === -1) return conversations as Conversation[]
+
+  const current = conversations[index]!
+  // Пометка снимается **отсутствием** поля, а не значением `false`: так у
+  // непомеченной строки превью выглядит ровно как у всякой другой, и третьего
+  // состояния («поле есть, но ложно») в модели не заводится.
+  const { pendingPreview: _confirmed, ...rest } = current
+
+  const updated: Conversation = {
+    ...rest,
+    lastMessagePreview: sent.text,
+    // Время — своё, а не из ответа: ответ несёт `created_at` сервера, но строка
+    // обновляется и до него, и брать часы из объекта, которого ещё нет, нечем.
+    lastMessageTimestamp: formatConversationTimestamp(
+      sent.at.toISOString(),
+      sent.at,
+      timestampOptions,
+    ),
+    // Сообщение существует с момента нажатия — и это утверждение человека, а не
+    // сервера: строка про «нет сообщений» была бы неправдой уже тогда.
+    hasMessages: true,
+    // Своё сообщение удалённым быть не может: надгробий в этом гейте нет.
+    previewDeleted: false,
+    ...(sent.pending ? { pendingPreview: true } : {}),
+  }
+
+  // Свежая беседа сверху, по времени последней активности (D13). Порядок
+  // переставляется **здесь**, а не сортировкой всего списка: сортировка по
+  // `lastMessageTimestamp` была бы сортировкой по display-строке (`14:22`,
+  // `Yesterday`), то есть по тексту, а не по времени.
+  return [updated, ...conversations.slice(0, index), ...conversations.slice(index + 1)]
+}

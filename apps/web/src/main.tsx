@@ -8,12 +8,17 @@ import {
   ConversationsApi,
   MessagesApi,
   SendMessageRequestTypeEnum,
+  UsersApi,
 } from "./api/generated";
 import { createRealtimeTicketIssuer } from "./api/realtimeToken";
 import { bootStateOf, completeLogin } from "./features/auth/callback";
 import { ensureDeviceId, loadDeviceId, saveDeviceId } from "./features/auth/deviceId";
 import { CALLBACK_PATH } from "./features/auth/session";
 import { createSessionState } from "./features/auth/sessionState";
+import type {
+  CreateConversation,
+  SearchUser,
+} from "./features/conversations/components/NewConversationDialog";
 import type { HistoryApi } from "./features/messages/history";
 import { createOutboxStore, type OutboxStore } from "./features/messages/outbox/outboxStore";
 import type { SendMessage } from "./features/messages/outbox/useOutbox";
@@ -38,6 +43,7 @@ const session = createSessionState();
 const authApi = new AuthApi(client.configuration);
 const conversationsApi = new ConversationsApi(client.configuration);
 const messagesApi = new MessagesApi(client.configuration);
+const usersApi = new UsersApi(client.configuration);
 
 /**
  * Клиент истории отдаётся **операцией**, а не объектом: `HistorySource`
@@ -132,6 +138,43 @@ const sendMessage: SendMessage = (request) =>
   });
 
 /**
+ * Поиск человека по адресу (`GET /users?email=`) — операция рядом с прочими, и по
+ * той же причине: у диалога нет ни адреса API, ни токена.
+ *
+ * Отдаётся **не** список, а объект или отказ, и это форма ответа сервера, а не
+ * упрощение: совпадение точное, адрес уникален (частичный индекс
+ * `users_email_live_uniq`), и «нашлось двое» — состояние, которого не бывает
+ * (`D1`). Поэтому и клиент не приносит сюда массива.
+ *
+ * Нормализация адреса живёт **на сервере** (`normalize_email`): сделай её здесь —
+ * и правило приведения адреса завелось бы вторым, а расхождение с регистрацией
+ * всплыло бы тем, что человек не нашёл себя же в другом регистре.
+ */
+const searchUser: SearchUser = (email) => usersApi.findUserByEmail({ email });
+
+/**
+ * Создание личной беседы (`POST /conversations`) — операция оттуда же.
+ *
+ * `participant_id` приходит **готовым** — из ответа поиска, — и это главное, что
+ * здесь есть: беседу заводит подтверждённый человек, а не строка адреса, которую
+ * никто не проверял (`D2`). Заведись поле адреса в запросе, собеседника по строке
+ * выбирал бы сервер, а человек подтверждал бы то, чего не видел.
+ *
+ * Ответ — **модель API**, а не модель интерфейса: беседа приходит без зрителя, и
+ * `sender_id` в ней ещё не переведён в `"me"`. Адаптация — работа `ChatPage`, где
+ * `currentUserId` под рукой; здесь её взять негде, и вторая модель строки списка
+ * разошлась бы с первой.
+ *
+ * Маршрут идемпотентен по составу участников (`ensure_direct_conversation`,
+ * `ON CONFLICT (direct_key)`): повторное подтверждение вернёт **ту же** беседу, а
+ * не заведёт вторую, и контракт ради этого не меняется (`D8`).
+ */
+const createConversation: CreateConversation = (participantId) =>
+  conversationsApi.createDirectConversation({
+    createDirectConversationRequest: { participantId },
+  });
+
+/**
  * Хранилище очереди — одна константа на приложение, а не по объекту на панель.
  *
  * Открытие базы стоит денег, а читать её очередь обязана **один раз на
@@ -204,6 +247,8 @@ createRoot(document.getElementById("root")!).render(
       refreshConversations={refreshConversations}
       sendReceipts={sendReceipts}
       sendMessage={sendMessage}
+      searchUser={searchUser}
+      createConversation={createConversation}
       outboxStore={outboxStore}
       readCentrifugoUrl={readCentrifugoUrl}
       issueTicket={issueTicket}

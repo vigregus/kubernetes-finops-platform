@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { ConversationSidebar } from "./components/ConversationSidebar"
 import { ChatHeader } from "./components/ChatHeader"
-import { adaptConversations } from "./adapter"
+import { NewConversationDialog } from "./components/NewConversationDialog"
+import type { CreateConversation, SearchUser } from "./components/NewConversationDialog"
+import { adaptConversation, adaptConversations, withSentPreview } from "./adapter"
 import { adaptUnreadChanged, withUnreadOverlay } from "./unreadOverlay"
-import type { ConversationListPage, Message } from "../../api/generated"
+import type { Conversation as ConversationDto, ConversationListPage, Message } from "../../api/generated"
 import { adaptMessage, adaptPublication, adaptReadReceipt } from "../messages/message-adapter"
 import { confirmedClientIds } from "../messages/eventMerge"
 import { MessageComposer } from "../messages/components/MessageComposer"
@@ -114,6 +116,22 @@ interface ChatPageProps {
    * беседы, и (через IndexedDB) перезагрузку.
    */
   outboxStore: OutboxStore
+  /**
+   * Поиск человека по адресу (`GET /users?email=`) — операция из `main.tsx`.
+   *
+   * Диалог получает её **готовой**: у компонента нет ни адреса API, ни токена,
+   * и собирать `UsersApi` здесь значило бы завести второй способ говорить с
+   * сервером рядом с тем, которым говорят все остальные.
+   */
+  searchUser: SearchUser
+  /**
+   * Создание личной беседы (`POST /conversations`) — оттуда же.
+   *
+   * Отдаёт модель API: беседа, которую вернул сервер, кладётся в список
+   * **здесь**, тем же `adaptConversation`, что и список из `GET /conversations`.
+   * Второго способа собрать строку списка не появляется.
+   */
+  createConversation: CreateConversation
   /** Подмена SDK — для компонентных тестов; в production не задаётся. */
   createCentrifuge?: CentrifugeFactory
 }
@@ -167,11 +185,22 @@ export function ChatPage({
   sendReceipts,
   sendMessage,
   outboxStore,
+  searchUser,
+  createConversation,
   createCentrifuge,
 }: ChatPageProps) {
   // Ленивая инициализация, а не `?? conversations[0]` в рендере: запасного
   // значения у настоящих данных нет, а пустой список — законный ответ сервера.
   const [activeId, setActiveId] = useState<string | null>(() => conversations[0]?.id ?? null)
+  /**
+   * Диалог создания беседы — состояние **списка**, а не панели.
+   *
+   * Панель пересоздаётся на каждой смене беседы (`key` ниже), и диалог,
+   * живущий в ней, закрывался бы от создания первой же беседы — а его задача
+   * как раз пережить создание: после подтверждения он открывает созданную
+   * беседу и закрывается сам, по факту, а не по перерисовке.
+   */
+  const [creatingConversation, setCreatingConversation] = useState(false)
 
   /**
    * База — из пропсов, и это не дублирование состояния: пропсы приходят из
@@ -257,6 +286,54 @@ export function ChatPage({
     return () => document.removeEventListener("visibilitychange", onVisibilityChange)
   }, [refresh])
 
+  /**
+   * Своё сообщение в строке списка — **от отправки**, а не от `message.created`
+   * (`D13`).
+   *
+   * Довод тот же, что у сверки: событие доставляется best-effort, и строка,
+   * ждущая его, показывала бы «ничего не отправлено» там, где отправлено.
+   * Применяется к **базе**, а не к слитому списку: оверлей непрочитанного
+   * говорит о числах, а превью и порядок — о самой беседе, и накладывать одно
+   * на другое значило бы собирать список вторым способом.
+   *
+   * `pending` приходит снаружи, а не выводится из очереди: нажатие помечает
+   * неподтверждённое, ответ снимает пометку — и оба состояния ставит тот, кто
+   * знает, что произошло.
+   */
+  const touchConversation = useCallback(
+    (conversationId: string, text: string, pending: boolean) => {
+      setBase((current) =>
+        withSentPreview(current, { conversationId, text, at: new Date(), pending }),
+      )
+    },
+    [],
+  )
+
+  /**
+   * Созданная беседа — в список и на экран, без второго круга REST (`D10`).
+   *
+   * Ответ `POST /conversations` **уже содержит** беседу, поэтому сверка здесь
+   * была бы вторым запросом за тем, что пришло. Беседа кладётся сверху — она
+   * свежая по построению.
+   *
+   * Уже знакомая беседа **не заменяется**: `POST` идемпотентен и умеет вернуть
+   * существующую (`ensure_direct_conversation`, `D8`), и подмена показанной
+   * строки ответом, который о ней ничего нового не говорит, потеряла бы то, что
+   * список уже знает (например, счётчик непрочитанного, если сервер его в
+   * создании не назвал). Предмет здесь — открыть беседу, а не переписать список.
+   */
+  const handleConversationCreated = useCallback(
+    (dto: ConversationDto) => {
+      const conversation = adaptConversation(dto, currentUserId, new Date())
+      setBase((current) =>
+        current.some((item) => item.id === conversation.id) ? current : [conversation, ...current],
+      )
+      setActiveId(conversation.id)
+      setCreatingConversation(false)
+    },
+    [currentUserId],
+  )
+
   // Слияние — на каждом рендере списка, а не при приходе события: иначе
   // пришлось бы держать согласие между двумя состояниями в руках, и число
   // отставало бы от базы ровно на один рендер.
@@ -300,12 +377,19 @@ export function ChatPage({
    */
   const onSent = useCallback(
     (record: PendingMessage, response: Message) => {
+      // Строка списка обновляется **до** вложения в ленту и независимо от него:
+      // превью и порядок — предмет списка, а лента может эту беседу и не
+      // показывать (человек ушёл в другую). Помечая подтверждённым, а не
+      // неподтверждённым: сервер уже ответил, и держать пометку дальше значило
+      // бы утверждать «не отправлено» о принятом.
+      touchConversation(record.conversationId, record.text, false)
+
       const entry = feedRef.current
       if (entry === null || entry.conversationId !== record.conversationId) return
 
       entry.accept(adaptMessage(response, currentUserId, new Date()))
     },
-    [currentUserId],
+    [currentUserId, touchConversation],
   )
 
   /**
@@ -342,61 +426,87 @@ export function ChatPage({
   const activeConversation = merged.find((c) => c.id === activeId) ?? null
 
   return (
-    <MessengerLayout
-      sidebar={
-        <ConversationSidebar
-          conversations={merged}
-          activeConversationId={activeConversation?.id ?? null}
-          currentUser={currentUser}
-          onSelectConversation={setActiveId}
-        />
-      }
-    >
-      {activeConversation === null ? (
-        // Шапки нет: шапка — утверждение о выбранной беседе, а её нет.
-        <div className="flex flex-1 items-center justify-center px-6 text-center">
-          <p className="text-sm text-text-warm-secondary">No conversations</p>
-        </div>
-      ) : (
-        /**
-         * `key` ставит **владелец выбора беседы**, и стоит он над компонентом,
-         * который держит хук, а не внутри него.
-         *
-         * Отступление от буквы плана названо: там `key` стоит на самом
-         * `ChatPage`, а выбор беседы живёт в `App`. Вынести его туда значило бы
-         * переписать `App` (состояние выбора плюс сайдбар) и не добавить ни
-         * одного наблюдаемого свойства — требование («смена беседы сбрасывает
-         * состояние ленты») исполнено ровно так же, потому что React
-         * пересоздаёт по `key` **родительский** элемент. `key`, написанный
-         * внутри самого `ChatPage`, собственный state хука не сбросил бы: тот
-         * живёт в том же компоненте, который `key` не пересоздаёт.
-         */
-        <ConversationPane
-          key={activeConversation.id}
-          conversation={activeConversation}
-          currentUserId={currentUserId}
-          history={history}
-          centrifugoUrl={centrifugoUrl}
-          issueTicket={issueTicket}
-          sendReceipts={sendReceipts}
-          createCentrifuge={createCentrifuge}
-          pending={pendingForActive}
-          // Беседа известна **здесь**, а не в композере: `enqueue` требует
-          // беседу, а композер о беседах не знает вовсе — он знает только имя
-          // собеседника для подсказки в поле.
-          onSend={(text) => outbox.enqueue(activeConversation.id, text)}
-          onUnreadPublication={onUnreadPublication}
-          onReconcile={refresh}
-          // Лента сообщает о себе — очередь этим пользуется, чтобы вложить ответ
-          // в **свою** беседу (довод у `FeedEntry`).
-          onFeedReady={attachFeed}
-          // Обратное движение: подтверждённое дошло до ленты — снять запись.
-          // Снимает очередь, а решает лента: вопрос «что подтверждено» знает
-          // `eventMerge`, вопрос «что снять» — `confirmedClientIds`.
-          onConfirmed={outbox.settle}
+    <>
+      <MessengerLayout
+        sidebar={
+          <ConversationSidebar
+            conversations={merged}
+            activeConversationId={activeConversation?.id ?? null}
+            currentUser={currentUser}
+            onSelectConversation={setActiveId}
+            // Проп передан — кнопка новой беседы **есть** (D10). До этого среза
+            // он оставался непереданным, и кнопки не существовало вовсе: не
+            // «спрятана», а не нарисована.
+            onNewConversation={() => setCreatingConversation(true)}
+          />
+        }
+      >
+        {activeConversation === null ? (
+          // Шапки нет: шапка — утверждение о выбранной беседе, а её нет.
+          <div className="flex flex-1 items-center justify-center px-6 text-center">
+            <p className="text-sm text-text-warm-secondary">No conversations</p>
+          </div>
+        ) : (
+          /**
+           * `key` ставит **владелец выбора беседы**, и стоит он над компонентом,
+           * который держит хук, а не внутри него.
+           *
+           * Отступление от буквы плана названо: там `key` стоит на самом
+           * `ChatPage`, а выбор беседы живёт в `App`. Вынести его туда значило бы
+           * переписать `App` (состояние выбора плюс сайдбар) и не добавить ни
+           * одного наблюдаемого свойства — требование («смена беседы сбрасывает
+           * состояние ленты») исполнено ровно так же, потому что React
+           * пересоздаёт по `key` **родительский** элемент. `key`, написанный
+           * внутри самого `ChatPage`, собственный state хука не сбросил бы: тот
+           * живёт в том же компоненте, который `key` не пересоздаёт.
+           */
+          <ConversationPane
+            key={activeConversation.id}
+            conversation={activeConversation}
+            currentUserId={currentUserId}
+            history={history}
+            centrifugoUrl={centrifugoUrl}
+            issueTicket={issueTicket}
+            sendReceipts={sendReceipts}
+            createCentrifuge={createCentrifuge}
+            pending={pendingForActive}
+            // Беседа известна **здесь**, а не в композере: `enqueue` требует
+            // беседу, а композер о беседах не знает вовсе — он знает только имя
+            // собеседника для подсказки в поле.
+            //
+            // Строка списка двигается **в момент нажатия**, с пометкой «ещё не
+            // подтверждено» (D13): человек уже написал, и список, ждущий сервера,
+            // показывал бы старое превью под только что отправленным текстом.
+            onSend={(text) => {
+              outbox.enqueue(activeConversation.id, text)
+              touchConversation(activeConversation.id, text, true)
+            }}
+            onUnreadPublication={onUnreadPublication}
+            onReconcile={refresh}
+            // Лента сообщает о себе — очередь этим пользуется, чтобы вложить ответ
+            // в **свою** беседу (довод у `FeedEntry`).
+            onFeedReady={attachFeed}
+            // Обратное движение: подтверждённое дошло до ленты — снять запись.
+            // Снимает очередь, а решает лента: вопрос «что подтверждено» знает
+            // `eventMerge`, вопрос «что снять» — `confirmedClientIds`.
+            onConfirmed={outbox.settle}
+          />
+        )}
+      </MessengerLayout>
+      {/*
+        Диалог — **вне** раскладки и вне панели беседы: панель пересоздаётся по
+        `key` при смене беседы, а диалог закрывается сам, по факту создания, и
+        перерисовка панели его бы закрыла раньше.
+      */}
+      {creatingConversation && (
+        <NewConversationDialog
+          searchUser={searchUser}
+          createConversation={createConversation}
+          onCreated={handleConversationCreated}
+          onClose={() => setCreatingConversation(false)}
         />
       )}
-    </MessengerLayout>
+    </>
   )
 }
 

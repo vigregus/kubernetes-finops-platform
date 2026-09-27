@@ -136,6 +136,16 @@ function shell(state: BootState, api: HistoryApi = historyApi) {
     sendMessage: async () => {
       throw new Error("эти тесты не отправляют сообщений");
     },
+    // Поиск человека и создание беседы — операции той же природы, и здесь так же
+    // бросают: эти тесты предъявляют экраны загрузки, а до диалога не доходят.
+    // Молчаливая заглушка вернула бы «нашёлся кто-то безымянный», и тест,
+    // случайно дотянувшийся до диалога, прошёл бы на вымысле.
+    searchUser: async () => {
+      throw new Error("эти тесты не ищут людей");
+    },
+    createConversation: async () => {
+      throw new Error("эти тесты не создают бесед");
+    },
     outboxStore: createOutboxStore(),
     readCentrifugoUrl: () => "wss://rt.example.test/connection/websocket",
     issueTicket: async () => "ticket-for-the-hunt",

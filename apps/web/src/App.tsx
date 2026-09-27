@@ -1,6 +1,10 @@
 import { useMemo, useSyncExternalStore } from "react";
 import { adaptConversations } from "./features/conversations/adapter";
 import { ChatPage } from "./features/conversations/ChatPage";
+import type {
+  CreateConversation,
+  SearchUser,
+} from "./features/conversations/components/NewConversationDialog";
 import { LoginPage } from "./features/auth/LoginPage";
 import { adaptMe } from "./features/auth/me-adapter";
 import { TransientErrorScreen } from "./features/auth/components/TransientErrorScreen";
@@ -58,6 +62,22 @@ interface AppProps {
    */
   sendMessage: SendMessage;
   /**
+   * Поиск человека по адресу (`GET /users?email=`) — **операция**, как и
+   * `sendMessage`, и по той же причине: собрана в `main.tsx`, где живёт клиент.
+   *
+   * Между `App` и диалогом она транзитом: диалог — та точка, где человек
+   * называет собеседника, но собрать операцию из клиента API ему негде.
+   */
+  searchUser: SearchUser;
+  /**
+   * Создание личной беседы (`POST /conversations`) — операция оттуда же.
+   *
+   * Отдаёт модель API, а не модель интерфейса: адаптация идёт в `ChatPage`, где
+   * лежит `currentUserId`. Собирать беседу здесь значило бы завести второе
+   * место, знающее, как выглядит строка списка.
+   */
+  createConversation: CreateConversation;
+  /**
    * Хранилище очереди — **значением**, а не фабрикой: очередь обязана читать ту
    * же базу, в которую писала, а второй объект завёл бы второй круг
    * восстановления при монтировании.
@@ -113,6 +133,8 @@ export function App({
   refreshConversations,
   sendReceipts,
   sendMessage,
+  searchUser,
+  createConversation,
   outboxStore,
   readCentrifugoUrl,
   issueTicket,
@@ -160,6 +182,8 @@ export function App({
           refreshConversations={refreshConversations}
           sendReceipts={sendReceipts}
           sendMessage={sendMessage}
+          searchUser={searchUser}
+          createConversation={createConversation}
           outboxStore={outboxStore}
           readCentrifugoUrl={readCentrifugoUrl}
           issueTicket={issueTicket}
@@ -175,6 +199,8 @@ interface ReadyScreenProps {
   refreshConversations: () => Promise<ConversationListPage>;
   sendReceipts: SendReceipt;
   sendMessage: SendMessage;
+  searchUser: SearchUser;
+  createConversation: CreateConversation;
   outboxStore: OutboxStore;
   readCentrifugoUrl: () => string;
   issueTicket: RealtimeTicketIssuer;
@@ -187,6 +213,8 @@ function ReadyScreen({
   refreshConversations,
   sendReceipts,
   sendMessage,
+  searchUser,
+  createConversation,
   outboxStore,
   readCentrifugoUrl,
   issueTicket,
@@ -235,6 +263,8 @@ function ReadyScreen({
       refreshConversations={refreshConversations}
       sendReceipts={sendReceipts}
       sendMessage={sendMessage}
+      searchUser={searchUser}
+      createConversation={createConversation}
       outboxStore={outboxStore}
       currentUser={viewer.user}
       currentUserId={viewer.userId}

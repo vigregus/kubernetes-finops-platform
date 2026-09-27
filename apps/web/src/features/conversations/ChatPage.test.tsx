@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { MessageFromJSON } from "../../api/generated";
@@ -22,6 +22,7 @@ import type { OutgoingReceipt } from "../receipts/receiptWatermarks";
 import type { HistorySource, TailPage } from "../messages/history";
 import type { SyncPage, SyncPageResult } from "../messages/sync";
 import { ChatPage } from "./ChatPage";
+import type { CreateConversation, SearchUser } from "./components/NewConversationDialog";
 
 /**
  * Главная панель: **одна** дорога данных для любой беседы.
@@ -166,9 +167,26 @@ interface SetupOptions {
    * состояние, которого при таком сервере не бывает.
    */
   readonly sendMessage?: SendMessage;
+  /**
+   * Исход поиска человека. Не задан — отказ, по тому же доводу, что у
+   * `sendMessage`: удачный ответ в подарок показал бы диалог, дошедший до
+   * «нашёлся кто-то безымянный», то есть состояние, которого тест не называл.
+   */
+  readonly searchUser?: SearchUser;
+  /** Исход создания беседы. Не задан — отказ, ровно как у поиска. */
+  readonly createConversation?: CreateConversation;
 }
 
-function setup({ conversations, tail, loadPage, refresh, sendReceipts, sendMessage }: SetupOptions) {
+function setup({
+  conversations,
+  tail,
+  loadPage,
+  refresh,
+  sendReceipts,
+  sendMessage,
+  searchUser,
+  createConversation,
+}: SetupOptions) {
   const fake = givenFakeCentrifuge();
   const tickets = givenTicketIssuer();
   const calls = {
@@ -190,6 +208,16 @@ function setup({ conversations, tail, loadPage, refresh, sendReceipts, sendMessa
      * (D4) — «тот же самый на второй попытке» видно только по нему.
      */
     sent: [] as SendMessageRequest[],
+    /**
+     * Набранные адреса, ушедшие в поиск, и подтверждённые `user_id`, ушедшие в
+     * создание, — порознь.
+     *
+     * Разделены не для симметрии: мутация «диалог создаёт беседу до
+     * подтверждения» различима **только** по тому, что второго списка коснулись
+     * без нажатия на подтверждение, — а первый при этом заполнен законно.
+     */
+    searches: [] as string[],
+    created: [] as string[],
   };
 
   const history: HistorySource = {
@@ -243,6 +271,27 @@ function setup({ conversations, tail, loadPage, refresh, sendReceipts, sendMessa
    */
   const outboxStore = createOutboxStore();
 
+  // Поиск и создание — устойчивыми ссылками, как `submit` выше: диалог живёт
+  // ровно столько, сколько его показывают, но ссылка на операцию успевает
+  // попасть в замыкание `search()`, и смена её на рендере дала бы вторую попытку
+  // по тому же адресу.
+  //
+  // Исход по умолчанию — отказ: молчаливый успех вернул бы `UserLookup` без
+  // полей, и диалог показал бы «Start chat with undefined?».
+  const lookup: SearchUser = (email) => {
+    calls.searches.push(email);
+
+    return searchUser ? searchUser(email) : Promise.reject(new Error("эти тесты не ищут людей"));
+  };
+
+  const startChat: CreateConversation = (participantId) => {
+    calls.created.push(participantId);
+
+    return createConversation
+      ? createConversation(participantId)
+      : Promise.reject(new Error("эти тесты не создают бесед"));
+  };
+
   // Собирается функцией, а не литералом на месте: повтор загрузки приносит
   // **тот же** компонент с другим списком, и собрать его вторым литералом
   // значило бы разойтись с первым на первой же правке пропсов.
@@ -257,6 +306,8 @@ function setup({ conversations, tail, loadPage, refresh, sendReceipts, sendMessa
       issueTicket={tickets.issueTicket}
       sendReceipts={send}
       sendMessage={submit}
+      searchUser={lookup}
+      createConversation={startChat}
       outboxStore={outboxStore}
       createCentrifuge={fake.factory}
     />
@@ -858,6 +909,144 @@ describe("композер в дереве: человек производит 
 });
 
 /**
+ * Время суток в строке списка — «14:22».
+ *
+ * Значение **не пинуется**, и это не небрежность: часы здесь настоящие —
+ * `ChatPage` зовёт `withSentPreview` без опций форматирования (`new Date()` в
+ * момент отправки), в отличие от юнита адаптера, где и момент, и зона приходят
+ * параметрами. Проверяемое здесь свойство — **появление** отметки у строки, у
+ * которой её не было, а не её значение.
+ */
+const TIME_OF_DAY = /\d{1,2}:\d{2}/;
+
+/**
+ * Строка списка отражает **своё** сообщение — от отправки, а не от `message.created`.
+ *
+ * Предмет — не «превью обновилось», а **чем** оно обновилось и **когда**: событие
+ * доставляется best-effort (та же посылка, что у сверки), и строка, ждущая его,
+ * показывала бы старое превью под только что отправленным текстом. Поэтому
+ * порядок, превью и время читаются **до** ответа сервера — в окне между нажатием
+ * и ответом, которое здесь открывается отложенным промисом, — а не после.
+ *
+ * Второй предмет — то, чего строка **не** делает: своё сообщение числа
+ * непрочитанного не заводит и не двигает. Проверяется в двух точках, и они не
+ * повторяют друг друга: у беседы без числа отправка не должна родить ноль, а у
+ * беседы с числом — ни сбросить его, ни прибавить единицу.
+ */
+describe("строка списка обновляется отправкой, а не событием", () => {
+  it("превью, время и порядок двигаются в момент нажатия, с пометкой до ответа", async () => {
+    // Беседа для отправки — **без сообщений**: у неё нет ни превью, ни времени,
+    // и оба появляются ровно от отправки. На беседе с историей то же утверждение
+    // неотличимо от «превью было и осталось прежним».
+    const answer = deferred<Message>();
+    const { container, calls, unread } = setup({
+      conversations: [ANNA, MARCUS_NO_MESSAGES],
+      sendMessage: () => answer.promise,
+    });
+
+    /** Порядок строк — по производственному атрибуту: он и есть то, что видит человек. */
+    const order = () =>
+      [...container.querySelectorAll("[data-conversation-id]")].map((item) =>
+        item.getAttribute("data-conversation-id"),
+      );
+    const row = (id: string) =>
+      container.querySelector(`[data-conversation-id="${id}"]`) as HTMLElement;
+    /**
+     * Пометка «ещё не подтверждено» читается **по наличию атрибута**, а не по его
+     * значению: снятая пометка убирает ключ из модели, и React тогда атрибута не
+     * пишет вовсе. `"false"` означало бы, что пометку не сняли, а переставили, —
+     * третье состояние, которого в модели нет.
+     */
+    const pendingMark = (id: string) =>
+      row(id).querySelector("[data-preview-pending]")?.getAttribute("data-preview-pending") ??
+      null;
+
+    // Отправляем во **вторую** беседу: у первой строка уже наверху, и «уехала
+    // наверх» на ней неотличимо от «осталась на месте».
+    fireEvent.click(row("c2"));
+    await waitFor(() =>
+      expect(container.querySelector("[data-composer-input]")).toBeTruthy(),
+    );
+
+    expect(order()).toEqual(["c1", "c2"]);
+    expect(pendingMark("c2")).toBeNull();
+    expect(within(row("c2")).getByText("No messages yet")).toBeTruthy();
+    expect(row("c2").textContent).not.toMatch(TIME_OF_DAY);
+    expect(unread("c2")).toBeNull();
+
+    fireEvent.change(container.querySelector("[data-composer-input]")!, {
+      target: { value: "Hello Marcus" },
+    });
+    fireEvent.click(container.querySelector("[data-composer-send]")!);
+
+    await waitFor(() => expect(calls.sent).toHaveLength(1));
+
+    // Ответ ещё в пути — а строка уже обновлена: строка уехала наверх, превью
+    // сменилось, время появилось. Ждать `message.created` (или ответа) значило
+    // бы показывать человеку старое превью под его же отправленным текстом.
+    expect(order()).toEqual(["c2", "c1"]);
+    expect(pendingMark("c2")).toBe("true");
+    expect(within(row("c2")).getByText("Hello Marcus")).toBeTruthy();
+    expect(row("c2").textContent).toMatch(TIME_OF_DAY);
+    // Числа непрочитанного отправка не завела: ни единицы, ни нуля. Сервер его
+    // не называл, а своё сообщение непрочитанным не бывает — `0` здесь был бы
+    // утверждением, которого никто не делал.
+    expect(unread("c2")).toBeNull();
+
+    await act(async () => {
+      answer.resolve(replyOf("c2", 1, calls.sent[0].clientMessageId, "Hello Marcus"));
+    });
+
+    // Ответ снимает **пометку**, а не строку: превью на месте, но оно уже
+    // подтверждено — и порядок от снятия пометки не поехал.
+    expect(pendingMark("c2")).toBeNull();
+    expect(within(row("c2")).getByText("Hello Marcus")).toBeTruthy();
+    expect(order()).toEqual(["c2", "c1"]);
+  });
+
+  it("число непрочитанного отправка не двигает: 3 остаётся 3", async () => {
+    // Строка **с числом** — вторая точка того же утверждения, и она не
+    // повторение первой: там числа не было вовсе, и «отправка не тронула число»
+    // на ней неотличимо от «отправка сбросила его в ноль». Здесь сброс виден.
+    const answer = deferred<Message>();
+    const { container, calls, unread } = setup({
+      conversations: [conversationOf({ ...ANNA, unreadCount: 3 })],
+      sendMessage: () => answer.promise,
+    });
+
+    const row = (id: string) =>
+      container.querySelector(`[data-conversation-id="${id}"]`) as HTMLElement;
+    const pendingMark = () =>
+      row("c1").querySelector("[data-preview-pending]")?.getAttribute("data-preview-pending") ??
+      null;
+
+    await waitFor(() =>
+      expect(container.querySelector("[data-composer-input]")).toBeTruthy(),
+    );
+    expect(unread("c1")).toBe("3");
+
+    fireEvent.change(container.querySelector("[data-composer-input]")!, {
+      target: { value: "Hello Anna" },
+    });
+    fireEvent.click(container.querySelector("[data-composer-send]")!);
+
+    await waitFor(() => expect(calls.sent).toHaveLength(1));
+
+    // Своё сообщение непрочитанным не бывает: число остаётся тем, каким его
+    // назвал сервер, — не растёт и не гаснет.
+    expect(pendingMark()).toBe("true");
+    expect(unread("c1")).toBe("3");
+
+    await act(async () => {
+      answer.resolve(replyOf("c1", 1, calls.sent[0].clientMessageId, "Hello Anna"));
+    });
+
+    expect(pendingMark()).toBeNull();
+    expect(unread("c1")).toBe("3");
+  });
+});
+
+/**
  * Квитанция **вкладки**: что она сообщила и когда (D6).
  *
  * Проверяется не «отправка случилась», а **что именно** ушло: два числа живут по
@@ -1094,10 +1283,15 @@ function confirmedIdOf(seq: number): string {
  * именно им (`confirmedClientIds`), и тест, подставивший сюда своё значение,
  * проверял бы совпадение с самим собой.
  */
-function replyOf(seq: number, clientMessageId: string, text: string): Message {
+function replyOf(
+  conversationId: string,
+  seq: number,
+  clientMessageId: string,
+  text: string,
+): Message {
   return MessageFromJSON({
     message_id: confirmedIdOf(seq),
-    conversation_id: ANNA.id,
+    conversation_id: conversationId,
     seq,
     sender_id: VIEWER_ID,
     client_message_id: clientMessageId,
@@ -1180,7 +1374,7 @@ describe("сведение отправленного: ответ, событи�
     expect(calls.sent).toHaveLength(1);
 
     await act(async () => {
-      answer.resolve(replyOf(2, calls.sent[0].clientMessageId, "Hello Anna"));
+      answer.resolve(replyOf(ANNA.id, 2, calls.sent[0].clientMessageId, "Hello Anna"));
     });
 
     // Запись снята **появлением подтверждённого в ленте**: ни события, ни
@@ -1225,7 +1419,7 @@ describe("сведение отправленного: ответ, событи�
     // Ответ приходит **вторым** — и второго сообщения не заводит: запись с тем
     // же `message_id` уже лежит, и `applyMessage` называет это `duplicate`.
     await act(async () => {
-      answer.resolve(replyOf(2, calls.sent[0].clientMessageId, "Hello Anna"));
+      answer.resolve(replyOf(ANNA.id, 2, calls.sent[0].clientMessageId, "Hello Anna"));
     });
 
     expect(container.querySelectorAll("[data-message-seq]")).toHaveLength(2);
@@ -1293,7 +1487,7 @@ describe("сведение отправленного: ответ, событи�
     await waitFor(() => expect(calls.sent).toHaveLength(1));
 
     await act(async () => {
-      answer.resolve(replyOf(3, calls.sent[0].clientMessageId, "Hello Anna"));
+      answer.resolve(replyOf(ANNA.id, 3, calls.sent[0].clientMessageId, "Hello Anna"));
     });
 
     // Догрузка пошла — это и есть признак того, что разрыв распознан.

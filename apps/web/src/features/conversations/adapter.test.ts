@@ -6,7 +6,13 @@ import type {
   Message as MessageDto,
   UserSummary,
 } from "../../api/generated"
-import { adaptConversation, adaptConversations } from "./adapter"
+import {
+  adaptConversation,
+  adaptConversations,
+  withSentPreview,
+  type Conversation,
+  type SentPreview,
+} from "./adapter"
 
 /**
  * Часы и зона — параметры, а не момент и место прогона: иначе проверка
@@ -344,5 +350,187 @@ describe("состояние чтения собеседника", () => {
 
     expect(result.peerUserId).toBeUndefined()
     expect(result.peerReadState).toBeUndefined()
+  })
+})
+
+describe("строка списка обновляется отправкой, а не событием", () => {
+  /**
+   * Момент отправки — свой у каждого вызова, и это не украшение: он доказывает,
+   * что время берётся **из аргумента**, а не запоминается один раз. Тест с одной
+   * датой прошёл бы и на функции, читающей часы один раз на монтирование.
+   */
+  const SENT_AT = new Date("2026-09-20T17:55:00Z")
+  const LATER = new Date("2026-09-20T17:58:00Z")
+
+  /**
+   * Три строки, а не две: на двух «порядок остальных сохранён» — утверждение о
+   * списке из одного элемента, то есть тавтология. Уезжает третья, и видно, что
+   * первые две остались в своём порядке, а не пересобрались заодно.
+   */
+  function rows(): Conversation[] {
+    return [
+      adapt(conversation()),
+      adapt(
+        conversation({
+          conversationId: "c2",
+          participants: [person(VIEWER, "David Miller"), MARCUS_SUMMARY],
+        }),
+      ),
+      adapt(
+        conversation({
+          conversationId: "c3",
+          type: "group",
+          participants: [person(VIEWER, "David Miller"), ANNA_SUMMARY, MARCUS_SUMMARY],
+        }),
+      ),
+    ]
+  }
+
+  function ids(list: readonly Conversation[]): string[] {
+    return list.map((row) => row.id)
+  }
+
+  /**
+   * Часы и зона — те же `EN`/`UTC`, что у прочих проверок файла.
+   *
+   * Время здесь — display-строка, и без пинованной зоны «17:55» зеленело бы или
+   * краснело по тому, в какой зоне оказалась машина с тестами.
+   */
+  function sent(conversations: readonly Conversation[], preview: SentPreview): Conversation[] {
+    return withSentPreview(conversations, preview, EN)
+  }
+
+  it("превью, время и «есть сообщения» приходят от отправки, до всякого события", () => {
+    // Предмет D13: событие — ускорение, а не условие. Публикация best-effort, и
+    // при потерянной публикации строка осталась бы со старым превью — человек
+    // видел бы «ничего не отправлено» там, где отправлено.
+    const [anna] = sent(rows(), {
+      conversationId: "c1",
+      text: "Hello Anna",
+      at: SENT_AT,
+      pending: false,
+    })
+
+    expect(anna!.lastMessagePreview).toBe("Hello Anna")
+    // Display-строка, а не ISO: её читает `ConversationListItem`, и подстановка
+    // `toISOString()` дала бы в разметке «2026-09-20T17:55:00.000Z».
+    expect(anna!.lastMessageTimestamp).toBe("17:55")
+    // Признак, а не вывод из непустого превью: беседа, у которой сообщений не
+    // было, теперь их имеет — и говорит это тем же ключом, что сервер.
+    expect(anna!.hasMessages).toBe(true)
+  })
+
+  it("отправленное в беседу без сообщений перестаёт быть беседой без сообщений", () => {
+    // До отправки строка кормит ветку `isEmpty` («No messages yet») пустым
+    // превью — и это правда о ней. После отправки правдой становится обратное.
+    const before = rows()[1]!
+
+    expect(before.hasMessages).toBe(false)
+    expect(before.lastMessagePreview).toBe("")
+
+    const after = sent(rows(), {
+      conversationId: "c2",
+      text: "Hello Marcus",
+      at: SENT_AT,
+      pending: false,
+    })[0]!
+
+    expect(after.id).toBe("c2")
+    expect(after.hasMessages).toBe(true)
+    expect(after.lastMessagePreview).toBe("Hello Marcus")
+  })
+
+  it("пометка неподтверждённого ставится ключом, а снимается отсутствием ключа", () => {
+    // `pending: false` не пишется в модель — иначе у строки было бы третье
+    // состояние вместо второго: непомеченная строка обязана быть **неотличима**
+    // от всякой другой, а не нести `pendingPreview: false`. Проверяется
+    // наличием ключа, а не значением: `toBe(false)` прошёл бы и на `false`, и на
+    // `undefined`, то есть не различил бы этих двух моделей.
+    const pendingRow = sent(rows(), {
+      conversationId: "c1",
+      text: "Hello Anna",
+      at: SENT_AT,
+      pending: true,
+    })[0]!
+
+    expect(pendingRow.pendingPreview).toBe(true)
+    expect("pendingPreview" in pendingRow).toBe(true)
+
+    const confirmedRow = sent([pendingRow], {
+      conversationId: "c1",
+      text: "Hello Anna",
+      at: LATER,
+      pending: false,
+    })[0]!
+
+    expect("pendingPreview" in confirmedRow).toBe(false)
+    // Время переставлено вторым вызовом — то есть берётся из аргумента каждый
+    // раз, а не запомнено с первого.
+    expect(confirmedRow.lastMessageTimestamp).toBe("17:58")
+  })
+
+  it("своё сообщение непрочитанного не прибавляет — ни числа, ни нуля", () => {
+    // Прибавление здесь было бы утверждением «вы написали себе». Отсутствие
+    // счётчика при этом остаётся отсутствием: `0` объявил бы «всё прочитано»
+    // о беседе, о которой сервер молчал.
+    const withCount = adapt(conversation({ unreadCount: 3 }))
+    const withoutCount = adapt(conversation())
+
+    const result = sent([withCount, withoutCount], {
+      conversationId: "c1",
+      text: "Hello Anna",
+      at: SENT_AT,
+      pending: false,
+    })
+
+    expect(result[0]!.unreadCount).toBe(3)
+    expect(result[1]!.unreadCount).toBeUndefined()
+  })
+
+  it("надгробие снимается своим сообщением: удалённым своё быть не может", () => {
+    // Иначе строка осталась бы с «Message deleted» поверх собственного текста —
+    // то есть показала бы удалённым то, что человек только что написал.
+    const tombstone = adapt(
+      conversation({ lastMessage: message({ deletedAt: "2026-09-20T14:30:00Z", payload: { text: "старое" } }) }),
+    )
+
+    expect(tombstone.previewDeleted).toBe(true)
+
+    const result = sent([tombstone], {
+      conversationId: "c1",
+      text: "Hello Anna",
+      at: SENT_AT,
+      pending: false,
+    })[0]!
+
+    expect(result.previewDeleted).toBe(false)
+    expect(result.lastMessagePreview).toBe("Hello Anna")
+  })
+
+  it("строка уезжает наверх, а порядок остальных сохраняется", () => {
+    const result = sent(rows(), {
+      conversationId: "c3",
+      text: "Hello both",
+      at: SENT_AT,
+      pending: false,
+    })
+
+    expect(ids(result)).toEqual(["c3", "c1", "c2"])
+  })
+
+  it("беседы, которой сервер не называл, в списке не появляется", () => {
+    // Строка для незнакомой беседы утверждала бы о ней больше, чем известно:
+    // ни имени собеседника, ни участников у `withSentPreview` нет, и собрать
+    // из отправки полноценную строку нечем. Новую беседу кладёт в список
+    // `ChatPage` по ответу создания — это другое место и другой довод.
+    const result = sent(rows(), {
+      conversationId: "c9",
+      text: "Hello nobody",
+      at: SENT_AT,
+      pending: false,
+    })
+
+    expect(ids(result)).toEqual(["c1", "c2", "c3"])
+    expect(result.some((row) => row.id === "c9")).toBe(false)
   })
 })
