@@ -3,13 +3,20 @@ import { createRoot } from "react-dom/client";
 import "./index.css";
 import App from "./App.tsx";
 import { createApiClient } from "./api/client";
-import { AuthApi, ConversationsApi, MessagesApi } from "./api/generated";
+import {
+  AuthApi,
+  ConversationsApi,
+  MessagesApi,
+  SendMessageRequestTypeEnum,
+} from "./api/generated";
 import { createRealtimeTicketIssuer } from "./api/realtimeToken";
 import { bootStateOf, completeLogin } from "./features/auth/callback";
 import { ensureDeviceId, loadDeviceId, saveDeviceId } from "./features/auth/deviceId";
 import { CALLBACK_PATH } from "./features/auth/session";
 import { createSessionState } from "./features/auth/sessionState";
 import type { HistoryApi } from "./features/messages/history";
+import { createOutboxStore, type OutboxStore } from "./features/messages/outbox/outboxStore";
+import type { SendMessage } from "./features/messages/outbox/useOutbox";
 import type { SendReceipt } from "./features/receipts/useReceipts";
 import { loadRuntimeConfig } from "./runtime-config";
 
@@ -100,6 +107,48 @@ const sendReceipts: SendReceipt = (conversationId, receipt) =>
     setReceiptsRequest: { ...receipt },
   });
 
+/**
+ * Отправка сообщения (`POST /conversations/{id}/messages`) — операция рядом с
+ * квитанцией и по той же причине: у очереди нет ни адреса, ни токена.
+ *
+ * `clientMessageId` **приходит сюда**, а не чеканится здесь, и это не
+ * перекладывание работы: идентификатор принадлежит **логической** отправке, а не
+ * попытке, и чеканит его тот, кто умеет повторить, — очередь (`D4`). Заведись он
+ * в этой обёртке, повтор получил бы свежий UUID, и в Postgres легли бы две
+ * строки вместо одной.
+ *
+ * `type` — литерал из сгенерированного перечисления, а не строка `"text"`:
+ * сужение здесь проверяется `tsc -b`, а строку компилятор пропустил бы, и
+ * расхождение с контрактом всплыло бы отказом сервера на живом стенде.
+ */
+const sendMessage: SendMessage = (request) =>
+  messagesApi.sendMessage({
+    conversationId: request.conversationId,
+    sendMessageRequest: {
+      clientMessageId: request.clientMessageId,
+      type: SendMessageRequestTypeEnum.Text,
+      payload: { text: request.text },
+    },
+  });
+
+/**
+ * Хранилище очереди — одна константа на приложение, а не по объекту на панель.
+ *
+ * Открытие базы стоит денег, а читать её очередь обязана **один раз на
+ * монтирование**: второй объект дал бы второй круг восстановления, и запись
+ * восстановилась бы дважды (безопасно, но лишним запросом).
+ *
+ * **Названное отступление от `D7`.** Требование «выход из системы чистит очередь
+ * целиком» здесь **не исполнено**, и не по недосмотру: выхода из системы в
+ * приложении нет вовсе — ни кнопки, ни операции. `CurrentUserFooter` рисует
+ * только настройки, `SessionsApi.revokeSession` зовётся лишь из вычеркнутой
+ * страницы, а `App` не имеет даже пропа `onSignOut`. Поэтому `clearForLogout`
+ * остаётся без вызова, а заведение выхода — отдельная работа (кнопка, операция,
+ * возврат в Keycloak), которая в объём этого гейта не входит. Названо вслух,
+ * чтобы отсутствие вызова не выглядело забывчивостью.
+ */
+const outboxStore: OutboxStore = createOutboxStore();
+
 async function start(): Promise<void> {
   // Идентификатор заводится **до** первого запроса — и до ветки: на `/callback`
   // первым запросом идёт обмен, и он тоже обязан нести `X-Device-Id`, иначе
@@ -154,6 +203,8 @@ createRoot(document.getElementById("root")!).render(
       historyApi={historyApi}
       refreshConversations={refreshConversations}
       sendReceipts={sendReceipts}
+      sendMessage={sendMessage}
+      outboxStore={outboxStore}
       readCentrifugoUrl={readCentrifugoUrl}
       issueTicket={issueTicket}
     />

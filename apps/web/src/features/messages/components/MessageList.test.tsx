@@ -14,7 +14,7 @@ import {
   installObserverForJsdom,
   restoreIntersectionObserver,
 } from "../../../test-support/intersectionObserver";
-import type { ChatMessage, MessageDeliveryState } from "../../../shared/lib/types";
+import type { ChatMessage, MessageDeliveryState, PendingMessage } from "../../../shared/lib/types";
 import { MessageList } from "./MessageList";
 
 function messageOf(seq: number): ChatMessage {
@@ -37,6 +37,7 @@ function renderList(
   appliedThroughSeq: number | null,
   messages: ChatMessage[] = [],
   onVisibleThroughSeq?: (seq: number) => void,
+  pending: PendingMessage[] = [],
 ) {
   const view = render(
     <MessageList
@@ -44,6 +45,7 @@ function renderList(
       conversationName="Anna Petrova"
       appliedThroughSeq={appliedThroughSeq}
       onVisibleThroughSeq={onVisibleThroughSeq}
+      pending={pending}
     />,
   );
 
@@ -53,6 +55,27 @@ function renderList(
     ...view,
     boundary: root?.getAttribute("data-applied-through-seq") ?? null,
     rows: [...view.container.querySelectorAll("[data-message-seq]")],
+    queued: [...view.container.querySelectorAll("[data-pending-client-id]")],
+  };
+}
+
+/**
+ * Запись очереди — в том виде, в каком её заводит `useOutbox` в момент нажатия.
+ *
+ * Номера в беседе у неё **нет вовсе**, и это не упущение фикстуры: `seq`
+ * выдаёт сервер, а запись живёт до его ответа. Поэтому поля `seq` здесь не
+ * появится ни в одной ветке — иначе тест проверял бы состояние, недостижимое
+ * по типу.
+ */
+function queuedOf(clientMessageId: string, state: PendingMessage["state"] = "sending"): PendingMessage {
+  return {
+    clientMessageId,
+    conversationId: "c1",
+    text: `queued ${clientMessageId}`,
+    createdAt: 1_700_000_000_000,
+    state,
+    attemptCount: 0,
+    lastAttemptAt: null,
   };
 }
 
@@ -170,9 +193,10 @@ function renderObserved(
   appliedThroughSeq: number | null,
   messages: ChatMessage[],
   onVisibleThroughSeq: (seq: number) => void,
+  pending: PendingMessage[] = [],
 ) {
   installObserverForJsdom();
-  const view = renderList(appliedThroughSeq, messages, onVisibleThroughSeq);
+  const view = renderList(appliedThroughSeq, messages, onVisibleThroughSeq, pending);
 
   return { ...view, observer: FakeIntersectionObserver.latest };
 }
@@ -293,4 +317,91 @@ describe("состояние доставки видно в разметке", (
 
     expect(rows[0]!.getAttribute("data-message-state")).toBeNull();
   })
+});
+
+// Оптимистичная запись живёт в ленте **рядом** с подтверждёнными, но не в них:
+// у неё нет номера в беседе, и требование 16 («запись не попадает в квитанцию»)
+// исполняется здесь структурой, а не договорённостью.
+//
+// Проверка нарочно смотрит на то, что видит **наблюдатель**, а не на разметку:
+// `querySelectorAll("[data-message-seq]")` показал бы, что атрибута нет, но
+// молчал бы о том, что запись всё-таки попала в наблюдение другим путём. Ошибка
+// ровно этого класса и делает `read_seq = 1` на непрочитанном сообщении.
+describe("запись очереди — в ленте, но не в беседе", () => {
+  it("строка очереди несёт client_message_id и текст, а номера не несёт", () => {
+    const { rows, queued } = renderList(
+      2,
+      [messageOf(1), messageOf(2)],
+      undefined,
+      [queuedOf("cm-1")],
+    );
+
+    // Две подтверждённые строки — и только они несут номер. Запись идёт третьей
+    // и в этот счёт не входит: `seq` выдаёт сервер, и до его ответа номера нет.
+    expect(rows.map((row) => row.getAttribute("data-message-seq"))).toEqual(["1", "2"]);
+    // Тождество записи — `client_message_id`: им сервер узнаёт повтор, и им же
+    // запись снимается, когда подтверждённая доедет до ленты.
+    expect(queued.map((row) => row.getAttribute("data-pending-client-id"))).toEqual(["cm-1"]);
+    expect(queued[0]!.textContent).toContain("queued cm-1");
+  });
+
+  it("наблюдатель видимости запись очереди не видит вовсе", () => {
+    // Это и есть требование 16 в исполнении. Наблюдатель набирает цели по
+    // `[data-message-seq]`; попади запись в это множество — её номер уехал бы в
+    // `read_seq`, то есть вкладка объявила бы прочитанным то, чего сервер ещё
+    // не подтвердил, а собеседник увидел бы квитанцию о несуществующем письме.
+    const seen: number[] = [];
+    const { rows, observer } = renderObserved(
+      2,
+      [messageOf(1), messageOf(2)],
+      (seq) => seen.push(seq),
+      [queuedOf("cm-1")],
+    );
+
+    const targets = [...observer.targets];
+
+    expect(targets).toHaveLength(2);
+    expect(targets.every((target) => target.getAttribute("data-message-seq") !== null)).toBe(true);
+    expect(targets.some((target) => target.getAttribute("data-pending-client-id") !== null)).toBe(
+      false,
+    );
+
+    // И подтверждение того же факта с другой стороны: уйдя из окна, запись не
+    // двигает границу ни вперёд (её нет среди наблюдаемых), ни назад.
+    observer.intersectSeq(2, 1);
+    observer.intersectSeq(1, 1);
+
+    expect(seen).toEqual([2]);
+    expect(rows).toHaveLength(2);
+  });
+
+  it("состояние записи видно в разметке тем же словом, что читает приёмка", () => {
+    // Записи принадлежат ровно три состояния (`sending`, `retrying`, `failed`) —
+    // те самые, что `G3-007` D6 называл недостижимыми. Здесь они произведены
+    // очередью, и `data-message-state` несёт их так же, как у подтверждённых:
+    // приёмка читает состояния, а не догадывается по виду строки.
+    const { queued } = renderList(2, [messageOf(1), messageOf(2)], undefined, [
+      queuedOf("cm-1", "sending"),
+      queuedOf("cm-2", "retrying"),
+      queuedOf("cm-3", "failed"),
+    ]);
+
+    expect(queued.map((row) => row.getAttribute("data-message-state"))).toEqual([
+      "sending",
+      "retrying",
+      "failed",
+    ]);
+    expect(queued[2]!.textContent).toContain("Not sent");
+  });
+
+  it("лента с одной лишь записью очереди не выдаёт себя за пустой снимок", () => {
+    // Запись — это сообщение человека, пусть и не подтверждённое. Утверждать
+    // «No messages yet» при ней значило бы стереть написанное с экрана раньше,
+    // чем его стёр сервер, — а «Loading messages…» показывалось бы вечно.
+    const { container, queued } = renderList(0, [], undefined, [queuedOf("cm-1")]);
+
+    expect(queued).toHaveLength(1);
+    expect(container.textContent).not.toContain("No messages yet");
+    expect(container.textContent).not.toContain("Loading messages…");
+  });
 });

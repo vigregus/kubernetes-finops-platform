@@ -11,6 +11,8 @@ import {
 } from "../../test-support/intersectionObserver";
 import type { ChatMessage } from "../../shared/lib/types";
 import type { Conversation } from "../../shared/lib/types";
+import { createOutboxStore } from "../messages/outbox/outboxStore";
+import type { SendMessage, SendMessageRequest } from "../messages/outbox/useOutbox";
 import type { OutgoingReceipt } from "../receipts/receiptWatermarks";
 import type { HistorySource, TailPage } from "../messages/history";
 import type { SyncPage, SyncPageResult } from "../messages/sync";
@@ -150,9 +152,18 @@ interface SetupOptions {
    * проверял бы удачный транспорт, ничего о нём не зная.
    */
   readonly sendReceipts?: (conversationId: string, receipt: OutgoingReceipt) => Promise<unknown>;
+  /**
+   * Исход отправки сообщения. Не задан — отправки нет вовсе: попытка падает, и
+   * это **названный** отказ, а не пустой успех.
+   *
+   * Пустой успех был бы хуже молчания: он снял бы запись из очереди и оставил
+   * бы ленту без подтверждения — то есть тест, не назвавший исход, показывал бы
+   * состояние, которого при таком сервере не бывает.
+   */
+  readonly sendMessage?: SendMessage;
 }
 
-function setup({ conversations, tail, loadPage, refresh, sendReceipts }: SetupOptions) {
+function setup({ conversations, tail, loadPage, refresh, sendReceipts, sendMessage }: SetupOptions) {
   const fake = givenFakeCentrifuge();
   const tickets = givenTicketIssuer();
   const calls = {
@@ -167,6 +178,13 @@ function setup({ conversations, tail, loadPage, refresh, sendReceipts }: SetupOp
      * одному запросу.
      */
     receipts: [] as Array<{ conversationId: string; receipt: OutgoingReceipt }>,
+    /**
+     * Ушедшие попытки отправки — вместе с `clientMessageId`, которым их послали.
+     *
+     * Идентификатор здесь, а не только текст: он и есть предмет проверки повтора
+     * (D4) — «тот же самый на второй попытке» видно только по нему.
+     */
+    sent: [] as SendMessageRequest[],
   };
 
   const history: HistorySource = {
@@ -195,6 +213,31 @@ function setup({ conversations, tail, loadPage, refresh, sendReceipts }: SetupOp
     return sendReceipts ? sendReceipts(conversationId, receipt) : Promise.resolve();
   };
 
+  // Отправка — устойчивой ссылкой, по тому же доводу, что и квитанция выше:
+  // смена функции на рендере пересобирала бы замыкание попытки, и запись
+  // очереди оставалась бы неотправленной.
+  //
+  // Исход по умолчанию — отказ: тест, не назвавший транспорта, не должен
+  // получать удачную отправку в подарок (см. `SetupOptions.sendMessage`).
+  const submit: SendMessage = (request) => {
+    calls.sent.push(request);
+
+    return sendMessage
+      ? sendMessage(request)
+      : Promise.reject(new Error("эти тесты не отправляют сообщений"));
+  };
+
+  /**
+   * Хранилище очереди — настоящее, а не заглушка: в jsdom `IndexedDB` нет,
+   * `list()` отказывает, и `useOutbox` ловит отказ, оставляя очередь пустой.
+   *
+   * Это и есть та самая названная деградация, которую `useOutbox` описывает для
+   * браузера с выключенным хранилищем, — то есть тест идёт по живому пути, а не
+   * мимо него. Заглушка-пустышка показала бы, что очередь «работает» там, где
+   * она не работала бы вовсе.
+   */
+  const outboxStore = createOutboxStore();
+
   // Собирается функцией, а не литералом на месте: повтор загрузки приносит
   // **тот же** компонент с другим списком, и собрать его вторым литералом
   // значило бы разойтись с первым на первой же правке пропсов.
@@ -208,6 +251,8 @@ function setup({ conversations, tail, loadPage, refresh, sendReceipts }: SetupOp
       centrifugoUrl={CENTRIFUGO_URL}
       issueTicket={tickets.issueTicket}
       sendReceipts={send}
+      sendMessage={submit}
+      outboxStore={outboxStore}
       createCentrifuge={fake.factory}
     />
   );
@@ -733,16 +778,77 @@ describe("смена беседы сбрасывает состояние рем
   });
 });
 
-describe("штатного запаса в дереве нет", () => {
-  it("композера в дереве нет: отправки из браузера в этом гейте нет", async () => {
-    const { container } = setup({
+/**
+ * Обратная сторона той же границы, снятой этим гейтом.
+ *
+ * Здесь стояло утверждение «композера в дереве нет: отправки из браузера в этом
+ * гейте нет» — оно было верным для `G3-005`, где композер вычеркивался
+ * статическим гейтом, и стало ложным ровно в тот момент, когда `G3-007-1`
+ * вернул его в production-граф. Тест не удалён, а **перевёрнут**: не «поля нет»
+ * (`queryByRole("textbox")` — `null`), а «человек производит сообщение полем», и
+ * следствие нажатия доезжает до транспорта тем идентификатором, который
+ * зачеканила очередь.
+ *
+ * Проверяется не «нажатие сработало», а **путь**: `client_message_id` здесь
+ * рождается в очереди, а не в обёртке над API (`D4`), и тест читает его из двух
+ * мест сразу — из записи в ленте и из ушедшего запроса. Совпали они или нет,
+ * решает не глаз, а сравнение.
+ */
+describe("композер в дереве: человек производит сообщение полем", () => {
+  it("нажатие отправки заводит запись очереди, и её же идентификатор уходит в транспорт", async () => {
+    const { container, calls } = setup({
       conversations: [ANNA],
       tail: () => Promise.resolve(tailOf([messageOf(1)])),
     });
 
     await waitFor(() => expect(screen.getByText("message 1")).toBeTruthy());
-    expect(screen.queryByRole("textbox")).toBeNull();
-    expect(container.querySelector("[data-message-id]")).toBeTruthy();
+
+    // Поле и кнопка ищутся **производственными** атрибутами, а не текстом
+    // кнопки: тот же адрес, по которому пойдёт приёмочный сценарий, — и он не
+    // поедет от правки подписи на кнопке.
+    const input = container.querySelector("[data-composer-input]");
+    const send = container.querySelector("[data-composer-send]");
+    expect(input).toBeTruthy();
+    expect(send).toBeTruthy();
+
+    fireEvent.change(input!, { target: { value: "Hello Anna" } });
+    fireEvent.click(send!);
+
+    // Запись появилась в ленте — рядом с подтверждёнными, но без их номера.
+    await waitFor(() =>
+      expect(container.querySelector("[data-pending-client-id]")).toBeTruthy(),
+    );
+
+    const record = container.querySelector("[data-pending-client-id]")!;
+    const queuedId = record.getAttribute("data-pending-client-id");
+
+    expect(calls.sent).toHaveLength(1);
+    expect(calls.sent[0]).toEqual({
+      // Беседа берётся из активной, а не из поля ввода: человек пишет в ту,
+      // которая открыта, и второго источника беседы у запроса быть не должно.
+      conversationId: ANNA.id,
+      clientMessageId: queuedId,
+      text: "Hello Anna",
+    });
+  });
+
+  it("пустое поле сообщения не производит: нажатие без текста никуда не идёт", async () => {
+    const { container, calls } = setup({
+      conversations: [ANNA],
+      tail: () => Promise.resolve(tailOf([messageOf(1)])),
+    });
+
+    await waitFor(() => expect(screen.getByText("message 1")).toBeTruthy());
+
+    // Пробелы — не текст: сообщение из пробелов существует в очереди и уходит
+    // собеседнику пустой строкой, то есть человек отправил бы то, чего не писал.
+    fireEvent.change(container.querySelector("[data-composer-input]")!, {
+      target: { value: "   " },
+    });
+    fireEvent.click(container.querySelector("[data-composer-send]")!);
+
+    expect(calls.sent).toEqual([]);
+    expect(container.querySelector("[data-pending-client-id]")).toBeNull();
   });
 });
 

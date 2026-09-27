@@ -5,7 +5,11 @@ import { adaptConversations } from "./adapter"
 import { adaptUnreadChanged, withUnreadOverlay } from "./unreadOverlay"
 import type { ConversationListPage } from "../../api/generated"
 import { adaptPublication, adaptReadReceipt } from "../messages/message-adapter"
+import { MessageComposer } from "../messages/components/MessageComposer"
 import { MessageList } from "../messages/components/MessageList"
+import { useOutbox } from "../messages/outbox/useOutbox"
+import type { OutboxStore } from "../messages/outbox/outboxStore"
+import type { SendMessage } from "../messages/outbox/useOutbox"
 import { advance, deliveryStateOf } from "../receipts/receiptWatermarks"
 import type { Watermarks } from "../receipts/receiptWatermarks"
 import { useReceipts } from "../receipts/useReceipts"
@@ -19,7 +23,7 @@ import { ConnectionStatusLine } from "../realtime/components/ConnectionStatusLin
 import type { CentrifugeFactory } from "../realtime/realtimeClient"
 import { useRealtimeConnection } from "../realtime/useRealtimeConnection"
 import { MessengerLayout } from "../../shared/ui/MessengerLayout"
-import type { Conversation, CurrentUser } from "../../shared/lib/types"
+import type { Conversation, CurrentUser, PendingMessage } from "../../shared/lib/types"
 
 /**
  * Пустой оверлей — **одна** карта на модуль, а не новая на каждый сброс.
@@ -29,6 +33,15 @@ import type { Conversation, CurrentUser } from "../../shared/lib/types"
  * рендер списка на ровном месте.
  */
 const EMPTY_OVERLAY: ReadonlyMap<string, number> = new Map()
+
+/**
+ * Пустой список записей очереди — **одна** ссылка на модуль.
+ *
+ * Та же причина, что у `EMPTY_OVERLAY`: свежий `[]` — новое значение при том же
+ * смысле, и получатель (`MessageList`) считал бы проп изменившимся на каждом
+ * рендере беседы, которой очередь не касается вовсе.
+ */
+const EMPTY_PENDING: readonly PendingMessage[] = []
 
 interface ChatPageProps {
   /** Беседы из `GET /conversations`. Фикстур здесь нет и быть не может. */
@@ -58,6 +71,25 @@ interface ChatPageProps {
    * отправку на каждом рендере — вкладка не сообщила бы ничего и никогда.
    */
   sendReceipts: SendReceipt
+  /**
+   * Отправка сообщения — операция, собранная в `main.tsx`, как и квитанция.
+   *
+   * Устойчивость ссылки здесь нужна меньше, чем у `sendReceipts` (там её смена
+   * перезапускала бы дребезг), но по той же причине: очередь держит её в
+   * зависимостях попытки, и новая ссылка на каждом рендере пересобирала бы
+   * замыкание попытки без всякой пользы.
+   */
+  sendMessage: SendMessage
+  /**
+   * Хранилище очереди — **на уровень списка**, а не панели беседы.
+   *
+   * Панель пересоздаётся на каждой смене беседы (`key` ниже), и очередь,
+   * живущая в ней, обнулялась бы вместе с ней: черновик, ушедший в офлайне,
+   * исчезал бы от одного клика по другой беседе. Здесь `key` нет ни у
+   * `ChatPage`, ни у чего-либо выше него, поэтому очередь переживает и смену
+   * беседы, и (через IndexedDB) перезагрузку.
+   */
+  outboxStore: OutboxStore
   /** Подмена SDK — для компонентных тестов; в production не задаётся. */
   createCentrifuge?: CentrifugeFactory
 }
@@ -109,6 +141,8 @@ export function ChatPage({
   centrifugoUrl,
   issueTicket,
   sendReceipts,
+  sendMessage,
+  outboxStore,
   createCentrifuge,
 }: ChatPageProps) {
   // Ленивая инициализация, а не `?? conversations[0]` в рендере: запасного
@@ -204,6 +238,37 @@ export function ChatPage({
   // отставало бы от базы ровно на один рендер.
   const merged = useMemo(() => withUnreadOverlay(base, overlay), [base, overlay])
 
+  /**
+   * Очередь исходящих — **здесь**, а не в панели беседы.
+   *
+   * Место выбрано по измеренному свойству: панель пересоздаётся на каждой смене
+   * беседы (`key` ниже), и очередь, живущая в ней, обнулялась бы вместе с ней —
+   * черновик, ушедший в офлайне, исчезал бы от одного клика по другой беседе.
+   * Здесь `key` нет ни у `ChatPage`, ни у чего-либо выше, поэтому запись
+   * переживает смену беседы, а хранилище — ещё и перезагрузку.
+   *
+   * Очередь **одна на все беседы** (хранилище тоже одно), и запись помнит свою:
+   * читать IndexedDB заново при каждом переключении значило бы платить за то,
+   * что не менялось, и повторно запускать попытку для всех записей сразу.
+   */
+  const outbox = useOutbox({ store: outboxStore, send: sendMessage })
+
+  /**
+   * Записи **своей** беседы: очередь одна на все, а лента показывает одну.
+   *
+   * Фильтр здесь, а не в ленте. `MessageList` получает уже своё — и это не
+   * размещение кода, а отказ от второго места, знающего про беседы: такое место
+   * разошлось бы с тем, которое чистит очередь, и разошлось бы молча (тот же
+   * довод, что у фильтра `pending` в докстринге ленты).
+   */
+  const pendingForActive = useMemo(
+    () =>
+      activeId === null
+        ? EMPTY_PENDING
+        : outbox.pending.filter((record) => record.conversationId === activeId),
+    [outbox.pending, activeId],
+  )
+
   const activeConversation = merged.find((c) => c.id === activeId) ?? null
 
   return (
@@ -245,6 +310,11 @@ export function ChatPage({
           issueTicket={issueTicket}
           sendReceipts={sendReceipts}
           createCentrifuge={createCentrifuge}
+          pending={pendingForActive}
+          // Беседа известна **здесь**, а не в композере: `enqueue` требует
+          // беседу, а композер о беседах не знает вовсе — он знает только имя
+          // собеседника для подсказки в поле.
+          onSend={(text) => outbox.enqueue(activeConversation.id, text)}
           onUnreadPublication={onUnreadPublication}
           onReconcile={refresh}
         />
@@ -262,6 +332,10 @@ interface ConversationPaneProps {
   /** Транспорт квитанции — тот же, что у панели: беседа уже известна. */
   sendReceipts: SendReceipt
   createCentrifuge?: CentrifugeFactory
+  /** Записи очереди **этой** беседы; отбор сделан уровнем выше. */
+  pending: readonly PendingMessage[]
+  /** Человек нажал Send: текст уходит в очередь, тождество чеканится там же. */
+  onSend: (text: string) => void
   /** Публикация личного канала — наверх, к списку: число принадлежит не беседе. */
   onUnreadPublication: (payload: unknown) => void
   /** Выход из разрыва — повод сверки списка. */
@@ -292,6 +366,8 @@ function ConversationPane({
   issueTicket,
   sendReceipts,
   createCentrifuge,
+  pending,
+  onSend,
   onUnreadPublication,
   onReconcile,
 }: ConversationPaneProps) {
@@ -550,6 +626,7 @@ function ConversationPane({
           // это здесь несуще: смена её перезапускала бы наблюдателя на каждом
           // рендере, то есть строка «видна целиком» объявлялась бы заново.
           onVisibleThroughSeq={setVisibleThroughSeq}
+          pending={pending}
         />
       )}
 
@@ -560,6 +637,21 @@ function ConversationPane({
       ) : null}
 
       <ConnectionStatusLine state={connection.state} />
+
+      {/*
+        Композер рисуется и при отказе истории (`phase === "error"`), и это не
+        упущение: отказ догрузки говорит о **хвосте**, а не о праве писать —
+        сообщение уходит на сервер отдельным запросом и в ленте окажется, когда
+        её перечитают. Спрятать поле ввода значило бы запретить человеку
+        действие по причине, к нему не относящейся.
+
+        `disabled` не передаётся ничем, и это названная граница: состояния
+        «писать сюда нельзя» клиент не знает — признак блокировки доезжает
+        отсутствием метаданных (`G3-007` D14), а не флагом на беседе. Ветка
+        `blocked` композера остаётся непроизведённой, и выдавать её за
+        исполняемое правило не будем.
+      */}
+      <MessageComposer recipientName={conversation.name} onSend={onSend} />
     </div>
   )
 }
