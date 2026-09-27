@@ -15,9 +15,10 @@ import {
   CREDENTIALS,
   DEVICE_ID_HEADER,
   createApiClient,
+  withUnwrappedErrors,
 } from "./client"
 import type { BootstrapDependencies } from "./client"
-import { ConversationListPageFromJSON, MeFromJSON } from "./generated"
+import { ConversationListPageFromJSON, ConversationsApi, FetchError, MeFromJSON } from "./generated"
 import {
   ApiProblem,
   ServiceUnavailableError,
@@ -662,5 +663,92 @@ describe("повтор после обмена", () => {
     const since = stub.calls.slice(before)
     expect(since.filter((call) => call.path.endsWith("/auth/refresh"))).toHaveLength(1)
     expect(since.filter((call) => call.path === `${API_BASE_PATH}/me`)).toHaveLength(2)
+  })
+})
+
+// Найдено живым отказом: `POST /conversations` на неподтверждённой почте
+// отвечал `403 email_unverified`, а диалог показывал не код ответа, а общее
+// «Could not start the chat. Try again.» — как если бы `error` не был
+// `ApiProblem` вовсе. Он и не был: `BaseAPI.request()` сгенерированного
+// клиента (`generated/runtime.ts`) ловит любое исключение из `fetchApi`
+// и заворачивает его в `FetchError`, потому что штатный `fetch()` бросает
+// только на сетевой обрыв, а не на `4xx`/`5xx`. Наш `fetchApi` этому
+// контракту не следует нигде, кроме сети: `check()` (`client.ts`) бросает
+// типизированные отказы ради самого кода состояния — и именно этот код
+// генератор прячет внутри `FetchError.cause`, откуда ни один `instanceof`
+// в диалоге не достаёт.
+describe("сгенерированный клиент и наши типизированные отказы", () => {
+  const PARTICIPANT_ID = "22222222-2222-2222-2222-222222222222"
+
+  it("без обёртки отказ доходит как FetchError генератора, а не как ApiProblem", async () => {
+    const stub = createStubFetch({
+      [`${API_BASE_PATH}/auth/refresh`]: [jsonResponse(200, ACCESS_TOKEN)],
+      [`${API_BASE_PATH}/conversations`]: [
+        jsonResponse(403, {
+          type: "https://finops.local/problems/forbidden",
+          title: "Действие недоступно",
+          status: 403,
+          code: "email_unverified",
+        }),
+      ],
+    })
+    const client = createApiClient({ fetchImpl: stub.fetchImpl as never })
+    await client.refreshAccessToken()
+
+    const conversationsApi = new ConversationsApi(client.configuration)
+    const error = await conversationsApi
+      .createDirectConversation({ createDirectConversationRequest: { participantId: PARTICIPANT_ID } })
+      .catch((caught: unknown) => caught)
+
+    expect(error).toBeInstanceOf(FetchError)
+    expect(error).not.toBeInstanceOf(ApiProblem)
+  })
+
+  it("withUnwrappedErrors разворачивает FetchError обратно в ApiProblem с тем же кодом и статусом", async () => {
+    const stub = createStubFetch({
+      [`${API_BASE_PATH}/auth/refresh`]: [jsonResponse(200, ACCESS_TOKEN)],
+      [`${API_BASE_PATH}/conversations`]: [
+        jsonResponse(403, {
+          type: "https://finops.local/problems/forbidden",
+          title: "Действие недоступно",
+          status: 403,
+          code: "email_unverified",
+        }),
+      ],
+    })
+    const client = createApiClient({ fetchImpl: stub.fetchImpl as never })
+    await client.refreshAccessToken()
+
+    const conversationsApi = withUnwrappedErrors(new ConversationsApi(client.configuration))
+    const error = await conversationsApi
+      .createDirectConversation({ createDirectConversationRequest: { participantId: PARTICIPANT_ID } })
+      .catch((caught: unknown) => caught)
+
+    expect(error).toBeInstanceOf(ApiProblem)
+    expect((error as ApiProblem).status).toBe(403)
+    expect((error as ApiProblem).code).toBe("email_unverified")
+  })
+
+  it("успешный ответ идёт как есть — обёртка ничего не трогает на пути без отказа", async () => {
+    const stub = createStubFetch({
+      [`${API_BASE_PATH}/auth/refresh`]: [jsonResponse(200, ACCESS_TOKEN)],
+      [`${API_BASE_PATH}/conversations`]: [
+        jsonResponse(201, {
+          conversation_id: "c1",
+          type: "direct",
+          participants: [],
+          created_at: "2026-09-27T20:00:00Z",
+        }),
+      ],
+    })
+    const client = createApiClient({ fetchImpl: stub.fetchImpl as never })
+    await client.refreshAccessToken()
+
+    const conversationsApi = withUnwrappedErrors(new ConversationsApi(client.configuration))
+    const conversation = await conversationsApi.createDirectConversation({
+      createDirectConversationRequest: { participantId: PARTICIPANT_ID },
+    })
+
+    expect(conversation.conversationId).toBe("c1")
   })
 })

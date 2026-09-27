@@ -8,7 +8,7 @@
  * (`_device_for`, `services/identity.py`) — то есть строка в `devices`
  * на каждый такой вызов.
  */
-import { Configuration, type ConversationListPage, type FetchAPI, type Me } from "./generated";
+import { Configuration, FetchError, type ConversationListPage, type FetchAPI, type Me } from "./generated";
 import {
   ApiProblem,
   ServiceUnavailableError,
@@ -170,6 +170,47 @@ function isAbortError(cause: unknown): boolean {
     "name" in cause &&
     (cause as { readonly name?: unknown }).name === "AbortError"
   );
+}
+
+/**
+ * Разворачивает `FetchError` сгенерированного `request()` обратно в причину,
+ * которую бросил `fetchApi`.
+ *
+ * `BaseAPI.request()` (`generated/runtime.ts`) вызывает `fetchApi` в своём
+ * собственном `try/catch` и заворачивает **любое** пойманное исключение
+ * в `FetchError` — контракт генератора рассчитан на штатный `fetch()`,
+ * который бросает только на сетевой обрыв, а не на `4xx`/`5xx`. Наш
+ * `fetchApi` (`check()`, выше) этому контракту не следует: он бросает
+ * типизированные отказы — `ApiProblem`, `ServiceUnavailableError`,
+ * `SessionExpiredError`, `UnauthenticatedError` — ради ровно того же кода
+ * состояния, который недоступен снаружи `FetchError`, где от исходной
+ * причины остаётся только `cause` без единого `instanceof`, совпадающего
+ * ниже по стеку.
+ *
+ * Оборачивает **объект API целиком**, а не отдельные вызовы, — тем же
+ * доводом, что уже назван в шапке файла про заголовок устройства: вызов,
+ * забытый без обёртки, отдал бы `FetchError` вместо `ApiProblem`, и об этом
+ * не сказали бы ни `tsc`, ни линтер.
+ */
+export function withUnwrappedErrors<T extends object>(api: T): T {
+  return new Proxy(api, {
+    get(target, prop, receiver) {
+      const value = Reflect.get(target, prop, receiver);
+      if (typeof value !== "function") {
+        return value;
+      }
+      return async (...args: unknown[]) => {
+        try {
+          return await (value as (...callArgs: unknown[]) => unknown).apply(target, args);
+        } catch (error) {
+          if (error instanceof FetchError && error.cause instanceof Error) {
+            throw error.cause;
+          }
+          throw error;
+        }
+      };
+    },
+  });
 }
 
 export function createApiClient(options: ApiClientOptions = {}): ApiClient {

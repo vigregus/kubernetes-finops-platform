@@ -2,7 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import "./index.css";
 import App from "./App.tsx";
-import { createApiClient } from "./api/client";
+import { createApiClient, withUnwrappedErrors } from "./api/client";
 import {
   AuthApi,
   ConversationsApi,
@@ -40,10 +40,14 @@ const client = createApiClient({
 
 const session = createSessionState();
 
-const authApi = new AuthApi(client.configuration);
-const conversationsApi = new ConversationsApi(client.configuration);
-const messagesApi = new MessagesApi(client.configuration);
-const usersApi = new UsersApi(client.configuration);
+// `withUnwrappedErrors` — не украшение: без неё любой отказ здесь доходил бы
+// до вызывающих как `FetchError` вместо `ApiProblem`/`ServiceUnavailableError`
+// (`api/client.ts`, там же и причина). Оборачивается **конструктор**, а не
+// отдельные вызовы — тем же доводом, что и обёртка сама объясняет.
+const authApi = withUnwrappedErrors(new AuthApi(client.configuration));
+const conversationsApi = withUnwrappedErrors(new ConversationsApi(client.configuration));
+const messagesApi = withUnwrappedErrors(new MessagesApi(client.configuration));
+const usersApi = withUnwrappedErrors(new UsersApi(client.configuration));
 
 /**
  * Клиент истории отдаётся **операцией**, а не объектом: `HistorySource`
