@@ -9,7 +9,13 @@ name: Образ мессенджера
 
 on:
   push:
-    branches: [main]
+    # Любая ветка, а не только main: образ нужен и до слияния — из PR его взять
+    # больше негде (`workflow_dispatch` не заменяет push-событие, см.
+    # web-image.yml). Из main он при этом не пропадает: там ветка та же самая.
+    #
+    # Стенд такой образ не получит — не потому, что кто-то обещал его не
+    # выкатывать, а потому что тег у него другой: см. шаг «Тег» ниже.
+    branches: ["**"]
     paths:
       - 'apps/messenger/**'
       - '.github/workflows/image.yml'
@@ -57,6 +63,25 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Тег
+        # Тег `:<sha>` — метка ровно одного случая: коммит лежит в main. Образ
+        # из любой другой ветки получает суффикс с её именем, и это не
+        # украшение, а механизм: выкатка ищет тег шаблоном `^[0-9a-f]{40}$`
+        # (gitops/02-infra/argocd-image-updater), а он суффикс не пропускает.
+        # Так «образ из ветки продвижению не подлежит» становится свойством
+        # тега, а не обещанием в комментарии.
+        id: tag
+        run: |
+          if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            echo "value=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          else
+            # Имя ветки — в допустимые для тега знаки: слэши и прочее, чем
+            # ветки называют, docker в теге не принимает. Длина ограничена,
+            # чтобы длинное имя не вышло за предел в 128 знаков.
+            BRANCH="$(printf '%s' "$GITHUB_REF_NAME" | sed 's#[^A-Za-z0-9.-]#-#g' | cut -c1-40)"
+            echo "value=$GITHUB_SHA-$BRANCH" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Сборка и публикация
         id: push
         uses: docker/build-push-action@v6
@@ -68,8 +93,9 @@ jobs:
             BASE_DIGEST=${{ steps.base.outputs.digest }}
           # Тег — только идентификатор коммита. `latest` намеренно
           # отсутствует: подвижный тег в реестре возвращает ровно ту
-          # проблему, ради которой всё это и делается.
-          tags: ${{ env.IMAGE }}:${{ github.sha }}
+          # проблему, ради которой всё это и делается. У образа из ветки
+          # к нему добавлен её суффикс — см. шаг «Тег».
+          tags: ${{ env.IMAGE }}:${{ steps.tag.outputs.value }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}

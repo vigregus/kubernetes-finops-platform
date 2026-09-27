@@ -26,12 +26,22 @@ app.kubernetes.io/part-of: messenger
 разными байтами, и тогда «откатились на предыдущую версию» ничего не
 гарантирует. Конвейер собирает образ один раз и дальше везде ссылается
 на sha256 — это и есть DEP-001.
+
+**`image.spec` — вторая форма, и она тоже полная ссылка.** Так выглядит
+значение, которое пишет argocd-image-updater: он адресует образ тегом
+(`репозиторий:тег`), потому что следит за тегами, а не за диджестами.
+Строку принимаем целиком и не пересобираем: разбирать её здесь значило бы
+завести вторую сборку ссылки, которая разъедется с первой. Путь по умолчанию
+— по-прежнему digest из git: он остаётся тем, чем выкатывается этаж, если
+апдейтер не тронул Application.
 */}}
 {{- define "messenger.image" -}}
 {{- $svc := .svc -}}
 {{- $root := .root -}}
 {{- $repo := $svc.image.repository | default $root.Values.image.repository | default (printf "%s/%s" $root.Values.image.registry .name) -}}
-{{- if $svc.image.digest -}}
+{{- if $svc.image.spec -}}
+{{ $svc.image.spec }}
+{{- else if $svc.image.digest -}}
 {{ $repo }}@{{ $svc.image.digest }}
 {{- else if $root.Values.image.allowMutableTag -}}
 {{ $repo }}:{{ $svc.image.tag | default $root.Values.image.tag | default "latest" }}
@@ -47,11 +57,17 @@ app.kubernetes.io/part-of: messenger
 журналах и в метрике становилась "unversioned" — то есть «когда это
 началось» переставало связываться с выкаткой ровно в том окружении,
 где отлаживают. Вскрылось при первом подъёме настоящего образа.
+
+Из полной ссылки наружу идёт тег, а не вся строка: репозиторий и так
+известен, а значение это попадает в подпись сборки, где длинная строка
+с адресом реестра ничего не добавляет.
 */}}
 {{- define "messenger.version" -}}
 {{- $svc := .svc -}}
 {{- $root := .root -}}
-{{- if $svc.image.digest -}}
+{{- if $svc.image.spec -}}
+{{ $svc.image.spec | splitList ":" | last }}
+{{- else if $svc.image.digest -}}
 {{ $svc.image.digest }}
 {{- else if ($svc.image.tag | default $root.Values.image.tag) -}}
 {{ $svc.image.tag | default $root.Values.image.tag }}

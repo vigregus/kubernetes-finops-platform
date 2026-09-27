@@ -15,6 +15,22 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: argocd
+  # Выкатка адресуется живым Application, а не файлом в git: argocd-image-updater
+  # патчит его через API, и в git этого патча нет и не будет. Без строки ниже
+  # `selfHeal` видел бы расхождение с git и откатывал патч, апдейтер ставил бы
+  # его снова — и так по кругу, на каждой итерации опроса.
+  #
+  # Игнорируется ровно тот список, куда апдейтер пишет: параметры helm-источника
+  # `messenger-services` (второй источник — индекс 1). Цена названа: параметры
+  # этого источника, заданные **в git**, тоже перестанут применяться. Сегодня
+  # их нет ни одного — значения приходят через `valueFiles`, — и появление
+  # первого обязано снять эту строку, а не разбираться с ней молча.
+  ignoreDifferences:
+    - group: argoproj.io
+      kind: Application
+      name: messenger-services
+      jsonPointers:
+        - /spec/sources/1/helm/parameters
   syncPolicy:
     automated:
       prune: true
