@@ -218,7 +218,7 @@ async def bump_unread(
     *,
     conversation_id: ConversationId,
     deltas: Sequence[UnreadDelta],
-) -> int:
+) -> dict[UserId, UnreadCount]:
     """Прибавляет приращения — одной вставкой на беседу, а не на участника.
 
     Цикл по получателям был бы столько же круглых поездок в базу внутри
@@ -239,13 +239,23 @@ async def bump_unread(
     поэтому соревноваться не с чем, а законное уменьшение делает
     `recount_unread` — абсолютной записью, и GREATEST отменил бы её.
 
-    Возвращается число **записанных** строк, а не названных: строка
-    отправителя, у которой нечего было менять, в это число не входит,
-    и «тронуто» значит здесь «изменено или создано».
+    Возвращаются **записанные** строки и их числа, а не названные: строка
+    отправителя, у которой нечего было менять, в ответ не входит,
+    и «тронуто» значит здесь «изменено или создано». Число берётся из
+    `RETURNING`, а не складывается с приращением: абсолютное значение
+    знает только записавшая строка, и событие `unread.changed` несёт
+    именно его — приращение у него второго смысла не имеет (клиент
+    ставит число, а не прибавляет: повтор доставки сдвинул бы счётчик).
+
+    Список записанных — **не** список адресатов события, и вызывающий
+    обязан их различать: ключи здесь те, чьё число изменилось или чья
+    строка создана, а `WHERE` стоит только у ветки `DO UPDATE` —
+    значит вставка отдаёт и нулевую строку отправителя. Отбор адресатов
+    идёт по **входным** приращениям (`D7`).
     """
     if not deltas:
         # Пустой набор — законный случай: собеседник у беседы один.
-        return 0
+        return {}
     rows = await conn.fetch(
         """
         INSERT INTO unread_projection (
@@ -258,13 +268,15 @@ async def bump_unread(
                             + EXCLUDED.unread_count,
                updated_at = now()
          WHERE EXCLUDED.unread_count <> 0
-        RETURNING user_id
+        RETURNING user_id, unread_count
         """,
         conversation_id,
         [str(delta.user_id) for delta in deltas],
         [int(delta.delta) for delta in deltas],
     )
-    return len(rows)
+    return {
+        UserId(row["user_id"]): UnreadCount(row["unread_count"]) for row in rows
+    }
 
 
 async def recount_unread(

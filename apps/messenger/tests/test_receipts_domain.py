@@ -1,19 +1,26 @@
 """Правила квитанции без базы: пределы, граница головы и нормализация."""
 from __future__ import annotations
 
+import uuid
 from dataclasses import FrozenInstanceError
 
 import pytest
 
 from messenger.domain.history import MAX_SEQ
+from messenger.domain.ids import ConversationSeq, UserId
 from messenger.domain.receipts import (
+    EMPTY_STATE,
     InvalidReceipt,
     ReadState,
     Receipts,
+    advanced_from,
+    read_event,
     state_of,
     validate_receipt_bound,
     validate_receipts,
 )
+
+READER_ID = UserId(uuid.UUID("11111111-1111-1111-1111-111111111111"))
 
 
 def test_отказ_остаётся_ошибкой_клиента():
@@ -133,3 +140,89 @@ def test_состояние_неизменяемо():
     состояние = ReadState(delivered_seq=3, read_seq=1)
     with pytest.raises(FrozenInstanceError):
         состояние.read_seq = 2  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# Сдвиг: отсутствие — не ноль, но для сравнения — ноль
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "прежнее, записанное, сдвиг",
+    [
+        # Продвижение: `GREATEST` поднял строку.
+        (ReadState(ConversationSeq(7), ConversationSeq(7)),
+         ReadState(ConversationSeq(9), ConversationSeq(9)), True),
+        # Отставка: записано то же, что лежало.
+        (ReadState(ConversationSeq(9), ConversationSeq(9)),
+         ReadState(ConversationSeq(9), ConversationSeq(9)), False),
+        # Строки не было, а записалась пара нулей — законный первый запрос
+        # `{read_seq: 0}`. Продвижения нет, и событие о нём было бы
+        # утверждением, которого никто не делал.
+        (None, ReadState(ConversationSeq(0), ConversationSeq(0)), False),
+        # Строки не было, а записалось нечто — это уже сдвиг.
+        (None, ReadState(ConversationSeq(1), ConversationSeq(1)), True),
+        # Приведение — только для сравнения, а не замена нулём «на глаз»:
+        # у существующей нулевой строки продвижение определяется так же.
+        (ReadState(ConversationSeq(0), ConversationSeq(0)),
+         ReadState(ConversationSeq(0), ConversationSeq(0)), False),
+    ],
+)
+def test_сдвиг_сравнивается_с_приведённым_прежним(прежнее, записанное, сдвиг):
+    """Ронит оба перевёрнутых сравнения — с присланным и без приведения.
+
+    Первое (с присланным) объявляет сдвигом отставку и молчит на
+    продвижении: обе строки перевёрнуты целиком, и в таблице это видно
+    как пара соседних случаев. Второе (без приведения `None` к нулю)
+    краснит ровно на третьей строке — на первом законном `{read_seq: 0}`.
+
+    `EMPTY_STATE` здесь не подставляется вызывающим: приведение — часть
+    правила, и проверяется оно на области, а не на удобной паре.
+    """
+    assert advanced_from(прежнее, записанное) is сдвиг
+
+
+def test_отсутствие_строки_наружу_остаётся_отсутствием():
+    """`None` приводится только для сравнения, а не для ответа.
+
+    Оба вопроса — «что мы отдаём наружу» и «сдвинулось ли» — разные, и
+    слить их значило бы вернуть клиенту пару нулей вместо «состояния
+    нет»: то же правило «отсутствие ≠ ноль», что у `unread_count`.
+    """
+    assert EMPTY_STATE is not None
+    assert advanced_from(None, EMPTY_STATE) is False
+    # Сравниваемое приведено, а `previous` как значение никуда не делось:
+    # это вызывающий решает, что отдать, — здесь же видно, что функция
+    # не подменяет переданное.
+    assert advanced_from(None, ReadState(ConversationSeq(0), ConversationSeq(0))) is False
+
+
+def test_событие_несёт_номера_своими_именами():
+    """Ронит переиспользование `seq` под номер квитанции.
+
+    `seq` — номер сообщения, и его отсутствие в теле события не
+    стилистика: клиент, не знающий о квитанциях, читает разрыв в `seq`
+    как пропуск событий и уходит догружать историю. Второе значение
+    в том же поле сломало бы этот детектор молча — то есть ровно то,
+    что запрещает `CTR-003`.
+    """
+    тело = read_event(reader_id=READER_ID, state=ReadState(ConversationSeq(9), ConversationSeq(7)))
+
+    assert тело == {
+        "type": "message.read",
+        "reader_id": str(READER_ID),
+        "read_seq": 7,
+        "delivered_seq": 9,
+    }
+    assert "seq" not in тело
+
+
+def test_номера_в_событии_целые_а_не_доменные():
+    """`ConversationSeq` — доменный тип с проверкой; в тело события едет
+    число, потому что `json` доменного типа не знает, а `Centrifugo` на
+    такой публикации откажет — и откажет молча (best-effort)."""
+    тело = read_event(reader_id=READER_ID, state=ReadState(ConversationSeq(9), ConversationSeq(7)))
+
+    assert type(тело["read_seq"]) is int
+    assert type(тело["delivered_seq"]) is int
+    assert type(тело["reader_id"]) is str

@@ -116,6 +116,17 @@ function shell(state: BootState, api: HistoryApi = historyApi) {
     session: sessionOf(state),
     onRetry: () => {},
     historyApi: api,
+    // Сверка списка (`D11`) — операция той же природы, что `onRetry`, и живёт
+    // в `main.tsx`; здесь она должна быть, но звать её эти тесты не обязаны.
+    refreshConversations: async () => ({
+      items: [],
+      nextBeforeActivityAt: null,
+      nextBeforeConversationId: null,
+    }),
+    // Квитанция — операция той же природы. Тесты экранов загрузки её не
+    // дёргают: до ветки `ready` панели нет вовсе, а та, что монтируется в
+    // последнем наборе, до отправки не доходит — строки ленты не пересекаются.
+    sendReceipts: async () => ({}),
     readCentrifugoUrl: () => "wss://rt.example.test/connection/websocket",
     issueTicket: async () => "ticket-for-the-hunt",
     createCentrifuge: givenFakeCentrifuge().factory,

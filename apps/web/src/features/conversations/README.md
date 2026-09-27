@@ -13,13 +13,13 @@
 | `name` | `direct` — `display_name` **единственного** участника с `user_id !== currentUserId`; `group` — `display_name` **всех остальных** через «, » | имён не осталось → нейтральное `Group`. Пустой строки и `undefined` не бывает |
 | `initials` | — | не заполняется: `Avatar` считает инициалы из `name` (`shared/ui/Avatar.tsx:21`), и второе представление того же разошлось бы с первым |
 | `avatarUrl` | — | отсутствует: хранилища аватаров в контракте нет |
-| `presence` | — | отсутствует **всегда**: сервер не отдаёт онлайн вовсе |
+| `presence` | `direct` — `online` собеседника через `presenceOf`: `true` → `"online"`, `false` → `"offline"`; `group` — не заполняется (одно слово на группу смысла не имеет, как и `lastSeenAt`) | ключа нет или он `undefined` → `undefined`, и подзаголовка нет вовсе. Три исхода, а не два: `online ? "online" : "away"` сказала бы «Away» на ответе без ключа, то есть утверждала бы о человеке то, чего сервер не сообщал. `"away"` не производится ничем: сервер знает только «активность не подтверждена окно» (`domain/presence.py`) |
 | `lastSeenAt` | `direct` — `last_seen_at` собеседника; `group` — не заполняется | ключа нет или `null` → `undefined`. Одно значение на группу смысла не имеет |
 | `unreadCount` | `unread_count` | ключа нет → `undefined` — **«неизвестно»**, а не `0` |
 | `lastMessagePreview` | таблица превью ниже | `last_message` нет → `""` |
 | `previewDeleted` | `Boolean(last_message?.deleted_at)` | нет сообщения → `false` |
 | `lastMessageTimestamp` | `formatConversationTimestamp(last_message.created_at, now)` | нет сообщения → `undefined`; выдуманного «только что» не бывает |
-| `typingNames`, `blockedByMe`, `blockedMe` | — | отсутствуют: G3-007/008 |
+| `typingNames`, `blockedByMe`, `blockedMe` | — | отсутствуют, и указатель здесь был неверен в обе стороны: «печатает» — это `G4`, а у `blocked*` гейта нет вовсе — в контракте их нет ни в одном поле. `G3-007` их не заводит: он маскирует присутствие и квитанции **отсутствием** (маска блокировки, `docs/messenger/04-decisions.md`), а не флагом, и поля модели остаются без источника |
 
 **Почему у адаптера есть `currentUserId`.** `GET /conversations` отдаёт
 участников **включая самого зрителя**: подзапрос собирает всех действующих

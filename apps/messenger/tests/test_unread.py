@@ -29,7 +29,12 @@ import pytest
 
 from messenger.adapters import kafka
 from messenger.domain.ids import ConversationId, ConversationSeq, UserId
-from messenger.domain.unread import UnreadOutcome, UnreadOutcomeKind
+from messenger.domain.unread import (
+    UnreadCount,
+    UnreadNotice,
+    UnreadOutcome,
+    UnreadOutcomeKind,
+)
 from messenger.workers import consumer_unread as worker
 
 FACT = "messenger.events.v1"
@@ -37,6 +42,7 @@ FACT_EVENT = "message.created"
 CONVERSATION_ID = ConversationId(uuid.UUID("33333333-3333-3333-3333-333333333333"))
 OTHER_CONVERSATION_ID = ConversationId(uuid.UUID("44444444-4444-4444-4444-444444444444"))
 SENDER_ID = UserId(uuid.UUID("11111111-1111-1111-1111-111111111111"))
+READER_ID = UserId(uuid.UUID("22222222-2222-2222-2222-222222222222"))
 
 
 class Записи(logging.Handler):
@@ -134,6 +140,8 @@ class Стенд:
         failing=(),
         invalid=(),
         pool_ok: bool = True,
+        notices: tuple[UserId, ...] = (),
+        realtime: bool = True,
     ) -> None:
         # Очередь опросов, а не событий: пустой опрос — такой же ответ
         # брокера, и он обязан быть представим.
@@ -143,6 +151,13 @@ class Стенд:
         self.pool_ok = pool_ok
         self.failing = set(failing)
         self.invalid = set(invalid)
+        # Адресаты, которых исход применения объявит. Пустой кортеж —
+        # законный случай (повтор, чужое событие, беседа без собеседников),
+        # и он проверяется наравне с непустым.
+        self.notices = tuple(notices)
+        # `realtime=False` — Centrifugo не сконфигурирован; это не ошибка,
+        # и проекция считается в любом случае.
+        self.realtime = realtime
 
         self.polls = 0
         self.commits = 0
@@ -155,6 +170,12 @@ class Стенд:
         self.dependencies: list[tuple[str, bool]] = []
         self.pool_names: list[str] = []
         self.pool = Пул()
+        # Порядок событий вокруг публикации: что было открыто, что закрыто
+        # и что ушло. Список общий на подмену соединения и на подмену
+        # публикатора — иначе «после коммита» проверялось бы сравнением
+        # двух списков, которые нечем выстроить в один ряд.
+        self.journal: list[str] = []
+        self.published: list[tuple[str, dict]] = []
 
         monkeypatch.setattr(worker.kafka, "Subscriber", self._subscriber)
         monkeypatch.setattr(worker.postgres, "create_pool", self._create_pool)
@@ -162,6 +183,9 @@ class Стенд:
         monkeypatch.setattr(worker.unread, "apply_event", self._apply)
         monkeypatch.setattr(worker.metrics, "consumer_processing_duration", self._duration)
         monkeypatch.setattr(worker.metrics, "dependency_up", self._dependency)
+        monkeypatch.setattr(
+            worker.runtime, "centrifugo_client_from_env", self._client
+        )
 
     # --- подмены ----------------------------------------------------------
 
@@ -183,7 +207,33 @@ class Стенд:
     @asynccontextmanager
     async def _connection(self, pool, *, timeout: float = 5.0):
         self.connections += 1
-        yield object()
+        # Журнал вокруг блока соединения, а не счётчик: предмет проверки —
+        # **порядок** «закрыто, потом публикация», и одно число его не
+        # выражает. В боевом коде на выходе из блока соединение
+        # возвращается в пул, а транзакция сервиса к этому моменту уже
+        # закоммичена, — то есть «после закрытия» и значит «после коммита».
+        self.journal.append("открыто")
+        try:
+            yield object()
+        finally:
+            self.journal.append("закрыто")
+
+    def _client(self):
+        """Клиент Centrifugo: публикатор в общий журнал.
+
+        Подменяется `centrifugo_client_from_env`, а не `publish` у клиента:
+        проверяется, что воркер строит клиент **один раз на процесс** и
+        зовёт настоящий `announce_changed` — тот самый, что собирает тело
+        события. Подмена публикатора оставила бы сборку тела непроверенной.
+        """
+        if not self.realtime:
+            return None
+        return self
+
+    async def publish(self, channel: str, body: dict) -> bool:
+        self.journal.append(f"публикация:{channel}")
+        self.published.append((channel, body))
+        return True
 
     async def _apply(self, conn, *, body):
         self.bodies.append(body)
@@ -195,11 +245,22 @@ class Стенд:
             )
         if body.get("event_type") != FACT_EVENT:
             return UnreadOutcome(kind=UnreadOutcomeKind.IGNORED)
+        conversation_id = ConversationId(uuid.UUID(body["conversation_id"]))
         return UnreadOutcome(
             kind=UnreadOutcomeKind.APPLIED,
-            conversation_id=ConversationId(uuid.UUID(body["conversation_id"])),
+            conversation_id=conversation_id,
             conversation_seq=ConversationSeq(body["conversation_seq"]),
             affected=1,
+            # Число выводится из номера события: тест читает его в журнале
+            # и отличает одно событие пачки от другого.
+            notices=tuple(
+                UnreadNotice(
+                    user_id=user,
+                    conversation_id=conversation_id,
+                    unread_count=UnreadCount(body["conversation_seq"]),
+                )
+                for user in self.notices
+            ),
         )
 
     def _duration(self, seconds: float, *, consumer: str) -> None:
@@ -500,3 +561,77 @@ def test_отказ_подписчика_не_фиксирует_смещени�
     assert стенд.polls == 0
     assert стенд.commits == 0
     assert стенд.dependencies == [("kafka", False)]
+
+
+# ---------------------------------------------------------------------------
+# Публикация нового числа
+# ---------------------------------------------------------------------------
+
+
+def test_публикация_идёт_после_закрытия_соединения(monkeypatch):
+    """`D7`: событие уходит **после** коммита, и это проверяется порядком.
+
+    Ронит перенос публикации внутрь блока соединения — туда, где она
+    читается как «рядом с записью». Транзакцию открывает сервис, и к
+    выходу из блока она закоммичена; событие, ушедшее раньше, пережило бы
+    откат, а `publish` не отменяется: канал разошёлся бы с базой в ту
+    сторону, из которой восстановления нет, — сверка приведёт клиента
+    к REST, а второго события о том же сдвиге не будет (`D11`).
+
+    Порядок, а не счётчик: «сколько раз опубликовали» одинаково у обеих
+    редакций, и различие между ними ровно в том, что было раньше.
+    """
+    стенд = Стенд(
+        monkeypatch, batches=[_запись(_событие(1))], notices=(READER_ID,)
+    )
+
+    asyncio.run(worker.run(стенд.остановка))
+
+    assert стенд.journal == ["открыто", "закрыто", f"публикация:user:{READER_ID}"]
+    канал, тело = стенд.published[0]
+    # Тело собирает `domain.unread.changed_event`, а не воркер: имя канала
+    # и форма события — по одному контракту, и собирать их в двух местах
+    # значило бы заводить вторую редакцию того же.
+    assert тело == {
+        "type": "unread.changed",
+        "conversation_id": str(CONVERSATION_ID),
+        "unread_count": 1,
+    }
+    assert канал == f"user:{READER_ID}"
+
+
+def test_пустые_адресаты_не_публикуют_ничего(monkeypatch):
+    """Повтор, чужое событие и беседа без собеседников молчат.
+
+    Развилки на «есть ли кому» в воркере нет намеренно: пустой кортеж
+    адресатов — это цикл по пустому кортежу, а не ветка, которую
+    пришлось бы держать в согласии с исходом. Проверка сторожит именно
+    это: появление такой ветки с побочным действием (метрика, запись
+    в журнал) сделало бы рутину заметной на каждом повторе.
+    """
+    стенд = Стенд(monkeypatch, batches=[_запись(_событие(1))], notices=())
+
+    asyncio.run(worker.run(стенд.остановка))
+
+    assert стенд.published == []
+    assert стенд.journal == ["открыто", "закрыто"]
+
+
+def test_без_centrifugo_проекция_всё_равно_считается(monkeypatch):
+    """`None` вместо клиента — не ошибка, а «Centrifugo не сконфигурирован».
+
+    Ронит развилку «нет клиента — не применяем событие». Числа доезжают
+    списком бесед (`D11`), и проекция остаётся источником для него;
+    отказ от применения оставил бы чекпойнт на месте и вернул бы ту же
+    пачку снова, то есть вечный повтор вместо тишины в канале.
+    """
+    стенд = Стенд(
+        monkeypatch, batches=[_запись(_событие(1))], notices=(READER_ID,),
+        realtime=False,
+    )
+
+    asyncio.run(worker.run(стенд.остановка))
+
+    assert стенд.published == []
+    assert стенд.commits == 1
+    assert стенд.connections == 1

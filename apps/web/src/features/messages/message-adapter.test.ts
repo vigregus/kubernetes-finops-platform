@@ -13,7 +13,7 @@
 import { describe, expect, it } from "vitest"
 
 import type { Attachment as AttachmentDto, Message as MessageDto } from "../../api/generated"
-import { adaptMessage, adaptMessages, adaptPublication } from "./message-adapter"
+import { adaptMessage, adaptMessages, adaptPublication, adaptReadReceipt } from "./message-adapter"
 
 const NOW = new Date("2026-09-20T18:00:00Z")
 const EN = { locale: "en-US", timeZone: "UTC" } as const
@@ -295,7 +295,8 @@ describe("публикация канала", () => {
   it("вложение из публикации не выдумывается", () => {
     // `attachments` живут в ответе REST, в канал не попадают. Вложение,
     // отправленное живьём, доедет подписью и без вложения — это названная
-    // граница канала, и её закрывает G3-007.
+    // граница канала, и закрывает её G4 (`ATT-001…008`), а не G3-007: тот
+    // гейт прошёл и вложений в публикацию не принёс.
     expect(fromChannel()?.attachment).toBeUndefined()
     expect(fromChannel()?.kind).toBe("text")
   })
@@ -315,5 +316,106 @@ describe("публикация канала", () => {
     expect(adaptPublication({}, VIEWER)).toBeNull()
     // Объект на месте `payload` — тоже допустимый провод.
     expect(fromChannel({ payload: "not an object" })?.text).toBeUndefined()
+  })
+})
+
+// Разбор квитанции (D12) — своё правило, а не побочный эффект предыдущего.
+// У события три необязательных поля, и «схема разрешает» здесь не то же, что
+// «имеет смысл»: у неполного события и у расширенного будущего поля судьбы
+// **противоположны**, и перепутать их — значит либо выдумать ноль, либо
+// выбросить валидное событие.
+
+/** Тело `message.read` в измеренной форме: `reader_id`, `read_seq`, `delivered_seq`. */
+type ReceiptEvent = Record<string, unknown>
+
+function receipt(overrides: ReceiptEvent = {}): ReceiptEvent {
+  return {
+    type: "message.read",
+    reader_id: ANNA,
+    read_seq: 5,
+    delivered_seq: 7,
+    ...overrides,
+  }
+}
+
+describe("разбор квитанции собеседника", () => {
+  it("квитанция становится моделью: читатель и оба числа", () => {
+    expect(adaptReadReceipt(receipt())).toStrictEqual({
+      readerId: ANNA,
+      readSeq: 5,
+      deliveredSeq: 7,
+    })
+  })
+
+  it("одно поле из двух — законное тело, и уезжает ровно оно", () => {
+    // `anyOf` в запросе (и то же в событии) — не лазейка: доставлено сообщает
+    // устройство, прочитано — взгляд, и второго может не быть в том же круге.
+    expect(adaptReadReceipt(receipt({ delivered_seq: undefined }))).toStrictEqual({
+      readerId: ANNA,
+      readSeq: 5,
+    })
+  })
+
+  it("лишнее поле событие не отбрасывает: расширение сервера — не мусор", () => {
+    // Это `CTR-003` в одну строку. Схема канала разрешает
+    // `{"type":"message.read"}`, а `additionalProperties` в ней нет, поэтому
+    // событие будущей версии с `read_at` обязано **приниматься**, а незнакомый
+    // ключ — игнорироваться. Отбросить событие из-за незнакомого ключа значило
+    // бы превратить безобидное расширение в пропущенное прочтение.
+    const future = receipt({ read_at: "2026-09-20T15:00:00Z", device: { os: "ios" } })
+
+    expect(adaptReadReceipt(future)).toStrictEqual({
+      readerId: ANNA,
+      readSeq: 5,
+      deliveredSeq: 7,
+    })
+  })
+
+  it("неполное событие — тишина, а не ноль", () => {
+    // Все три поля необязательные — этого требует аддитивность, — значит
+    // `{"type":"message.read"}` схемой разрешено. Разрешать не то же, что
+    // принимать: `0` — уверенное «прочитано ни до чего», то есть утверждение о
+    // собеседнике, которого он не делал, и оно откатило бы отметку на экране.
+    expect(adaptReadReceipt(receipt({ read_seq: undefined, delivered_seq: undefined }))).toBeNull()
+  })
+
+  it("читатель без имени не принимается", () => {
+    expect(adaptReadReceipt(receipt({ reader_id: undefined }))).toBeNull()
+    expect(adaptReadReceipt(receipt({ reader_id: "" }))).toBeNull()
+    expect(adaptReadReceipt(receipt({ reader_id: 7 }))).toBeNull()
+  })
+
+  it("номер вне целых неотрицательных не становится нулём", () => {
+    expect(adaptReadReceipt(receipt({ read_seq: "5" }))).toBeNull()
+    expect(adaptReadReceipt(receipt({ read_seq: 2.5 }))).toBeNull()
+    expect(adaptReadReceipt(receipt({ read_seq: -1 }))).toBeNull()
+    expect(adaptReadReceipt(receipt({ read_seq: Number.NaN }))).toBeNull()
+    expect(adaptReadReceipt(receipt({ delivered_seq: "7" }))).toBeNull()
+  })
+
+  it("ноль при этом законен: это утверждение, а не молчание", () => {
+    // Оба поля запроса разрешают `minimum: 0`, и квитанция «прочитано до нуля»
+    // — такое же известие, как любое другое. Отличить его от отсутствия поля
+    // обязан разбор, а не получатель.
+    expect(adaptReadReceipt(receipt({ read_seq: 0, delivered_seq: 0 }))).toStrictEqual({
+      readerId: ANNA,
+      readSeq: 0,
+      deliveredSeq: 0,
+    })
+  })
+
+  it("чужое событие квитанцией не становится", () => {
+    // Имя типа — часть утверждения: без него `reader_id` с числами неотличим от
+    // события другого вида, которое мы просто не знаем.
+    expect(adaptReadReceipt(publication())).toBeNull()
+    expect(adaptReadReceipt({ reader_id: ANNA, read_seq: 5, delivered_seq: 7 })).toBeNull()
+    expect(adaptReadReceipt({ type: "message.deleted", reader_id: ANNA, read_seq: 5 })).toBeNull()
+  })
+
+  it("разбор защитный: мусор не роняет обработчик публикации", () => {
+    expect(adaptReadReceipt(null)).toBeNull()
+    expect(adaptReadReceipt(undefined)).toBeNull()
+    expect(adaptReadReceipt("message.read")).toBeNull()
+    expect(adaptReadReceipt([])).toBeNull()
   })
 })

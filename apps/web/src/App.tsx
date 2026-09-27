@@ -7,6 +7,8 @@ import { TransientErrorScreen } from "./features/auth/components/TransientErrorS
 import { createHistorySource, type HistoryApi } from "./features/messages/history";
 import type { CentrifugeFactory } from "./features/realtime/realtimeClient";
 import type { RealtimeTicketIssuer } from "./api/realtimeToken";
+import type { ConversationListPage } from "./api/generated";
+import type { SendReceipt } from "./features/receipts/useReceipts";
 import type { BootState } from "./api/client";
 import type { SessionState } from "./features/auth/sessionState";
 
@@ -27,6 +29,24 @@ interface AppProps {
    * адаптация `/me` и списка бесед живёт тут же и ровно один раз.
    */
   historyApi: HistoryApi;
+  /**
+   * Перечитать список бесед — **операция**, как и `onRetry`, и по той же
+   * причине: собрана в `main.tsx`, где живёт клиент API.
+   *
+   * Нужна сверке (`D11`): событие `unread.changed` доставляется best-effort, и
+   * при его потере истину о счётчиках приносит только ответ REST. Пока операции
+   * не было, сверять было нечем — вкладка оставалась при своём числе.
+   */
+  refreshConversations: () => Promise<ConversationListPage>;
+  /**
+   * Отправка квитанции — **операция**, как и `onRetry`, и по той же причине:
+   * собрана в `main.tsx`, где живёт клиент API.
+   *
+   * Между `App` и панелью она транзитом, и это не механическая передача: тело
+   * запроса собирает `useReceipts`, а сборку **операции** из клиента API у
+   * компонента взять негде — ему негде взять `configuration`.
+   */
+  sendReceipts: SendReceipt;
   /**
    * Адрес соединения — **функцией**, а не значением, и это не стилистика.
    *
@@ -70,6 +90,8 @@ export function App({
   session,
   onRetry,
   historyApi,
+  refreshConversations,
+  sendReceipts,
   readCentrifugoUrl,
   issueTicket,
   createCentrifuge,
@@ -113,6 +135,8 @@ export function App({
         <ReadyScreen
           state={state}
           historyApi={historyApi}
+          refreshConversations={refreshConversations}
+          sendReceipts={sendReceipts}
           readCentrifugoUrl={readCentrifugoUrl}
           issueTicket={issueTicket}
           createCentrifuge={createCentrifuge}
@@ -124,6 +148,8 @@ export function App({
 interface ReadyScreenProps {
   state: ReadyState;
   historyApi: HistoryApi;
+  refreshConversations: () => Promise<ConversationListPage>;
+  sendReceipts: SendReceipt;
   readCentrifugoUrl: () => string;
   issueTicket: RealtimeTicketIssuer;
   createCentrifuge?: CentrifugeFactory;
@@ -132,6 +158,8 @@ interface ReadyScreenProps {
 function ReadyScreen({
   state,
   historyApi,
+  refreshConversations,
+  sendReceipts,
   readCentrifugoUrl,
   issueTicket,
   createCentrifuge,
@@ -176,6 +204,8 @@ function ReadyScreen({
   return (
     <ChatPage
       conversations={conversations}
+      refreshConversations={refreshConversations}
+      sendReceipts={sendReceipts}
       currentUser={viewer.user}
       currentUserId={viewer.userId}
       history={history}

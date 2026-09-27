@@ -51,12 +51,24 @@ export interface RealtimeClientOptions {
    * Имя говорит, какой из них наш.
    */
   readonly channel: string;
+  /**
+   * Личный канал — `user:{id}` (`packages/contracts/websocket/channels.json`).
+   *
+   * Сервер выдаёт его **тем же тикетом**, что и канал беседы
+   * (`services/realtime.py:83`), то есть соединение остаётся одно, а каналов
+   * у него два. Обязателен, а не необязателен: отсутствие личного канала
+   * означало бы «публикации в него выбрасываются», и это ровно тот дефект,
+   * который гейт и закрывает.
+   */
+  readonly userChannel: string;
   /** Свежий тикет на **каждую** попытку соединения (B5, B15). */
   readonly issueTicket: RealtimeTicketIssuer;
   /** Факты для автомата. Адаптер их не толкует. */
   readonly onEvent: (event: ConnectionEvent) => void;
-  /** Публикация канала — как пришла. Разбирает её срез 3, а не адаптер. */
+  /** Публикация канала беседы — как пришла. Разбирает её срез 3, а не адаптер. */
   readonly onPublication: (payload: unknown) => void;
+  /** Публикация **личного** канала — `unread.changed`. Разбирается там же, где список. */
+  readonly onUserPublication: (payload: unknown) => void;
   /**
    * Подмена конструктора SDK — для тестов адаптера.
    *
@@ -164,9 +176,12 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
   );
 
   client.on("subscribed", (ctx) => {
-    // Чужой канал — не наш факт: `user:{id}` приходит тем же событием
-    // (`services/realtime.py:83`), и докладывать о нём автомату беседы значило
-    // бы принять чужую подписку за подписку этой беседы.
+    // Фильтр остаётся, и он несущий, а не забытый: `subscribed` приходит на
+    // **каждый** выданный канал (`services/realtime.py:83` выдаёт оба одним
+    // списком), и пущенный в автомат личный канал читался бы как подписка этой
+    // беседы — то есть `data-connection-state` уходил бы из `connected` по
+    // событию о другом канале. Проверяется мутацией: снятие фильтра краснит
+    // автомат, а не косметику.
     if (ctx.channel !== options.channel) return;
 
     options.onEvent({
@@ -180,8 +195,16 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
   });
 
   client.on("publication", (ctx) => {
-    if (ctx.channel !== options.channel) return;
-    options.onPublication(ctx.data);
+    // Маршрутизация — по **имени** канала, а не по «наш/чужой». Прежде здесь
+    // стоял именно «чужой», и `unread.changed` в `user:{id}` не доходил до
+    // клиента вовсе: вкладка узнавала о своём числе только перезагрузкой.
+    // Третий канал (которого сервер не выдаёт) не уходит никуда: неизвестное
+    // имя — не повод отдать публикацию первому попавшемуся обработчику.
+    if (ctx.channel === options.channel) {
+      options.onPublication(ctx.data);
+      return;
+    }
+    if (ctx.channel === options.userChannel) options.onUserPublication(ctx.data);
   });
 
   return {

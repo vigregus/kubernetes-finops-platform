@@ -8,6 +8,14 @@
 вторая запись — проекция непрочитанного — и **второй писатель той же
 строки**, поэтому граница согласованности появилась, а вместе с ней и замок
 беседы, который обёртка держит.
+
+Вторая правка — `G3-007`, и она тоже называется вслух: у результата
+появились **прежнее состояние** и **множество заблокированных**, а порядок
+шагов вырос на два чтения. Прежнее читается **до** записи (после неё его
+не достать), блокировка — после пересчёта, и оба шага в том же тесте
+порядка, что и раньше. Сдвиг выводится из прежнего **свойством**, а не
+полем: два поля — «прежнее» и «сдвинулось» — разошлись бы при первой
+правке, а здесь истина одна.
 """
 from __future__ import annotations
 
@@ -60,11 +68,14 @@ class Connection:
 
 
 class Projection:
-    """Подменённая половина непрочитанного: чем ответил замок и что спросил пересчёт."""
+    """Подменённая половина: чем ответил замок, что спросил пересчёт,
+    каким было прежнее состояние и с кем у читателя блокировка."""
 
     def __init__(self) -> None:
         self.locks: list[ConversationId] = []
         self.recounts: list[dict[str, object]] = []
+        self.previous_reads: list[UserId] = []
+        self.block_reads: list[dict[str, object]] = []
 
 
 def _projection(
@@ -73,6 +84,8 @@ def _projection(
     watermark: int = 0,
     count: int = 0,
     gone: bool = False,
+    previous: ReadState | None = None,
+    blocked: frozenset[UserId] = frozenset(),
 ) -> Projection:
     projection = Projection()
 
@@ -105,8 +118,32 @@ def _projection(
         )
         return UnreadCount(count)
 
+    async def _прежнее(
+        conn: Connection,
+        *,
+        conversation_id: ConversationId,
+        user_id: UserId,
+    ):
+        conn.calls.append("fetch_read_state")
+        projection.previous_reads.append(user_id)
+        return previous
+
+    async def _блокировка(
+        conn: Connection,
+        *,
+        viewer: UserId,
+        conversation_id: ConversationId | None = None,
+    ):
+        conn.calls.append("blocked_with")
+        projection.block_reads.append(
+            {"viewer": viewer, "conversation_id": conversation_id}
+        )
+        return blocked
+
     monkeypatch.setattr(service, "lock_offsets", _lock)
     monkeypatch.setattr(service, "recount_unread", _recount)
+    monkeypatch.setattr(service.read_states, "fetch_read_state", _прежнее)
+    monkeypatch.setattr(service.conversations, "blocked_with", _блокировка)
     return projection
 
 
@@ -294,14 +331,19 @@ def test_беседа_исчезла_под_замком_и_это_отказ(mo
     assert conn.calls == ["fetch_last_seq", "transaction", "lock_offsets"]
 
 
-def test_порядок_шагов_голова_замок_запись_пересчёт(monkeypatch):
-    """Ронит любую перестановку из четырёх шагов.
+def test_порядок_шагов_голова_замок_прежнее_запись_пересчёт(monkeypatch):
+    """Ронит любую перестановку из шести шагов.
 
     Голова — до транзакции: она односторонняя граница присланного, а не
     вход пересчёта, и держать на ней замок беседы значило бы платить за
     лишний запрос. Замок — до записи: он и есть то, что делает пересчёт
-    согласованным с приращением потребителя. Пересчёт — после записи:
-    нижняя граница берётся из записанной строки.
+    согласованным с приращением потребителя. Прежнее — **до** записи:
+    после неё его не достать, а именно оно отвечает на вопрос «сдвинулось
+    ли». Пересчёт — после записи: нижняя граница берётся из записанной
+    строки. Блокировка читается последней и **под тем же замком**:
+    соединение уже есть, а второй поход в базу за ней был бы отдельной
+    транзакцией ради чтения, которое ничего не пишет. Пути отказа до неё
+    не доходят — при пустом ответе замка беседы нет и спрашивать не о чем.
     """
     conn = Connection()
     _allow(monkeypatch)
@@ -315,8 +357,10 @@ def test_порядок_шагов_голова_замок_запись_пере
         "fetch_last_seq",
         "transaction",
         "lock_offsets",
+        "fetch_read_state",
         "upsert_read_state",
         "recount_unread",
+        "blocked_with",
     ]
 
 
@@ -503,3 +547,362 @@ def test_число_приходит_даже_когда_читать_нечег
 
     assert result.unread_count == 0
     assert result.unread_count is not None
+
+
+# ---------------------------------------------------------------------------
+# Сдвиг: по нему решается, уходит ли событие собеседнику
+# ---------------------------------------------------------------------------
+
+
+def _состояние(delivered: int, read: int) -> ReadState:
+    return ReadState(
+        delivered_seq=ConversationSeq(delivered), read_seq=ConversationSeq(read)
+    )
+
+
+def test_продвижение_от_прежнего_это_сдвиг(monkeypatch):
+    """Первый конец пары: состояние выросло — событие обязано уйти.
+
+    Прежнее `(7, 7)`, записанное `(9, 9)`: `GREATEST` сдвинул строку, и
+    собеседник обязан узнать об этом, не дожидаясь перезагрузки страницы.
+    Сравнение с **присланным** здесь молчит: присланное нормализуется в то
+    же `(9, 9)`, и «ничего не изменилось» оказалось бы ответом на
+    настоящий сдвиг.
+    """
+    _allow(monkeypatch)
+    _head(monkeypatch, 9)
+    _store(monkeypatch, delivered=9, read=9)
+    _projection(monkeypatch, watermark=9, previous=_состояние(7, 7))
+
+    result = _set(Connection(), receipts=Receipts(read_seq=9))
+
+    assert result.ok
+    assert result.advanced
+
+
+def test_отставшая_квитанция_не_сдвиг(monkeypatch):
+    """Второй конец пары: состояние не изменилось — события нет.
+
+    Второе устройство того же человека опоздало: в строке уже девять, а
+    оно сообщает два. Клиенту вернётся **текущее** состояние (этим
+    «применено» и отличается от «проигнорировано»), но рассылать событие
+    о неподвижном состоянии нельзя: подписчики получили бы
+    `message.read {read_seq: 2}` — утверждение, откатывающее отметку
+    назад. Дефект, который ронит эта пара, — сравнение записанного с
+    **присланным**: оно краснит ровно наоборот, молчит на продвижении и
+    срабатывает на отставке.
+    """
+    _allow(monkeypatch)
+    _head(monkeypatch, 9)
+    _store(monkeypatch, delivered=9, read=9)
+    _projection(monkeypatch, watermark=9, previous=_состояние(9, 9))
+
+    result = _set(Connection(), receipts=Receipts(read_seq=2))
+
+    assert result.ok
+    assert result.state is not None and result.state.read_seq == 9
+    assert not result.advanced
+
+
+def test_первый_нулевой_запрос_не_сдвиг(monkeypatch):
+    """Ронит сравнение с прежним **без приведения** (D2).
+
+    Оба поля разрешают ноль, поэтому первый же запрос `{read_seq: 0}`
+    законен: строки ещё нет, а `upsert` её **вставит** — парой `(0, 0)`.
+    Сравнение `stored != previous` при `previous is None` истинно при
+    watermark, не сдвинувшемся ни на шаг, и в канал ушло бы
+    `message.read {read_seq: 0}` — утверждение, которого никто не делал.
+    Приводится только **сравниваемое**: в ответе отсутствие строки
+    остаётся отсутствием (`result.previous is None`), а не парой нулей.
+    """
+    _allow(monkeypatch)
+    _head(monkeypatch, 9)
+    _store(monkeypatch, delivered=0, read=0)
+    _projection(monkeypatch, watermark=9, previous=None)
+
+    result = _set(Connection(), receipts=Receipts(read_seq=0))
+
+    assert result.ok
+    assert not result.advanced
+    # Отсутствие — не ноль: то же правило, что у `unread_count` в теле
+    # беседы. Подставь здесь `ReadState(0, 0)` — и REST сказал бы
+    # «состояние есть», соврав о строке, которой не было.
+    assert result.previous is None
+
+
+def test_прежнее_читается_про_того_же_человека(monkeypatch):
+    """Ронит чтение прежнего по одному лишь номеру беседы.
+
+    Читается состояние **смотрящего**, а не «состояние беседы»: строка
+    `read_states` ключуется парой, и запрос без второго ключа вернул бы
+    чужое прочтение — например, более позднее, — а с ним и ложный ответ
+    «продвижения нет» на настоящее продвижение. `upsert` ниже пишет ту же
+    пару, и разойтись эти два ключа не могут по построению; проверка
+    называет это вслух.
+    """
+    записанное: dict[str, object] = {}
+
+    async def _записать(conn, **kwargs):
+        записанное.update(kwargs)
+        return _состояние(9, 9)
+
+    _allow(monkeypatch)
+    _head(monkeypatch, 9)
+    monkeypatch.setattr(service.read_states, "upsert_read_state", _записать)
+    projection = _projection(monkeypatch, watermark=9, previous=_состояние(7, 7))
+
+    _set(Connection(), receipts=Receipts(read_seq=9))
+
+    assert projection.previous_reads == [VIEWER_ID]
+    assert записанное["user_id"] == VIEWER_ID
+
+
+def test_блокировка_едет_в_результат_фактом(monkeypatch):
+    """Ронит чтение предиката без беседы (D14).
+
+    С двумя аргументами множество значит «кто из **этой** беседы
+    заблокирован с читателем»; без второго — «с кем читатель заблокирован
+    вообще», и тогда одна блокировка в посторонней беседе погасила бы
+    живую квитанцию здесь. Сервис только **называет** факт: по нему
+    молчит публикация, и решает это обработчик (`api/main.py`), у
+    которого есть чем публиковать. В базу `api` ходить не вправе
+    (`scripts/check-layers.py`) — поэтому и здесь.
+    """
+    peer = UserId(uuid.UUID("44444444-4444-4444-4444-444444444444"))
+    _allow(monkeypatch)
+    _head(monkeypatch, 9)
+    _store(monkeypatch, delivered=9, read=9)
+    projection = _projection(
+        monkeypatch, watermark=9, previous=_состояние(7, 7), blocked=frozenset({peer})
+    )
+
+    result = _set(Connection(), receipts=Receipts(read_seq=9))
+
+    assert result.blocked_with == frozenset({peer})
+    assert projection.block_reads == [
+        {"viewer": VIEWER_ID, "conversation_id": CONVERSATION}
+    ]
+
+
+def test_без_блокировки_множество_пусто_и_это_не_отсутствие(monkeypatch):
+    """Ронит `None` вместо пустого множества.
+
+    Пустое множество — положительный ответ «блокировок нет», и обработчик
+    читает его как `not result.blocked_with`. `None` на его месте дал бы
+    тот же ответ случайно, но `frozenset` в типе поля объявлен не зря:
+    значение, отданное вызывающему, должно отвечать на вопрос, а не
+    обозначать «не спрашивали».
+    """
+    _allow(monkeypatch)
+    _head(monkeypatch, 9)
+    _store(monkeypatch, delivered=9, read=9)
+    _projection(monkeypatch, watermark=9, previous=_состояние(7, 7))
+
+    result = _set(Connection(), receipts=Receipts(read_seq=9))
+
+    assert result.blocked_with == frozenset()
+    assert result.blocked_with is not None
+
+
+# ---------------------------------------------------------------------------
+# Число непрочитанного читателю (`unread.changed`)
+# ---------------------------------------------------------------------------
+
+
+def test_результат_несёт_адресата_и_пересчитанное_число(monkeypatch):
+    """`D7`: адресат квитанции — тот, кто её прислал, и число — из пересчёта.
+
+    Множество адресатов у этого писателя одноэлементное, и это свойство
+    пути, а не правило: число, посчитанное по чьей-то квитанции,
+    принадлежит ровно этому человеку. У соседнего писателя (приращение
+    потребителя) множества расходятся — «кто записал строку» и «кому
+    принадлежит число» там разные, — и потому адресат собирается у каждого
+    писателя своим отбором, а не одним общим.
+
+    Число берётся **пересчитанное**, а не `stored.read_seq` и не прежнее:
+    `recount_unread` — тот самый оператор, что записал проекцию, и его
+    `RETURNING` и есть абсолютное значение, которое обязано доехать до
+    вкладки.
+
+    Ронит подстановку на место числа чего-нибудь вычислимого на месте:
+    пересчёт в стенде намеренно не равен ни состоянию, ни прежнему.
+    """
+    _allow(monkeypatch)
+    _head(monkeypatch, 9)
+    _store(monkeypatch, delivered=9, read=9)
+    _projection(monkeypatch, watermark=9, count=4, previous=_состояние(7, 7))
+
+    result = _set(Connection(), receipts=Receipts(read_seq=9))
+
+    assert [(n.user_id, int(n.unread_count)) for n in result.notices] == [
+        (VIEWER_ID, 4)
+    ]
+    assert [n.conversation_id for n in result.notices] == [CONVERSATION]
+
+
+def test_число_читателю_уходит_и_когда_квитанция_не_продвинулась(monkeypatch):
+    """Отступление от «публикуем только на сдвиге», названное по причине.
+
+    `message.read` молчит без сдвига — это утверждение о прочитанном,
+    и утверждать неподвижное незачем (`D2`). `unread.changed` устроен
+    иначе: он несёт **абсолютное** число, а пересчёт мог его исправить,
+    даже когда `last_read_seq` не двинулся, — второе устройство того же
+    человека пишет приращением в ту же строку, и проигравшая квитанция
+    пересчитывает проекцию по тому, что в строке лежит. Молчать в этот
+    момент значило бы оставить вкладку со старым числом до сверки.
+
+    Проверка сторожит **различие** двух решений: одно событие гасится
+    сдвигом, другое им не гасится вовсе.
+    """
+    _allow(monkeypatch)
+    _head(monkeypatch, 9)
+    _store(monkeypatch, delivered=9, read=9)
+    _projection(monkeypatch, watermark=9, count=2, previous=_состояние(9, 9))
+
+    result = _set(Connection(), receipts=Receipts(read_seq=2))
+
+    assert not result.advanced
+    assert [(n.user_id, int(n.unread_count)) for n in result.notices] == [
+        (VIEWER_ID, 2)
+    ]
+
+
+def test_писатель_квитанции_не_публикует_сам(monkeypatch):
+    """`D7`: публикация — вне транзакции писателя, и это про откат.
+
+    Ронит перенос публикации внутрь `async with conn.transaction()` —
+    туда, где её хочется поставить рядом с записью состояния. Шаг,
+    следующий за публикацией, здесь падает (`blocked_with`), транзакция
+    откатывается, и в базе остаётся прежнее состояние. Событие, ушедшее
+    до этого, вернуть нечем: `publish` не отменяется, а второго события
+    о том же сдвиге не будет — канал разошёлся бы с истиной в ту сторону,
+    из которой восстановления нет (`D11`). Поэтому у сервиса нет и не
+    должно быть ручки на публикацию: её берёт обработчик, **после**
+    закрытия соединения.
+
+    Красный приходит от дефекта, а не от уборки: падение здесь — часть
+    сценария (откат), и оно поднято после записи состояния, а не вместо
+    неё.
+    """
+    publications: list[dict] = []
+
+    async def _publish(**kwargs):
+        publications.append(kwargs)
+        return True
+
+    async def _fail(conn, *, viewer, conversation_id=None):
+        raise ConnectionError("отказ после записи состояния")
+
+    _allow(monkeypatch)
+    _head(monkeypatch, 9)
+    _store(monkeypatch, delivered=9, read=9)
+    _projection(monkeypatch, watermark=9, previous=_состояние(7, 7))
+    monkeypatch.setattr(service.conversations, "blocked_with", _fail)
+    monkeypatch.setattr(service, "announce_read", _publish)
+
+    with pytest.raises(ConnectionError):
+        _set(Connection(), receipts=Receipts(read_seq=9))
+
+    assert publications == []
+
+
+# ---------------------------------------------------------------------------
+# Публикация: канал, тело и исход
+# ---------------------------------------------------------------------------
+
+
+class FakeRealtime:
+    """Записывает публикации, отвечая успехом, как настроено."""
+
+    def __init__(self, *, ok: bool = True) -> None:
+        self.ok = ok
+        self.published: list[tuple[str, dict]] = []
+
+    async def publish(self, channel, data):
+        self.published.append((channel, data))
+        return self.ok
+
+
+def test_событие_уходит_в_канал_беседы_и_несёт_номера():
+    """Ронит переиспользование `seq` под номер квитанции и чужой канал.
+
+    `seq` — номер **сообщения**, и разрыв в нём клиент читает как «пропустил
+    события, догружай историю»; второе значение в том же поле сломало бы
+    этот детектор у клиента, который о квитанциях не знает вовсе, — то
+    есть ровно то, что запрещает `CTR-003`. Поэтому номер квитанции едет
+    своим именем, и это проверяется буквально: в теле нет ключа `seq`.
+
+    Канал берётся из `realtime_delivery.channel_for`, а не собирается на
+    месте: имя канала — часть контракта, и вторая его сборка разошлась бы
+    с первой молча.
+    """
+    realtime = FakeRealtime()
+
+    published = asyncio.run(
+        service.announce_read(
+            realtime=realtime,
+            conversation_id=CONVERSATION,
+            reader_id=VIEWER_ID,
+            state=_состояние(9, 7),
+        )
+    )
+
+    assert published is True
+    assert realtime.published == [
+        (
+            f"conversation:{CONVERSATION}",
+            {
+                "type": "message.read",
+                "reader_id": str(VIEWER_ID),
+                "read_seq": 7,
+                "delivered_seq": 9,
+            },
+        )
+    ]
+
+
+def test_без_клиента_событие_не_уходит_и_это_не_ошибка():
+    """Ронит падение на необязательном Centrifugo.
+
+    `runtime.centrifugo_client_from_env` отдаёт `None`, когда стенд поднят
+    без realtime-слоя, и квитанция обязана остаться рабочей: её предмет —
+    запись состояния, а публикация лишь ускоряет доставку. Падение здесь
+    сделало бы realtime условием записи, чего решение не принимало.
+    """
+    assert (
+        asyncio.run(
+            service.announce_read(
+                realtime=None,
+                conversation_id=CONVERSATION,
+                reader_id=VIEWER_ID,
+                state=_состояние(1, 1),
+            )
+        )
+        is False
+    )
+
+
+def test_отказ_публикации_виден_исходом_а_не_успехом(monkeypatch):
+    """Ронит `return True` независимо от ответа Centrifugo.
+
+    Исход считается метрикой, и «ok» на неудавшейся публикации скрыла бы
+    ровно тот случай, ради которого метрика заведена: коммит прошёл,
+    событие не ушло, а клиент узнает об этом только сверкой. Образец —
+    `services/session_management.py`, где тот же разрыв соединения тоже
+    ускорение, а не условие.
+    """
+    realtime = FakeRealtime(ok=False)
+    measured: list[str] = []
+    monkeypatch.setattr(service.metrics, "realtime_published", measured.append)
+
+    published = asyncio.run(
+        service.announce_read(
+            realtime=realtime,
+            conversation_id=CONVERSATION,
+            reader_id=VIEWER_ID,
+            state=_состояние(1, 1),
+        )
+    )
+
+    assert published is False
+    assert measured == ["failed"]
