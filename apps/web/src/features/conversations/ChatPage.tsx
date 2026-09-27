@@ -3,8 +3,9 @@ import { ConversationSidebar } from "./components/ConversationSidebar"
 import { ChatHeader } from "./components/ChatHeader"
 import { adaptConversations } from "./adapter"
 import { adaptUnreadChanged, withUnreadOverlay } from "./unreadOverlay"
-import type { ConversationListPage } from "../../api/generated"
-import { adaptPublication, adaptReadReceipt } from "../messages/message-adapter"
+import type { ConversationListPage, Message } from "../../api/generated"
+import { adaptMessage, adaptPublication, adaptReadReceipt } from "../messages/message-adapter"
+import { confirmedClientIds } from "../messages/eventMerge"
 import { MessageComposer } from "../messages/components/MessageComposer"
 import { MessageList } from "../messages/components/MessageList"
 import { useOutbox } from "../messages/outbox/useOutbox"
@@ -23,7 +24,12 @@ import { ConnectionStatusLine } from "../realtime/components/ConnectionStatusLin
 import type { CentrifugeFactory } from "../realtime/realtimeClient"
 import { useRealtimeConnection } from "../realtime/useRealtimeConnection"
 import { MessengerLayout } from "../../shared/ui/MessengerLayout"
-import type { Conversation, CurrentUser, PendingMessage } from "../../shared/lib/types"
+import type {
+  ChatMessage,
+  Conversation,
+  CurrentUser,
+  PendingMessage,
+} from "../../shared/lib/types"
 
 /**
  * Пустой оверлей — **одна** карта на модуль, а не новая на каждый сброс.
@@ -42,6 +48,24 @@ const EMPTY_OVERLAY: ReadonlyMap<string, number> = new Map()
  * рендере беседы, которой очередь не касается вовсе.
  */
 const EMPTY_PENDING: readonly PendingMessage[] = []
+
+/**
+ * Лента **одной** беседы, какой её видит очередь, — и только то, что ей нужно.
+ *
+ * Очередь живёт выше панели (см. довод у `useOutbox`), а лента — внутри неё, и
+ * это единственное место, где две половины сходятся. Отдаётся ровно два поля, а
+ * не весь `ConversationHistory`: очередь не должна знать ни про границу слияния,
+ * ни про догрузку, ни про `applyMessage` — иначе она завела бы второе место,
+ * знающее про ленту, ровно то, что запрещает `eventMerge.confirmedClientIds`.
+ *
+ * `conversationId` здесь не для красоты: очередь одна на все беседы, а ответ
+ * приходит на **свою**, и вложение ответа в чужую ленту показало бы сообщение
+ * там, где его не отправляли. Проверка стоит на стороне, которая это знает.
+ */
+interface FeedEntry {
+  readonly conversationId: string
+  readonly accept: (message: ChatMessage) => void
+}
 
 interface ChatPageProps {
   /** Беседы из `GET /conversations`. Фикстур здесь нет и быть не может. */
@@ -239,6 +263,52 @@ export function ChatPage({
   const merged = useMemo(() => withUnreadOverlay(base, overlay), [base, overlay])
 
   /**
+   * Лента активной беседы — в ссылке, потому что её владелец объявлен **ниже**.
+   *
+   * Направление выбрано измерением, а не вкусом: очередь обязана быть выше
+   * панели (иначе запись умирает на смене беседы), а лента живёт в панели, и
+   * `key` пересоздаёт её при каждом переключении. Значит связь идёт **вверх** —
+   * панель сообщает о себе, очередь пользуется. Обратное направление потребовало
+   * бы либо поднять ленту в `ChatPage` (и потерять изоляцию хука от `key`), либо
+   * положить очередь в панель (и потерять саму очередь).
+   *
+   * Ссылка, а не состояние: `onSent` зовётся из промиса попытки, и записанное в
+   * состояние значение было бы снимком того рендера, в котором попытка началась.
+   */
+  const feedRef = useRef<FeedEntry | null>(null)
+  const attachFeed = useCallback((entry: FeedEntry | null) => {
+    feedRef.current = entry
+  }, [])
+
+  /**
+   * Ответ сервера — **тем же** путём, что история и realtime (D6).
+   *
+   * Ни здесь, ни в очереди нет второй сборки модели: `adaptMessage` и
+   * `acceptPublication` — те же две функции, которыми в ленту входит публикация.
+   * Положить ответ мимо них значило бы завести второй путь слияния, и первое же
+   * расхождение — разрыв номеров, который второй путь не распознает, — осталось
+   * бы незамеченным.
+   *
+   * `new Date()` здесь на месте, в отличие от тестов адаптера: часы нужны ровно
+   * затем, чтобы отформатировать отметку, а не чтобы получить проверяемое
+   * значение. Запись при этом **не снимается** — снимет её `settle` по факту
+   * появления сообщения в ленте (`confirmedClientIds`), потому что при разрыве
+   * номеров ответа в ленте ещё нет.
+   *
+   * Беседа сверяется с записью: ответ на чужую ленту — не «сообщение не
+   * отправилось», а «его не туда положили», и различить это здесь есть чем.
+   */
+  const onSent = useCallback(
+    (record: PendingMessage, response: Message) => {
+      const entry = feedRef.current
+      if (entry === null || entry.conversationId !== record.conversationId) return
+
+      entry.accept(adaptMessage(response, currentUserId, new Date()))
+    },
+    [currentUserId],
+  )
+
+  /**
    * Очередь исходящих — **здесь**, а не в панели беседы.
    *
    * Место выбрано по измеренному свойству: панель пересоздаётся на каждой смене
@@ -251,7 +321,7 @@ export function ChatPage({
    * читать IndexedDB заново при каждом переключении значило бы платить за то,
    * что не менялось, и повторно запускать попытку для всех записей сразу.
    */
-  const outbox = useOutbox({ store: outboxStore, send: sendMessage })
+  const outbox = useOutbox({ store: outboxStore, send: sendMessage, onSent })
 
   /**
    * Записи **своей** беседы: очередь одна на все, а лента показывает одну.
@@ -317,6 +387,13 @@ export function ChatPage({
           onSend={(text) => outbox.enqueue(activeConversation.id, text)}
           onUnreadPublication={onUnreadPublication}
           onReconcile={refresh}
+          // Лента сообщает о себе — очередь этим пользуется, чтобы вложить ответ
+          // в **свою** беседу (довод у `FeedEntry`).
+          onFeedReady={attachFeed}
+          // Обратное движение: подтверждённое дошло до ленты — снять запись.
+          // Снимает очередь, а решает лента: вопрос «что подтверждено» знает
+          // `eventMerge`, вопрос «что снять» — `confirmedClientIds`.
+          onConfirmed={outbox.settle}
         />
       )}
     </MessengerLayout>
@@ -340,6 +417,16 @@ interface ConversationPaneProps {
   onUnreadPublication: (payload: unknown) => void
   /** Выход из разрыва — повод сверки списка. */
   onReconcile: () => void
+  /**
+   * «Вот моя лента», и `null` — «её больше нет».
+   *
+   * Панель умирает по `key` при каждой смене беседы, и очередь обязана узнать об
+   * этом **сама**: ссылка на мёртвую ленту вложила бы ответ сервера в беседу,
+   * которой на экране нет.
+   */
+  onFeedReady: (entry: FeedEntry | null) => void
+  /** Подтверждённое дошло до ленты — вот его `client_message_id`. */
+  onConfirmed: (clientMessageIds: ReadonlySet<string>) => void
 }
 
 /**
@@ -370,6 +457,8 @@ function ConversationPane({
   onSend,
   onUnreadPublication,
   onReconcile,
+  onFeedReady,
+  onConfirmed,
 }: ConversationPaneProps) {
   /**
    * Лента этого окна — в ссылке, потому что публикации достаются обработчику,
@@ -507,6 +596,45 @@ function ConversationPane({
   useEffect(() => {
     historyRef.current = conversationHistory
   })
+
+  /**
+   * Лента говорит очереди, кто она, — и умолкает, когда её больше нет.
+   *
+   * `acceptPublication` берётся прямо из хука, а не из `historyRef.current`: у
+   * ссылки нет ни стабильности, ни гарантии, что она уже заполнена к моменту
+   * первого ответа сервера, — а этот эффект исполняется до того, как вкладка
+   * успеет что-либо отправить. Уборка сообщает `null`, и это не симметрия ради
+   * симметрии: панель умирает по `key` при каждой смене беседы, и очередь без
+   * этого вложила бы ответ в беседу, которой на экране уже нет.
+   *
+   * Беседа называется **панелью**, а не сверяется вызывающим: она знает своё
+   * имя, а очередь нет — у неё запись помнит беседу, но ленты за ней не стоит.
+   */
+  useEffect(() => {
+    onFeedReady({
+      conversationId: conversation.id,
+      accept: conversationHistory.acceptPublication,
+    })
+    return () => onFeedReady(null)
+  }, [onFeedReady, conversation.id, conversationHistory.acceptPublication])
+
+  /**
+   * Подтверждённое дошло до ленты — снять записи очереди по их тождеству (D6).
+   *
+   * Здесь и только здесь решается судьба оптимистичной записи, и решается она
+   * **фактом ленты**, а не исходом ответа: при разрыве номеров сообщение в
+   * `messages` не попадает (`applyMessage` оставляет дыру дырой), значит снимать
+   * нечего, и запись доживает до конца догрузки — вместо того чтобы исчезнуть
+   * вместе с ещё не приехавшим подтверждением.
+   *
+   * Это верно и для порядка «событие раньше ответа»: оба входа идут одним путём
+   * (`acceptPublication`), и подтверждённое попадает в `messages` одинаково —
+   * независимо от того, кто его принёс. Второй точки снятия не заводится: две
+   * разошлись бы ровно так же, как любые две копии правила.
+   */
+  useEffect(() => {
+    onConfirmed(confirmedClientIds(conversationHistory.messages, pending))
+  }, [onConfirmed, conversationHistory.messages, pending])
 
   /**
    * Квитанция вкладки: два числа из двух разных источников.

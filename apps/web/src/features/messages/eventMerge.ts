@@ -10,8 +10,14 @@
  *
  * Модуль чистый: ни `centrifuge`, ни `fetch`, ни React. Поэтому детектор
  * пропуска (`MSG-005`) предъявляется прогоном без сети.
+ *
+ * Второй предмет модуля — `confirmedClientIds`: **когда** оптимистичную запись
+ * очереди можно снять. Он живёт здесь, а не в очереди, по той же причине, по
+ * которой здесь живёт `applyMessage`: снятие — утверждение о ленте («подтверждённое
+ * уже в ней»), и очередь, отвечающая на него сама, завела бы второе место,
+ * знающее про слияние, — и разошлась бы с первым молча.
  */
-import type { ChatMessage } from "../../shared/lib/types";
+import type { ChatMessage, PendingMessage } from "../../shared/lib/types";
 
 /** Состояние ленты: сообщения по возрастанию `seq` и применённая граница. */
 export interface MergeState {
@@ -187,6 +193,44 @@ export function settleAfterRound(
     return { kind: "settled", state: replay.state };
   }
   return { kind: "needs-another-round", state: replay.state, reason: "gap" };
+}
+
+/**
+ * Какие записи очереди сервер уже подтвердил — по тождеству логической отправки.
+ *
+ * Снятие оптимистичной записи привязано **к появлению подтверждённого в ленте**,
+ * а не к ответу `POST` и не к исходу `applyMessage` (D6). Довод измерен:
+ * при `gap` ответ в ленту **не** кладётся — `applyMessage` оставляет дыру дырой
+ * (`G3-006`), — и запись, снятая по факту ответа, оставила бы на экране ноль
+ * записей на всё время догрузки. Здесь же при `gap` подтверждённого в `messages`
+ * нет, снимать нечего, и запись доживает до конца круга; при `applied` и
+ * `duplicate` оно есть, и запись уходит. Два исхода, требовавшие разных веток,
+ * различает одно условие — потому что вопрос задан не «что ответил сервер», а
+ * «что лежит в ленте».
+ *
+ * Путь сообщения не важен, и это несущее свойство, а не совпадение: ответ `POST`
+ * и публикация канала идут **одним** путём (`adaptMessage` → `applyMessage`, D6),
+ * поэтому одна функция снимает запись в обоих порядках — «ответ раньше события»
+ * и «событие раньше ответа».
+ *
+ * `message_id` тождеством отправки **не** является и здесь не используется: им
+ * снялась бы запись по чужому сообщению (см. `adaptMessage`).
+ *
+ * Возвращаются только те идентификаторы, что в очереди действительно есть:
+ * функция отвечает на вопрос «что снять», а не «что подтверждено».
+ */
+export function confirmedClientIds(
+  messages: readonly ChatMessage[],
+  pending: readonly PendingMessage[],
+): ReadonlySet<string> {
+  const queued = new Set(pending.map((record) => record.clientMessageId));
+  const confirmed = new Set<string>();
+  for (const message of messages) {
+    if (message.clientMessageId !== undefined && queued.has(message.clientMessageId)) {
+      confirmed.add(message.clientMessageId);
+    }
+  }
+  return confirmed;
 }
 
 function headOf(messages: readonly ChatMessage[]): number {

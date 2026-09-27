@@ -1,7 +1,12 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 
-import type { Conversation as ConversationDto, ConversationListPage } from "../../api/generated";
+import { MessageFromJSON } from "../../api/generated";
+import type {
+  Conversation as ConversationDto,
+  ConversationListPage,
+  Message,
+} from "../../api/generated";
 import { givenFakeCentrifuge, givenTicketIssuer } from "../../test-support/centrifuge";
 import { VIEWER, conversationOf } from "../../test-support/fixtures";
 import {
@@ -1062,5 +1067,241 @@ describe("квитанция собеседника: приём и отобра�
     expect(calls.refreshes).toBe(1);
     // Тот же ответ двигает и состояние сообщений — числа у путей одни и те же.
     expect(rowState(101)).toBe("read");
+  });
+});
+
+/**
+ * Идентификатор подтверждённого сообщения — **один** на ответ и на событие.
+ *
+ * Обе дороги описывают одну и ту же запись, и разошедшиеся здесь
+ * идентификаторы сделали бы «событие сняло запись» неотличимым от «событие
+ * завело вторую». Префикс отличается от `messageOf` намеренно: снимок хвоста и
+ * подтверждённое — разные сообщения, и совпади они, `applyMessage` назвал бы
+ * применение `duplicate` по совсем другой причине.
+ */
+function confirmedIdOf(seq: number): string {
+  return `22222222-2222-2222-2222-2222222222${String(seq).padStart(2, "0")}`;
+}
+
+/**
+ * Ответ сервера на отправку — **тем же контрактом**, каким отвечает `POST`.
+ *
+ * Собирается `MessageFromJSON`, а не литералом: литерал типа `Message` разошёлся
+ * бы с контрактом молча, а стенд на то и стенд, чтобы идти тем же путём, что
+ * сервер, — разбор ответа обязан быть производственным.
+ *
+ * `client_message_id` кладётся **из запроса**, а не выдумывается: сведение идёт
+ * именно им (`confirmedClientIds`), и тест, подставивший сюда своё значение,
+ * проверял бы совпадение с самим собой.
+ */
+function replyOf(seq: number, clientMessageId: string, text: string): Message {
+  return MessageFromJSON({
+    message_id: confirmedIdOf(seq),
+    conversation_id: ANNA.id,
+    seq,
+    sender_id: VIEWER_ID,
+    client_message_id: clientMessageId,
+    type: "text",
+    payload: { text },
+    created_at: "2026-09-27T14:22:31Z",
+  });
+}
+
+/**
+ * Событие `message.created` о **своём** сообщении — путь, которым приходит
+ * подтверждение, когда ответ `POST` потерян.
+ *
+ * Отправитель здесь зритель, а не собеседник: событие о чужом сообщении
+ * проверяло бы приём (это делает `publishMessage` выше), а запись очереди к
+ * чужому сообщению не относится вовсе. Тождество кладётся тем же, что ушло в
+ * запрос: свести событие с записью **этим** полем и есть предмет проверки.
+ */
+async function publishOwnMessage(
+  fake: ReturnType<typeof givenFakeCentrifuge>,
+  seq: number,
+  clientMessageId: string,
+  text: string,
+) {
+  await act(async () => {
+    fake.clientHandlers["publication"]?.({
+      channel: ANNA_CHANNEL,
+      data: {
+        type: "message.created",
+        message_id: confirmedIdOf(seq),
+        seq,
+        sender_id: VIEWER_ID,
+        client_message_id: clientMessageId,
+        payload: { text },
+      },
+    });
+  });
+}
+
+/**
+ * Сведение отправленного: ответ `POST`, событие канала и разрыв номеров (D6).
+ *
+ * Предмет — **ровно одна** запись об отправленном: одна подтверждённая и ни
+ * одной висящей. Держат это **две** точки, и обе здесь названы: ответ `POST`
+ * идёт тем же путём, что история и realtime (`adaptMessage` →
+ * `acceptPublication`), а снимает запись не ответ, а **появление
+ * подтверждённого в ленте** (`confirmedClientIds` → `settle`). Красный на одной
+ * точке не закрывает вторую, поэтому порядков три, а не один.
+ *
+ * Транспорт везде **отложенный промис**, а не немедленный ответ: при мгновенном
+ * резолве запись успела бы появиться и сняться в одной микрозадаче, и проверка
+ * «сначала висит, потом снята» стала бы гонкой. Здесь окно между нажатием и
+ * ответом открывается явно, и состояние записи в нём видно.
+ */
+describe("сведение отправленного: ответ, событие и разрыв номеров", () => {
+  it("ответ доходит до ленты и снимает запись — realtime молчит", async () => {
+    // Порядок (i) целиком без единого события. Мутация «снятие только по
+    // событию» краснит ровно здесь: события не будет вовсе, а сообщение уже
+    // отправлено — запись провисела бы вечно.
+    const answer = deferred<Message>();
+    const { container, calls } = setup({
+      conversations: [ANNA],
+      tail: () => Promise.resolve(tailOf([messageOf(1)])),
+      sendMessage: () => answer.promise,
+    });
+
+    await waitFor(() => expect(screen.getByText("message 1")).toBeTruthy());
+
+    fireEvent.change(container.querySelector("[data-composer-input]")!, {
+      target: { value: "Hello Anna" },
+    });
+    fireEvent.click(container.querySelector("[data-composer-send]")!);
+
+    // Запись на месте, ответа ещё нет — состояние «идёт попытка», а не «ушло».
+    await waitFor(() =>
+      expect(
+        container.querySelector("[data-pending-client-id]")?.getAttribute("data-message-state"),
+      ).toBe("sending"),
+    );
+    expect(calls.sent).toHaveLength(1);
+
+    await act(async () => {
+      answer.resolve(replyOf(2, calls.sent[0].clientMessageId, "Hello Anna"));
+    });
+
+    // Запись снята **появлением подтверждённого в ленте**: ни события, ни
+    // второго пути слияния здесь нет.
+    await waitFor(() =>
+      expect(container.querySelector("[data-pending-client-id]")).toBeNull(),
+    );
+
+    expect(container.querySelectorAll(`[data-message-id="${confirmedIdOf(2)}"]`)).toHaveLength(1);
+    expect(container.querySelectorAll("[data-message-seq]")).toHaveLength(2);
+    expect(container.querySelector('[data-message-seq="2"]')?.textContent).toBe("Hello Anna");
+  });
+
+  it("событие приходит раньше ответа: запись снята, и подтверждённая — одна", async () => {
+    // Порядок (ii). Утверждение точное: запись обязана сняться **событием**, не
+    // дождавшись ответа, — ответ может не прийти вовсе, а сообщение уже создано.
+    // Мутация «снятие только по ответу» краснит здесь: до ответа запись стояла
+    // бы рядом с подтверждённой, то есть об одном сообщении было бы две строки.
+    const answer = deferred<Message>();
+    const { container, calls, fake } = setup({
+      conversations: [ANNA],
+      tail: () => Promise.resolve(tailOf([messageOf(1)])),
+      sendMessage: () => answer.promise,
+    });
+
+    await waitFor(() => expect(screen.getByText("message 1")).toBeTruthy());
+
+    fireEvent.change(container.querySelector("[data-composer-input]")!, {
+      target: { value: "Hello Anna" },
+    });
+    fireEvent.click(container.querySelector("[data-composer-send]")!);
+
+    await waitFor(() => expect(calls.sent).toHaveLength(1));
+
+    await publishOwnMessage(fake, 2, calls.sent[0].clientMessageId, "Hello Anna");
+
+    await waitFor(() =>
+      expect(container.querySelector("[data-pending-client-id]")).toBeNull(),
+    );
+    expect(container.querySelectorAll("[data-message-seq]")).toHaveLength(2);
+
+    // Ответ приходит **вторым** — и второго сообщения не заводит: запись с тем
+    // же `message_id` уже лежит, и `applyMessage` называет это `duplicate`.
+    await act(async () => {
+      answer.resolve(replyOf(2, calls.sent[0].clientMessageId, "Hello Anna"));
+    });
+
+    expect(container.querySelectorAll("[data-message-seq]")).toHaveLength(2);
+    expect(container.querySelector('[data-message-seq="2"]')?.textContent).toBe("Hello Anna");
+  });
+
+  it("ответ потерян, событие доехало: запись снята, дубля нет", async () => {
+    // Порядок (iii): транспорта нет вовсе — `sendMessage` не назван, и попытка
+    // отвергается (исход по умолчанию в стенде). Так и выглядит потерянный
+    // ответ: для клиента он неотличим от «не дошло», и запись уходит в повтор.
+    // Мутация «снятие только по ответу» краснит: ответа не было и не будет.
+    const { container, calls, fake } = setup({
+      conversations: [ANNA],
+      tail: () => Promise.resolve(tailOf([messageOf(1)])),
+    });
+
+    await waitFor(() => expect(screen.getByText("message 1")).toBeTruthy());
+
+    fireEvent.change(container.querySelector("[data-composer-input]")!, {
+      target: { value: "Hello Anna" },
+    });
+    fireEvent.click(container.querySelector("[data-composer-send]")!);
+
+    // Запись не снята и повторяется — исход отказа, а не молчание.
+    await waitFor(() =>
+      expect(
+        container.querySelector("[data-pending-client-id]")?.getAttribute("data-message-state"),
+      ).toBe("retrying"),
+    );
+    expect(calls.sent).toHaveLength(1);
+
+    await publishOwnMessage(fake, 2, calls.sent[0].clientMessageId, "Hello Anna");
+
+    await waitFor(() =>
+      expect(container.querySelector("[data-pending-client-id]")).toBeNull(),
+    );
+    // Одна подтверждённая и ни одной висящей — ровно то, ради чего тождество
+    // отправки доезжает до события (D3).
+    expect(container.querySelectorAll("[data-message-seq]")).toHaveLength(2);
+  });
+
+  it("ответ с номером через пропуск: запись остаётся, а лента уходит в догрузку", async () => {
+    // Разрыв номеров: граница 1, ответ принёс 3. `applyMessage` называет это
+    // `gap` и сообщение в ленту **не** кладёт (`G3-006`) — значит снимать
+    // нечего, и запись обязана дожить до конца круга: сними её по факту ответа,
+    // и на экране не осталось бы **ни одной** записи об этом сообщении, пока
+    // идёт REST (D6).
+    //
+    // Здесь же краснит и мутация «второй путь слияния»: ответ, положенный мимо
+    // `applyMessage`, разрыва не увидел бы вовсе, и `calls.pages` остался бы пуст.
+    const answer = deferred<Message>();
+    const { container, calls } = setup({
+      conversations: [ANNA],
+      tail: () => Promise.resolve(tailOf([messageOf(1)])),
+      sendMessage: () => answer.promise,
+    });
+
+    await waitFor(() => expect(screen.getByText("message 1")).toBeTruthy());
+
+    fireEvent.change(container.querySelector("[data-composer-input]")!, {
+      target: { value: "Hello Anna" },
+    });
+    fireEvent.click(container.querySelector("[data-composer-send]")!);
+
+    await waitFor(() => expect(calls.sent).toHaveLength(1));
+
+    await act(async () => {
+      answer.resolve(replyOf(3, calls.sent[0].clientMessageId, "Hello Anna"));
+    });
+
+    // Догрузка пошла — это и есть признак того, что разрыв распознан.
+    await waitFor(() => expect(calls.pages.length).toBeGreaterThan(0));
+
+    // А запись на месте: подтверждённого в ленте нет, снимать нечего.
+    expect(container.querySelector("[data-pending-client-id]")).toBeTruthy();
+    expect(container.querySelector('[data-message-seq="3"]')).toBeNull();
+    expect(container.querySelectorAll("[data-message-seq]")).toHaveLength(1);
   });
 });
