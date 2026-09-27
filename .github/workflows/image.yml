@@ -9,7 +9,16 @@ name: Образ мессенджера
 
 on:
   push:
-    branches: [main]
+    # Любая ветка, а не только main: образ нужен и до слияния — из PR его взять
+    # больше негде (`workflow_dispatch` не заменяет push-событие, см.
+    # web-image.yml). Из main он при этом не пропадает: там ветка та же самая.
+    #
+    # Цена названа: тег одинаков по форме у любой ветки (см. `tags` ниже), а
+    # выкатка берёт образ, опубликованный позже всех, — значит по тегу ветку не
+    # отличить, и на стенд может уехать образ из незамерженной ветки. Это
+    # принято сознательно; кому нужен стенд только на main, тому нужен признак
+    # ветки в теге, а он отвергнут.
+    branches: ["**"]
     paths:
       - 'apps/messenger/**'
       - '.github/workflows/image.yml'
@@ -66,9 +75,11 @@ jobs:
           push: true
           build-args: |
             BASE_DIGEST=${{ steps.base.outputs.digest }}
-          # Тег — только идентификатор коммита. `latest` намеренно
-          # отсутствует: подвижный тег в реестре возвращает ровно ту
-          # проблему, ради которой всё это и делается.
+          # Тег — только идентификатор коммита и ничего больше: ни `latest`,
+          # ни имени ветки. Подвижный тег возвращает ровно ту проблему, ради
+          # которой всё это и делается, а имя ветки в теге — это ограничение
+          # выкатки, которого никто не просил: апдейтер берёт последний
+          # опубликованный образ, из какой бы ветки он ни был.
           tags: ${{ env.IMAGE }}:${{ github.sha }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
@@ -76,19 +87,23 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Digest для выкатки
-        # Это и есть артефакт конвейера: всё дальнейшее ссылается на него,
-        # а не на коммит и не на тег.
+      - name: Что опубликовано
+        # Digest печатается и остаётся настоящим: он — путь выкатки по умолчанию
+        # (`values.yaml`) и то, чем меряется неизменность. Но выкатку двигает не
+        # он: апдейтер берёт тег по времени публикации, а диджест записать в
+        # `Application` не умеет вовсе — `spec` получает `репозиторий:тег`.
         run: |
           {
             echo "### Образ опубликован"
             echo
             echo '```'
             echo "образ:  ${{ env.IMAGE }}"
+            echo "тег:    ${{ github.sha }}"
             echo "digest: ${{ steps.push.outputs.digest }}"
             echo '```'
             echo
-            echo "Выкатка: подставить digest в"
-            echo "\`gitops/04-messenger/messenger-services/values.yaml\`"
-            echo "и выключить \`image.allowMutableTag\`."
+            echo "Выкатка коммита не требует: \`argocd-image-updater\` следит за"
+            echo "тегами в реестре и патчит живой \`Application messenger-services\`"
+            echo "(\`gitops/02-infra/argocd-image-updater\`). Ручной путь — подставить"
+            echo "digest в \`gitops/04-messenger/messenger-services/values.yaml\`."
           } >> "$GITHUB_STEP_SUMMARY"

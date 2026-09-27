@@ -1,0 +1,41 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: argocd-image-updater
+  namespace: argocd
+  annotations:
+    # Волна 1: апдейтер патчит Application'ы, а для этого они должны уже
+    # существовать. Ставится он в тот же namespace, что и Argo CD, — только
+    # там ему выпишут Role на applications (RBAC едет вместе с install.yaml).
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  project: finops-platform
+  sources:
+    # Установка целиком — из апстрима и по тегу. В репозиторий не вендорится:
+    # чужой install.yaml устаревает молча, а тег видно и он же откатывается.
+    - repoURL: https://github.com/argoproj-labs/argocd-image-updater.git
+      targetRevision: v1.3.0
+      path: config
+      directory:
+        # В config/ рядом с install.yaml лежат примеры конфигурации
+        # (example-config.yaml и прочее). Применяется ровно собранный
+        # install.yaml: CRD, SA, RBAC, ConfigMap, Deployment.
+        include: "install.yaml"
+    # Наши объекты: сам ImageUpdater и всё, что вокруг него. Отдельный
+    # источник, потому что один источник — один repoURL.
+    - repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
+      targetRevision: HEAD
+      path: gitops/02-infra/argocd-image-updater/manifests
+      directory:
+        recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      # ConfigMap апдейтера живёт в install.yaml и больше ничей; SSA снимает
+      # вопрос «кто последний владел полем» при обновлении тега апстрима.
+      - ServerSideApply=true

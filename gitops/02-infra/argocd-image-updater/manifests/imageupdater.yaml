@@ -1,0 +1,82 @@
+apiVersion: argocd-image-updater.argoproj.io/v1alpha1
+kind: ImageUpdater
+metadata:
+  name: messenger
+  namespace: argocd
+spec:
+  # Выкатка этажа не ждёт коммита: апдейтер патчит **живой** Application через
+  # API кластера. `argocd` — метод по умолчанию, и он назван явно именно
+  # потому, что это и есть требование: в git ничего не пишется.
+  #
+  # Цена, которую метод несёт (названа в docs, а не спрятана): патч живёт
+  # только в Application. Синк из git или пересоздание Application вернут
+  # значение из values.yaml — то есть последний продвинутый диджест.
+  writeBackConfig:
+    method: argocd
+  applicationRefs:
+    # Один Application на все шесть нагрузок — и один список образов:
+    # у мессенджера один образ на пять нагрузок, у веба свой. Разные теги
+    # у них означали бы, что «выкатили версию» больше ничего не значит.
+    - namePattern: "messenger-services"
+      images:
+        - alias: api
+          imageName: ghcr.io/vigregus/messenger-api
+          commonUpdateSettings:
+            # Тег `:<sha>` — единственная форма, в которой конвейер публикует
+            # образ. Ни `:latest`, ни `:main` в реестре нет и не заводится:
+            # подвижный тег возвращает ровно ту проблему, ради которой всё
+            # это делается. Поэтому «последний образ» = самый свежий по
+            # времени публикации тег, а не «последний по номеру версии».
+            updateStrategy: newest-build
+            # Отбор по форме, а не по договорённости: сорок шестнадцатеричных
+            # знаков — это sha коммита и ничего больше. Ветку он не различает:
+            # тег одинаков у любой ветки (см. .github/workflows/image.yml),
+            # поэтому сюда попадает и образ незамерженного коммита — цена
+            # названа в README рядом.
+            allowTags: "regexp:^[0-9a-f]{40}$"
+          manifestTargets:
+            helm:
+              # Куда именно писать. Апдейтер кладёт по этому пути **полную**
+              # ссылку `репозиторий:тег` — чарт обязан её принять
+              # (charts/messenger/templates/_helpers.tpl).
+              spec: services.api.image.spec
+        - alias: outboxrelay
+          imageName: ghcr.io/vigregus/messenger-api
+          commonUpdateSettings:
+            updateStrategy: newest-build
+            allowTags: "regexp:^[0-9a-f]{40}$"
+          manifestTargets:
+            helm:
+              spec: services.outbox-relay.image.spec
+        - alias: consumerrealtime
+          imageName: ghcr.io/vigregus/messenger-api
+          commonUpdateSettings:
+            updateStrategy: newest-build
+            allowTags: "regexp:^[0-9a-f]{40}$"
+          manifestTargets:
+            helm:
+              spec: services.consumer-realtime.image.spec
+        - alias: consumerunread
+          imageName: ghcr.io/vigregus/messenger-api
+          commonUpdateSettings:
+            updateStrategy: newest-build
+            allowTags: "regexp:^[0-9a-f]{40}$"
+          manifestTargets:
+            helm:
+              spec: services.consumer-unread.image.spec
+        - alias: presencesweeper
+          imageName: ghcr.io/vigregus/messenger-api
+          commonUpdateSettings:
+            updateStrategy: newest-build
+            allowTags: "regexp:^[0-9a-f]{40}$"
+          manifestTargets:
+            helm:
+              spec: services.presence-sweeper.image.spec
+        - alias: web
+          imageName: ghcr.io/vigregus/messenger-web
+          commonUpdateSettings:
+            updateStrategy: newest-build
+            allowTags: "regexp:^[0-9a-f]{40}$"
+          manifestTargets:
+            helm:
+              spec: services.web.image.spec
