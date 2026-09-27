@@ -39,6 +39,33 @@ export interface ProblemBody {
 export const TRACE_ID_HEADER = "X-Trace-Id";
 
 /**
+ * Заголовок, которым сервер говорит, когда повторять, — на `429`.
+ *
+ * Он именно заголовок, а не поле тела, и это не мелочь: `adapters/ratelimit.py`
+ * документирует причину прямо — «Без `Retry-After` клиент повторяет вслепую».
+ * Число уже посчитано (`LimitDecision.retry_after_seconds`), и клиенту его
+ * остаётся прочитать. Тело отказа на `429` его не несёт вовсе.
+ */
+export const RETRY_AFTER_HEADER = "Retry-After";
+
+/**
+ * Секунды из `Retry-After`, если заголовок несёт целое число.
+ *
+ * Форм у заголовка две: число секунд и HTTP-дата (`RFC 9110`). Разбирается
+ * только первая: сервер эту величину уже посчитал, и переводить в секунды дату
+ * значило бы зависеть от расхождения часов вкладки и пода. HTTP-дата даёт
+ * `undefined` — «сервер не сказал», и это честнее выдуманного нуля.
+ */
+export function retryAfterSecondsOf(response: Response): number | undefined {
+  const raw = response.headers.get(RETRY_AFTER_HEADER);
+  if (raw === null || raw.trim() === "") {
+    return undefined;
+  }
+  const seconds = Number(raw.trim());
+  return Number.isInteger(seconds) && seconds >= 0 ? seconds : undefined;
+}
+
+/**
  * Отказ, о котором сервер сказал определённо: `4xx`, кроме `401`.
  *
  * Несёт `code` — ради него тело и разбирается вручную: `403` выдают три разные
@@ -49,6 +76,14 @@ export class ApiProblem extends Error {
   readonly type: string | undefined;
   readonly code: string | undefined;
   readonly traceId: string | undefined;
+  /**
+   * Секунды из заголовка `Retry-After` — только у `429` и только когда он есть.
+   *
+   * `undefined` и `0` здесь разные вещи: «сервер не сказал, когда повторять» и
+   * «сервер сказал: немедленно». Свести их к нулю значило бы приписать серверу
+   * приглашение повторить сейчас же.
+   */
+  readonly retryAfterSeconds: number | undefined;
 
   constructor(params: {
     readonly status: number;
@@ -56,6 +91,7 @@ export class ApiProblem extends Error {
     readonly title?: string;
     readonly code?: string;
     readonly traceId?: string;
+    readonly retryAfterSeconds?: number;
   }) {
     super(params.title ?? `HTTP ${params.status}`);
     this.name = "ApiProblem";
@@ -63,6 +99,7 @@ export class ApiProblem extends Error {
     this.type = params.type;
     this.code = params.code;
     this.traceId = params.traceId;
+    this.retryAfterSeconds = params.retryAfterSeconds;
   }
 }
 
@@ -128,6 +165,7 @@ export async function problemFromResponse(response: Response): Promise<ApiProble
     title: body?.title,
     code: body?.code,
     traceId: traceIdOf(response, body),
+    retryAfterSeconds: retryAfterSecondsOf(response),
   });
 }
 

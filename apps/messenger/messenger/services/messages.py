@@ -159,6 +159,16 @@ async def send_message(
                             "event_type": "message.created",
                             "conversation_seq": message.conversation_seq,
                             "sender_id": str(sender_id),
+                            # Не в `common`, и это не расстановка ключей:
+                            # общий блок разворачивается в обе записи, а
+                            # содержимому это поле не принадлежит — схема
+                            # `message.content.v1.json` объявлена
+                            # `additionalProperties: false` и его не знает,
+                            # то есть запись с ним нарушила бы собственный
+                            # контракт. Нужно оно ровно половине факта:
+                            # свести оптимистичную запись с доехавшим
+                            # событием, когда ответ на отправку потерялся.
+                            "client_message_id": str(client_message_id),
                             "recipient_ids": recipients,
                             "has_attachments": bool(attachment_ids),
                             "content_ref": str(message.message_id),

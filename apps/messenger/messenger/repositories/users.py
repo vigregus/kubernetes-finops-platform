@@ -62,6 +62,40 @@ async def fetch_user(conn: asyncpg.Connection, *, user_id: UserId) -> User | Non
     return _to_user(row) if row else None
 
 
+async def fetch_user_by_email(
+    conn: asyncpg.Connection, *, email: str
+) -> User | None:
+    """Профиль по адресу. Только живые, и это часть определения.
+
+    `deleted_at IS NULL` — не осторожность, а условие задачи: частичный
+    уникальный индекс `users_email_live_uniq` объявлен ровно с этим
+    предикатом, поэтому адрес стёртой учётной записи **свободен** и однажды
+    будет занят другим человеком. Вернуть здесь надгробие значило бы найти
+    того, кого по этому адресу уже нет, и предложить переписку с ним.
+
+    Сравнение идёт по `lower(email)` и попадает в индекс: он объявлен
+    функциональным (`0001_init.sql`). Адрес приходит **уже нормализованным**
+    (`domain/user.py::normalize_email` делает то же приведение) — второй
+    нормализации здесь нет намеренно: два места, приводящие адрес к виду
+    сравнения, однажды разойдутся, и разойдутся молча.
+
+    Отличить «адрес свободен» от «адрес стёрт» этот запрос не может, и не
+    должен: различие наружу не выходит ни одним ответом (см.
+    `services/user_lookup.py`).
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT user_id, external_id, display_name, email, email_verified,
+               created_at, updated_at, deleted_at
+          FROM users
+         WHERE lower(email) = $1
+           AND deleted_at IS NULL
+        """,
+        email,
+    )
+    return _to_user(row) if row else None
+
+
 async def fetch_user_by_external_id(
     conn: asyncpg.Connection, *, external_id: str
 ) -> User | None:
