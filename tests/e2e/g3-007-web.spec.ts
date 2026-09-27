@@ -297,15 +297,31 @@ async function receipts(
 	return { delivered_seq: state.delivered_seq as number, read_seq: state.read_seq as number }
 }
 
-/** Список бесед — источник истины для счётчика непрочитанного и состояния чтения. */
+/**
+ * Список бесед — источник истины для счётчика непрочитанного и состояния чтения.
+ *
+ * `viewer` — тот, **чья** это беседа. Первым параметром идёт пара «страница и
+ * токен» целиком, а не по отдельности, именно потому, что `unread_count`
+ * считается **под зрителя**: число, прочитанное токеном A, — это число A, а не
+ * чужое, и разошедшаяся пара «токен B, сравнение с B» даёт правдоподобный и
+ * неверный ответ. Здесь эта ошибка и жила: три сравнения из четырёх читали
+ * беседу токеном A, сверяя её с разметкой вкладки B.
+ *
+ * `via` — вкладка, **которой** отправляется запрос, и только она. Нужна ровно
+ * там, где зритель в офлайне: `page.request` ходит через контекст страницы и
+ * без сети не отвечает вовсе. Подменить зрителя `via` не может — `Authorization`
+ * берётся из `viewer`, а cookie обновления ограничена путём точек обмена
+ * (`REFRESH_COOKIE_PATH`) и на `/conversations` не прикладывается, так что
+ * чужой страницей читается именно **чужое** число.
+ */
 async function listFromRest(
-	page: Page,
-	token: string,
-	fixture: Fixture,
+	viewer: SignedIn,
+	viewerFixture: Fixture,
 	conversationId: string,
+	via?: Page,
 ): Promise<RestConversation> {
-	const response = await page.request.get(`${API}/conversations`, {
-		headers: headers(fixture, token),
+	const response = await (via ?? viewer.page).request.get(`${API}/conversations`, {
+		headers: headers(viewerFixture, viewer.token),
 	})
 	expect(response.status(), "GET /conversations — список бесед доступен").toBe(200)
 
@@ -602,7 +618,9 @@ test("8б: непрочитанное — событием и сверкой, в
 		const readOf = async (): Promise<{ b1: Surface; b2: Surface; rest: RestConversation }> => ({
 			b1: await readSurface(b.page, conversationId),
 			b2: await readSurface(b2.page, conversationId),
-			rest: await listFromRest(a.page, a.token, A, conversationId),
+			// Источник истины читается **тем же зрителем**, чьи вкладки рядом:
+			// `unread_count` считается под зрителя, и число A — не число B.
+			rest: await listFromRest(b, B, conversationId),
 		})
 
 		const baseline = await test.step("счётчики сходятся до воздействия: вкладки и REST", async () => {
@@ -701,8 +719,10 @@ test("8б: непрочитанное — событием и сверкой, в
 			}
 
 			// Третье представление того же числа — источник истины (D11): оно сверяется
-			// с REST, а не со второй вкладкой.
-			const fromRest = await listFromRest(a.page, a.token, A, conversationId)
+			// с REST, а не со второй вкладкой. Читается тем же зрителем: `N + K` — число
+			// B, и «совпало» имеет смысл только между двумя представлениями **одного**
+			// числа.
+			const fromRest = await listFromRest(b, B, conversationId)
 			expect(
 				fromRest.unread,
 				`непрочитанное в REST равно ${expected} — счётчик вкладки сверен с источником, ` +
@@ -754,10 +774,16 @@ test("8б: непрочитанное — событием и сверкой, в
 				).toHaveAttribute("data-unread-count", String(arrived))
 			}
 
+			// Источник истины читается зрителем B, но **отправляет** запрос вкладка A:
+			// вкладки B в офлайне, и `page.request` оттуда не отвечает вовсе, а число
+			// нужно именно B — расхождение предъявляется между его разметкой и его
+			// же записью. Подменить зрителя это не может: `Authorization` — токен B.
+			const restAsB = async (): Promise<number | null> =>
+				(await listFromRest(b, B, conversationId, a.page)).unread
+
 			await until(
-				async () => (await listFromRest(a.page, a.token, A, conversationId)).unread === expected,
-				async () =>
-					`REST: ${String((await listFromRest(a.page, a.token, A, conversationId)).unread)} (ждём ${expected})`,
+				async () => (await restAsB()) === expected,
+				async () => `REST: ${String(await restAsB())} (ждём ${expected})`,
 				"источник истины разошёлся с вкладками",
 				PUBLICATION_TIMEOUT,
 			)
@@ -981,7 +1007,7 @@ test("9: квитанция доезжает, идёт только вперёд
 				"отметки прочтения остались на месте",
 			).toEqual(own.map(() => "read"))
 
-			const rest = await listFromRest(a.page, a.token, A, conversationId)
+			const rest = await listFromRest(a, A, conversationId)
 			const peer = rest.readStates.find((entry) => entry.userId === state.userIds.b)
 			expect(peer?.readSeq, "REST по-прежнему несёт большее число").toBe(mine.seq)
 
@@ -998,8 +1024,44 @@ test("9: квитанция доезжает, идёт только вперёд
 			const later = await send(a.page, a.token, A, conversationId, "квитанция: после пробы")
 			expect(later.seq, "новое сообщение занимает номер за S").toBeGreaterThan(mine.seq)
 
+			// Применение ожидается, а не предполагается. Уход в офлайн раньше, чем
+			// вкладка применила собственное сообщение, рвёт доставку на полпути:
+			// публикация не доходит вовсе, строка в DOM не появляется, граница
+			// остаётся на прежнем номере — и наблюдать «отмечено прочитанным без
+			// события» становится **нечем**, потому что отмечать нечего. Ровно так
+			// падал предыдущий прогон, и падал как утверждение о продукте, хотя
+			// приходил от гонки в спеке: потеря одной публикации восстановлением не
+			// покрыта и в границах названа недоказанной.
+			//
+			// Ожидание — по двум признакам сразу, и оба нужны: граница говорит, что
+			// сообщение **применено**, наличие строки — что его есть чем отметить.
+			await until(
+				async () => {
+					const surface = await readSurface(a.page, conversationId)
+					return (
+						surface.boundary !== null &&
+						surface.boundary >= later.seq &&
+						surface.rows.some((entry) => entry.id === later.message_id)
+					)
+				},
+				async () => {
+					const surface = await readSurface(a.page, conversationId)
+					const present = surface.rows.some((entry) => entry.id === later.message_id)
+					return `граница A ${String(surface.boundary)} (ждём ≥ ${later.seq}), строка в ленте: ${
+						present ? "есть" : "нет"
+					}`
+				},
+				"автор применил собственное сообщение",
+				PUBLICATION_TIMEOUT,
+			)
+
 			const before = await readSurface(a.page, conversationId)
 			const row = before.rows.find((entry) => entry.id === later.message_id)
+			// Наличие строки утверждается отдельно: без этого `row?.state` на
+			// отсутствующей строке — `undefined`, и «не read» оказалось бы истинным
+			// при полностью мёртвой поверхности. Проверка состояния ниже начинается
+			// ровно после этой, и порядок здесь несущий.
+			expect(row, "своё сообщение лежит в ленте автора — отмечать есть что").toBeDefined()
 			expect(
 				row?.state,
 				"до прочтения состояние не read: иначе наблюдать было бы нечего",
@@ -1052,7 +1114,7 @@ test("9: квитанция доезжает, идёт только вперёд
 			// принести то же событие, что и сверка, и оба ведут к одному числу. Что
 			// наблюдается **отдельно** — что клиент пошёл за истиной сам: ответ списка
 			// бесед пойман выше, и ожидание стояло до возврата сети.
-			const rest = await listFromRest(a.page, a.token, A, conversationId)
+			const rest = await listFromRest(a, A, conversationId)
 			const peer = rest.readStates.find((entry) => entry.userId === state.userIds.b)
 			expect(peer?.readSeq, "и то же число лежит в REST").toBe(later.seq)
 
