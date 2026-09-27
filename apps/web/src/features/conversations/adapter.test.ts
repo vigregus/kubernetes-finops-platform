@@ -6,13 +6,8 @@ import type {
   Message as MessageDto,
   UserSummary,
 } from "../../api/generated"
-import {
-  adaptConversation,
-  adaptConversations,
-  withSentPreview,
-  type Conversation,
-  type SentPreview,
-} from "./adapter"
+import type { Conversation } from "../../shared/lib/types"
+import { adaptConversation, adaptConversations, withSentPreview, type SentPreview } from "./adapter"
 
 /**
  * Часы и зона — параметры, а не момент и место прогона: иначе проверка
