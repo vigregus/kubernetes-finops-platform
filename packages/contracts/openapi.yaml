@@ -421,30 +421,22 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              additionalProperties: false
-              properties:
-                delivered_seq:
-                  type: integer
-                  format: int64
-                  minimum: 0
-                  description: Номер, до которого сообщения получены на устройстве.
-                read_seq:
-                  type: integer
-                  format: int64
-                  minimum: 0
-                  description: Номер, до которого сообщения показаны пользователю.
-              anyOf:
-                - required: [delivered_seq]
-                - required: [read_seq]
-              description: |
-                Хотя бы один номер обязателен. `minProperties: 1` здесь
-                недостаточно: он требует любое одно свойство, а не одно из
-                двух названных, и опечатка в имени поля прошла бы как
-                валидный запрос, ничего не изменив. Лишние поля отвергаются
-                поимённо — `additionalProperties: false`, — а не игнорируются
-                молча: клиент, считающий, что отправил квитанцию, обязан
-                получить отказ, а не тишину.
+              # Ссылка, а не встроенная схема, — и это не стилистика.
+              #
+              # Встроенная схема с `additionalProperties: false` рендерится
+              # генератором как свободная форма: в модель приезжает индексная
+              # подпись `[key: string]: any`, а в `toJSON` — `...value`. Тело
+              # запроса тогда несёт и `read_seq`/`delivered_seq`, и рядом с ними
+              # camelCase-дубли `readSeq`/`deliveredSeq`; сервер отвечает `422`
+              # (`extra="forbid"`), вкладка не сообщает квитанцию вовсе, а тип
+              # объекта пропускает опечатку в имени поля молча — ровно потому,
+              # что индексная подпись разрешает любое имя.
+              #
+              # Поднятая в `components/schemas` схема рендерится поимённо.
+              # Проверено прогоном генератора на закреплённом digest'е:
+              # у поднятой схемы нет ни подписи, ни `...value`, а лишний
+              # camelCase-ключ становится ошибкой `tsc`, а не отказом сервера.
+              $ref: '#/components/schemas/SetReceiptsRequest'
       responses:
         '200':
           description: Состояние после применения, а не присланное клиентом
@@ -671,6 +663,36 @@ components:
           schema: { $ref: '#/components/schemas/Problem' }
 
   schemas:
+    SetReceiptsRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        delivered_seq:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Номер, до которого сообщения получены на устройстве.
+        read_seq:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Номер, до которого сообщения показаны пользователю.
+      anyOf:
+        - required: [delivered_seq]
+        - required: [read_seq]
+      description: |
+        Хотя бы один номер обязателен. `minProperties: 1` здесь
+        недостаточно: он требует любое одно свойство, а не одно из
+        двух названных, и опечатка в имени поля прошла бы как
+        валидный запрос, ничего не изменив. Лишние поля отвергаются
+        поимённо — `additionalProperties: false`, — а не игнорируются
+        молча: клиент, считающий, что отправил квитанцию, обязан
+        получить отказ, а не тишину.
+
+        Схема живёт здесь, а не встроена в `requestBody`, потому что
+        встроенная с `additionalProperties: false` рендерится генератором
+        как свободная форма: модель получает индексную подпись, а клиент —
+        `422` на каждом запросе. Довод целиком — у ссылки в `setReceipts`.
     Me:
       type: object
       required: [user_id, display_name, email_verified, capabilities]
