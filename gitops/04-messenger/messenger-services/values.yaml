@@ -139,7 +139,7 @@ services:
     http:
       port: 8080
     image:
-      digest: sha256:681073522465c2436a25894c7e84fa00b5158a1c3070da2e2210eab1273efa8c
+      digest: sha256:36e63da2032997821e84f3993abd988ebf837d5f58c7d61f6e3a7351f0e3d8ce
     resources:
       requests: {cpu: 50m, memory: 128Mi}
       limits: {cpu: "1", memory: 512Mi}
@@ -248,7 +248,7 @@ services:
     preStopSeconds: 0
     terminationGracePeriodSeconds: 60
     image:
-      digest: sha256:681073522465c2436a25894c7e84fa00b5158a1c3070da2e2210eab1273efa8c
+      digest: sha256:36e63da2032997821e84f3993abd988ebf837d5f58c7d61f6e3a7351f0e3d8ce
     resources:
       requests: {cpu: 50m, memory: 128Mi}
       limits: {cpu: "1", memory: 512Mi}
@@ -271,7 +271,7 @@ services:
     # и зафиксировать смещение, иначе после перезапуска будет повтор.
     terminationGracePeriodSeconds: 60
     image:
-      digest: sha256:681073522465c2436a25894c7e84fa00b5158a1c3070da2e2210eab1273efa8c
+      digest: sha256:36e63da2032997821e84f3993abd988ebf837d5f58c7d61f6e3a7351f0e3d8ce
     resources:
       requests: {cpu: 50m, memory: 128Mi}
       limits: {cpu: "1", memory: 512Mi}
@@ -307,7 +307,7 @@ services:
     # и зафиксировать смещение, иначе после перезапуска будет повтор.
     terminationGracePeriodSeconds: 60
     image:
-      digest: sha256:681073522465c2436a25894c7e84fa00b5158a1c3070da2e2210eab1273efa8c
+      digest: sha256:36e63da2032997821e84f3993abd988ebf837d5f58c7d61f6e3a7351f0e3d8ce
     resources:
       requests: {cpu: 50m, memory: 128Mi}
       limits: {cpu: "1", memory: 512Mi}
@@ -350,7 +350,7 @@ services:
     # (`_sleep`), а не добивается по сроку.
     terminationGracePeriodSeconds: 30
     image:
-      digest: sha256:681073522465c2436a25894c7e84fa00b5158a1c3070da2e2210eab1273efa8c
+      digest: sha256:36e63da2032997821e84f3993abd988ebf837d5f58c7d61f6e3a7351f0e3d8ce
     resources:
       requests: {cpu: 25m, memory: 64Mi}
       limits: {cpu: 500m, memory: 256Mi}
