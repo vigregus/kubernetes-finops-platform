@@ -201,3 +201,69 @@ describe("path-параметр доезжает до URL", () => {
     expect(url).toBe(`/api/v1/conversations/${CONVERSATION_ID}/messages`)
   })
 })
+
+describe("тело запроса квитанции — только объявленные поля", () => {
+  // Утверждение появилось потому, что его отсутствие стоило гейта: вкладка
+  // отправляла квитанцию и получала `422` на каждом запросе, а разметка
+  // молчала — `data-my-read-seq` оставался пустым, и `RCP-001` не наступал.
+  //
+  // Дефект живёт в сериализаторе, и происходит он от формы схемы: встроенная
+  // в `requestBody` схема с `additionalProperties: false` рендерится
+  // генератором как **свободная форма**. Модель получает индексную подпись
+  // `[key: string]: any`, `toJSON` — `...value`, и тело уносит camelCase-дубли
+  // рядом с объявленными именами. `tsc` этого не видит: подпись разрешает
+  // любое имя, и опечатка в поле тоже проходит молча. Сервер видит и отвечает
+  // `422` — у него `extra="forbid"`.
+  //
+  // Проверка идёт через настоящие `MessagesApi` и сериализатор, а не через
+  // заглушку на месте `send`: заглушка (как в `useReceipts.test.ts`) проверяет
+  // решение вкладки, а не провод, и этот дефект пропускает целиком — именно
+  // так он и дожил до стенда.
+
+  const CONVERSATION_ID = "11111111-1111-1111-1111-111111111111"
+
+  /** Тело, которое клиент положил в запрос, — разобранное из JSON-строки. */
+  async function sentBodyOf(call: (api: MessagesApi) => Promise<unknown>): Promise<unknown> {
+    const bodies: unknown[] = []
+    const api = new MessagesApi(
+      new Configuration({
+        basePath: "/api/v1",
+        fetchApi: async (_input, init) => {
+          bodies.push(init?.body)
+          return {
+            status: 200,
+            json: async () => ({ delivered_seq: 5, read_seq: 5 }),
+          } as unknown as Response
+        },
+      }),
+    )
+
+    await call(api)
+
+    return JSON.parse(String(bodies[0]))
+  }
+
+  it("setReceipts: уходят оба числа под объявленными именами, и лишнего нет", async () => {
+    const body = await sentBodyOf((api) =>
+      api.setReceipts({
+        conversationId: CONVERSATION_ID,
+        setReceiptsRequest: { deliveredSeq: 5, readSeq: 5 },
+      }),
+    )
+
+    // Проверяется именно множество ключей: `toEqual` на объекте прошёл бы и с
+    // лишними полями, а лишнее поле — это отказ сервера, а не подробность.
+    expect(Object.keys(body as object).sort()).toEqual(["delivered_seq", "read_seq"])
+  })
+
+  it("setReceipts: непереданное число в теле не появляется", async () => {
+    // Законный запрос: `anyOf` разрешает сообщить одно поле из двух. Клиент,
+    // кладущий в тело `read_seq: undefined` как `null`, получил бы `422`
+    // вместо тишины, которую обещает контракт.
+    const body = await sentBodyOf((api) =>
+      api.setReceipts({ conversationId: CONVERSATION_ID, setReceiptsRequest: { readSeq: 7 } }),
+    )
+
+    expect(body).toEqual({ read_seq: 7 })
+  })
+})
