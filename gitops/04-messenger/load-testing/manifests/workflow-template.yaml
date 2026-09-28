@@ -592,7 +592,7 @@ spec:
               db = read_own_secret("messenger", "messenger-db-app")
               pool = await create_pool(
                   PoolSettings(
-                      host="messenger-db-pool",
+                      host="messenger-db-pool.messenger.svc.cluster.local",
                       port=5432,
                       database=db.get("dbname", "messenger"),
                       user=db["user"],
@@ -1087,7 +1087,7 @@ spec:
               db = read_own_secret("messenger", "messenger-db-app")
               pool = await create_pool(
                   PoolSettings(
-                      host="messenger-db-pool",
+                      host="messenger-db-pool.messenger.svc.cluster.local",
                       port=5432,
                       database=db.get("dbname", "messenger"),
                       user=db["user"],
