@@ -97,9 +97,27 @@ spec:
               parameters:
                 - name: run_password
                   value: "{{tasks.provision.outputs.parameters.run_password}}"
+          # Раздел 15 — до k6 benchmark два browser context должны пройти
+          # production UI тем же путём, каким пойдёт настоящий пользователь
+          # (то же публичное имя, тот же Origin, тот же TLS-путь через
+          # Cilium Gateway), а не просто «под поднялся». `resolve-gateway-
+          # address` не зависит от provision/prepare-conversations — это
+          # чистая инфраструктурная развязка (какой IP у edge Gateway
+          # сейчас), и её можно готовить параллельно с провижининг.
+          - name: resolve-gateway-address
+            template: resolve-gateway-address
+            when: "{{workflow.parameters.profile}} != identity"
+          - name: playwright-smoke
+            template: playwright-smoke
+            dependencies: [prepare-conversations, resolve-gateway-address]
+            when: "{{workflow.parameters.profile}} != identity"
+            arguments:
+              parameters:
+                - name: gateway_ip
+                  value: "{{tasks.resolve-gateway-address.outputs.parameters.gateway_ip}}"
           - name: k6-load
             template: k6-load
-            dependencies: [prepare-conversations]
+            dependencies: [playwright-smoke]
             when: "{{workflow.parameters.profile}} != identity"
             arguments:
               parameters:
@@ -978,6 +996,122 @@ spec:
 
 
           asyncio.run(main())
+
+    # Раздел 15 — IP Cilium Gateway (namespace edge) читается на каждый
+    # прогон, а не зашивается в манифест: адрес выдаёт minikube и он не
+    # гарантированно стабилен между пересозданиями стенда. Только `get`
+    # одного named Gateway — см. rbac-edge-gateway.yaml.
+    - name: resolve-gateway-address
+      container:
+        image: rancher/kubectl:v1.31.0
+        command: ["sh", "-c"]
+        args:
+          - |
+            set -eu
+            kubectl get gateway -n edge edge -o jsonpath='{.status.addresses[0].value}' > /tmp/gateway-ip
+            echo "edge Gateway IP: $(cat /tmp/gateway-ip)"
+        resources:
+          requests: {cpu: 50m, memory: 64Mi}
+          limits: {cpu: 200m, memory: 128Mi}
+      outputs:
+        parameters:
+          - name: gateway_ip
+            valueFrom:
+              path: /tmp/gateway-ip
+
+    # Раздел 15 — до k6 benchmark два browser context должны пройти
+    # production UI production-путём (то же публичное имя, тот же Origin,
+    # та же цепочка TLS/Gateway, какой пойдёт настоящий браузер), иначе
+    # нет смысла измерять performance системы, уже находящейся в broken
+    # state.
+    #
+    # Переиспользован уже готовый и живо проверенный оркестратор
+    # `scripts/web-e2e-fixture.sh` без изменения его логики — вместо
+    # собственной копии auth/PKCE/cleanup, которая рано или поздно
+    # разошлась бы с оригиналом. Из его собственных Playwright-проектов
+    # здесь запускается только `acceptance` (спека g3-005: вход, список
+    # бесед, восстановление состояния после перезагрузки) — `--project`
+    # пробрасывается скриптом как есть (см. `set -- test "$@"` в нём).
+    # g3-006/g3-007 сознательно не запускаются здесь: это полноценная
+    # browser-приёмка на 6–15 минут каждая, а не smoke-гейт перед
+    # benchmark — раздел 16 (browser canary) описывает похожую, но
+    # отдельную и лёгкую параллельную проверку, которой пока нет.
+    #
+    # `app.finops.local`/`idp.finops.local` изнутри кластера не
+    # резолвятся сами — тем же принципом, что и у самого скрипта («ни
+    # одного .svc.cluster.local, ни одного tunnel»), сюда добавлен
+    # `hostAliases`, указывающий эти публичные имена на IP edge Gateway:
+    # тот же путь, каким идёт браузер снаружи, а не обходной внутренний.
+    - name: playwright-smoke
+      inputs:
+        parameters:
+          - name: gateway_ip
+      hostAliases:
+        - ip: "{{inputs.parameters.gateway_ip}}"
+          hostnames: ["app.finops.local", "idp.finops.local", "rt.finops.local"]
+      # `git`/`kubectl` берутся готовыми образами через initContainers, а не
+      # ставятся внутрь playwright-образа на каждый прогон (`apt-get` внутри
+      # Ubuntu noble работал бы, но медленнее и менее предсказуемо, чем два
+      # уже проверенных в этом Workflow образа: rancher/kubectl — тем же,
+      # каким пользуются preflight-k6-operator/k6-load/resolve-gateway-
+      # address).
+      volumes:
+        - name: repo
+          emptyDir: {}
+        - name: kubectl-bin
+          emptyDir: {}
+      initContainers:
+        - name: clone
+          image: alpine/git:2.45.2
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -eu
+              git clone --quiet https://github.com/vigregus/kubernetes-finops-platform.git /repo
+              cd /repo
+              git checkout --quiet "{{workflow.parameters.git_sha}}"
+          volumeMounts:
+            - name: repo
+              mountPath: /repo
+        - name: kubectl-bin
+          image: rancher/kubectl:v1.31.0
+          command: ["sh", "-c"]
+          args:
+            - "cp \"$(command -v kubectl)\" /kubectl-bin/kubectl"
+          volumeMounts:
+            - name: kubectl-bin
+              mountPath: /kubectl-bin
+      container:
+        image: mcr.microsoft.com/playwright:v1.63.0-noble
+        command: ["bash", "-c"]
+        env:
+          - name: PATH
+            value: "/kubectl-bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+          - name: KEYCLOAK_NAMESPACE
+            value: keycloak
+          - name: KEYCLOAK_ADMIN_SECRET
+            value: messenger-idp-initial-admin
+          - name: NAMESPACE
+            value: messenger
+          - name: DB_POD
+            value: messenger-db-1
+          - name: DB_CONTAINER
+            value: postgres
+        volumeMounts:
+          - name: repo
+            mountPath: /repo
+          - name: kubectl-bin
+            mountPath: /kubectl-bin
+        args:
+          - |
+            set -eu
+            cd /repo/apps/web
+            npm ci --no-audit --no-fund
+            cd /repo
+            bash scripts/web-e2e-fixture.sh --project=acceptance
+        resources:
+          requests: {cpu: "1", memory: 1Gi}
+          limits: {cpu: "2", memory: 2Gi}
 
     # Раздел 26 — cleanup выполняется как `onExit`, независимо от исхода
     # Workflow (в том числе после Failed/Error), и снимает только
