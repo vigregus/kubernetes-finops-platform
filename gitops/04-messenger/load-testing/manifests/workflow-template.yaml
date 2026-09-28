@@ -1,0 +1,128 @@
+# docs/messenger/15-load-testing-platform.md, раздел 4 — переиспользуемый
+# WorkflowTemplate, один на все нагрузочные профили (раздел 10): вызывающий
+# передаёт `profile`/`users`/`target_rate`/..., а не копирует Workflow под
+# каждый сценарий.
+#
+# DAG в `main` сейчас останавливается после preflight (раздел 7) — это
+# единственная стадия, для которой в этой фазе есть настоящая реализация.
+# Остальные узлы полного DAG раздела 6 (provision → prepare-auth →
+# prepare-conversations → playwright-smoke → {browser-canary, k6 TestRun} →
+# reconciliation → recovery-check → summarize-run, plus onExit cleanup)
+# добавляются вместе с шагом, для которого они впервые понадобились — не
+# заглушками, возвращающими успех без реальной работы (раздел 25: workflow
+# считается `Succeeded`, только когда пройдены настоящие корректностные
+# гейты).
+#
+# preflight сам покрыт не полностью: раздел 7 требует также записывать
+# baseline ресурсов (CPU/RAM ноды, restarts подов, DB connections, Kafka lag,
+# outbox backlog) — этого здесь ещё нет, поэтому чек-бокс раздела 7 в плане
+# остаётся `[~]`, не `[x]`, до отдельного шага, который эти метрики снимет.
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: messenger-local-capacity
+  namespace: load-testing
+spec:
+  serviceAccountName: load-testing-workflow
+  entrypoint: main
+  arguments:
+    parameters:
+      # Без значения по умолчанию: раздел 5 требует уникальный run_id на
+      # каждый прогон (например `local-capacity-20260928-001`), и заведение
+      # его автоматически здесь скрыло бы обязанность вызывающего выбрать
+      # действительно уникальное имя.
+      - name: run_id
+      - name: git_sha
+      - name: profile
+        value: messages
+        enum:
+          - identity
+          - connections
+          - messages
+          - stress
+          - recovery
+          - mixed
+      - name: users
+        value: "100"
+      - name: online_users
+        value: "50"
+      - name: target_rate
+        value: "10"
+      - name: duration
+        value: "2m"
+      - name: k6_parallelism
+        value: "1"
+      - name: trace_sampling_mode
+        value: capacity
+        enum:
+          - observability-debug
+          - capacity
+      - name: cleanup
+        value: "true"
+
+  templates:
+    - name: main
+      dag:
+        tasks:
+          - name: preflight-connectivity
+            template: preflight-connectivity
+          - name: preflight-k6-operator
+            template: preflight-k6-operator
+
+    # Настоящие HTTP/TCP-пробы до зависимостей Messenger — не «под в статусе
+    # Running» (раздел 7 явно требует не судить по этому), а рабочий запрос
+    # каждой службе. `/readyz` у Messenger API — это уже проверка Postgres
+    # тем же путём, каким пойдёт прикладной запрос (см. `runtime.py`), а не
+    # отдельная проверка порта.
+    - name: preflight-connectivity
+      container:
+        image: busybox:1.36.1
+        command: ["sh", "-c"]
+        args:
+          - |
+            set -u
+            fail=0
+
+            check_http() {
+              if wget -q -T 5 -O /dev/null "$2"; then
+                echo "OK   $1"
+              else
+                echo "FAIL $1 ($2)"
+                fail=1
+              fi
+            }
+
+            check_tcp() {
+              if nc -z -w 3 "$2" "$3"; then
+                echo "OK   $1"
+              else
+                echo "FAIL $1 ($2:$3)"
+                fail=1
+              fi
+            }
+
+            check_http "Messenger API /readyz (включает Postgres)" \
+              "http://api.messenger.svc.cluster.local/readyz"
+            check_http "Keycloak /health/ready" \
+              "http://messenger-idp-service.keycloak.svc.cluster.local:9000/health/ready"
+            check_http "Centrifugo /health" \
+              "http://messenger-centrifugo.messenger.svc.cluster.local:9000/health"
+            check_tcp "Kafka bootstrap (plaintext, 9092)" \
+              "messenger-kafka-kafka-bootstrap.kafka.svc.cluster.local" 9092
+            check_http "VictoriaMetrics /health" \
+              "http://vmsingle-vm-local-victoria-metrics-k8s-stack.observability.svc.cluster.local:8428/health"
+
+            exit "$fail"
+
+    # k6 Operator сам по себе не выставляет HTTP-эндпоинт готовности (в
+    # gitops/02-infra/k6-operator/values.yaml явно отключён ServiceMonitor,
+    # отдельного metrics Service тоже нет) — доступность CRD через тот же
+    # ServiceAccount, которым workflow будет заводить TestRun, доказывает то,
+    # что действительно важно для следующих стадий: что API-группа `k6.io`
+    # зарегистрирована и прав на неё достаточно, а не что controller-под
+    # просто существует.
+    - name: preflight-k6-operator
+      container:
+        image: rancher/kubectl:v1.31.0
+        command: ["kubectl"]
+        args: ["get", "testruns.k6.io", "-n", "load-testing"]

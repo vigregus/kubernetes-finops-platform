@@ -27,9 +27,17 @@ rules:
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["create", "get", "list", "watch", "delete"]
+  # `patch` на pods — не воля workflow, а требование emissary-executor'а
+  # Argo Workflows (v4.1.4): каждый шаг патчит собственный Pod, чтобы
+  # сообщить результат обратно контроллеру.
   - apiGroups: [""]
     resources: ["pods", "pods/log"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list", "watch", "patch"]
+  # Тот же executor репортит результат шага через WorkflowTaskResult —
+  # без create/patch здесь шаги зависают в Pending, RBAC заблокирует запись.
+  - apiGroups: ["argoproj.io"]
+    resources: ["workflowtaskresults"]
+    verbs: ["create", "get", "list", "watch", "patch"]
   # Временные ConfigMap на время прогона (например, сгенерированный список
   # synthetic-пользователей для шага reconciliation) — создаются и снимаются
   # cleanup'ом (раздел 26). Secret — только читается: тестовые
