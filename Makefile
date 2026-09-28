@@ -32,7 +32,7 @@ MESSENGER_APPS  := messenger-secrets messenger-postgres messenger-redis \
 PYTHON ?= python3.12
 PYTHON_VERSION = (3, 12)
 
-.PHONY: help bootstrap local-up local-test local-down contracts kafka-security layers sql venv lint unit web-check chart-env chart-render dashboards web-e2e web-e2e-fixture migrate smoke integration send-message status
+.PHONY: help bootstrap local-up local-test local-down contracts kafka-security layers sql venv lint unit web-check chart-env chart-render dashboards web-e2e web-e2e-fixture migrate smoke integration send-message status load-test
 
 help:
 	@# Класс символов включает цифры: имя `web-e2e` без них не опознаётся вовсе,
@@ -241,6 +241,15 @@ web-e2e-fixture: ## Веб: завести фикстуры приёмки и п
 	@# Диагностическая цель. Обязательным шагом приёмки не является: она
 	@# запускает только проект `fixture`, а спека в неё не входит.
 	@E2E_FIXTURE_ONLY=1 scripts/web-e2e-fixture.sh
+
+load-test: ## LOCAL-CAPACITY-001: запустить нагрузочный Workflow (ARGS — см. scripts/load-testing-run.sh --help)
+	@# Раздел 29 плана load-testing (docs/messenger/15-load-testing-platform.md):
+	@# у человека и у CI один и тот же вход — submit WorkflowTemplate(parameters)
+	@# — а не своя orchestration logic на каждой стороне. `PROFILE` здесь не
+	@# переиспользуется: наверху в этом файле это имя minikube-профиля,
+	@# а не профиля нагрузки — потому параметры load-testing идут через ARGS
+	@# как есть, без собственных make-переменных, дублирующих флаги скрипта.
+	@scripts/load-testing-run.sh $(ARGS)
 
 migrate: ## Применить миграции к локальной базе
 	@echo "· миграции"
