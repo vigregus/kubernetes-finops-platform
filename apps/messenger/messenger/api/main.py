@@ -817,13 +817,28 @@ async def observe(request: Request, call_next):
             # используют warning/error. 4xx (в том числе 401 от сканера
             # портов) уровень не поднимает: это законный исход, не отказ.
             #
+            # `level` и `result` — две разные оси, и когда-то были склеены:
+            # обе решались одним и тем же условием `>= 500`, из-за чего
+            # `403` уходил в журнал как `result="success"`. `result` —
+            # чем закончилась операция, а не насколько это эксплуатационно
+            # аварийно, поэтому у него собственное условие с тремя исходами,
+            # а не два, разведённых по уровню.
+            result = (
+                "failed"
+                if response.status_code >= 500
+                else "rejected"
+                if response.status_code >= 400
+                else "success"
+            )
             # Вызов повторён на обеих ветках, а не собран через
             # `log_call = log.warning if ... else log.info` или через
             # вынесенный в переменную `extra=`: `scripts/check-log-streams.py`
             # разбирает AST и ждёт от `extra` дословный словарь прямо
             # в вызове `log.<уровень>(...)` — оба сокращения для него
             # невидимы, и каталог событий перестал бы проверять самую
-            # частую запись в системе.
+            # частую запись в системе. Значение `result` внутри словаря —
+            # уже вычисленная переменная, а не литерал: проверке достаточно
+            # ключа, не его содержимого.
             if response.status_code >= 500:
                 log.warning(
                     "%s %s %s",
@@ -838,7 +853,7 @@ async def observe(request: Request, call_next):
                         "status": response.status_code,
                         "duration_ms": round(elapsed * 1000, 2),
                         "request_id": request_id,
-                        "result": "failed",
+                        "result": result,
                     },
                 )
             else:
@@ -855,7 +870,7 @@ async def observe(request: Request, call_next):
                         "status": response.status_code,
                         "duration_ms": round(elapsed * 1000, 2),
                         "request_id": request_id,
-                        "result": "success",
+                        "result": result,
                     },
                 )
             return response
