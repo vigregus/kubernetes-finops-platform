@@ -919,7 +919,7 @@ Grafana — источник истории performance measurements.
 
 Не пытаться превращать Argo UI в performance dashboard.
 
-## 28. Сравнение прогонов — `[ ]`
+## 28. Сравнение прогонов — `[~]` (04 · Load Compare — выбор двух конкретных прогонов по run_id, реализовано и живо проверено на реальных данных; переход Grafana anomaly → Tempo trace → VictoriaLogs не реализован — нужен раздел 23)
 
 Ключевой use case:
 
