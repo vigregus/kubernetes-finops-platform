@@ -1,0 +1,191 @@
+# Раздел 10 плана (docs/messenger/15-load-testing-platform.md) — профиль
+# `messages`. Содержимое — точная копия `tests/load/messenger/messages.js`
+# и `tests/load/messenger/lib/auth.js`: k6 Operator берёт скрипт из
+# ConfigMap (`spec.script.configMap`), а не из чекаута репозитория внутри
+# пода воркфлоу — Argo-подам здесь неоткуда взять git clone, и заводить
+# отдельный артефакт-репозиторий (раздел 24) ради одного файла на этой фазе
+# избыточно. Оба ключа плоские (без `lib/` в имени) — k6 Operator монтирует
+# ConfigMap одной директорией, и `messages.js` импортирует `./auth.js` из
+# неё же.
+#
+# Синхронизация с исходником — ручная до раздела 24 (Argo artifacts):
+# любая правка `tests/load/messenger/{messages.js,lib/auth.js}` требует
+# такой же правки здесь в том же PR. Несовпадение заметно тривиально —
+# `k6 run` в CI/локально против исходника и живой TestRun против этого
+# ConfigMap делают одно и то же за секунды.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: k6-messages-script
+  namespace: load-testing
+data:
+  messages.js: |
+    import http from 'k6/http';
+    import crypto from 'k6/crypto';
+    import { check } from 'k6';
+    import { Counter, Trend } from 'k6/metrics';
+
+    import { login, authHeaders, API } from './auth.js';
+
+    const RUN_ID = __ENV.RUN_ID;
+    const USERS = parseInt(__ENV.USERS || '10', 10);
+    const RUN_PASSWORD = __ENV.RUN_PASSWORD;
+    const TARGET_RATE = parseInt(__ENV.TARGET_RATE || '10', 10);
+    const DURATION = __ENV.DURATION || '30s';
+
+    const accepted = new Counter('load_run_accepted_messages');
+    const offered = new Counter('load_run_offered_messages');
+    const sendDuration = new Trend('load_run_send_duration_ms', true);
+
+    export const options = {
+      scenarios: {
+        messages: {
+          executor: 'constant-arrival-rate',
+          rate: TARGET_RATE,
+          timeUnit: '1s',
+          duration: DURATION,
+          preAllocatedVUs: Math.max(TARGET_RATE * 2, 2),
+          maxVUs: Math.max(TARGET_RATE * 4, 4),
+        },
+      },
+    };
+
+    function uuidv4() {
+      const bytes = new Uint8Array(crypto.randomBytes(16));
+      bytes[6] = (bytes[6] & 0x0f) | 0x40;
+      bytes[8] = (bytes[8] & 0x3f) | 0x80;
+      const hex = Array.from(bytes)
+        .map((x) => x.toString(16).padStart(2, '0'))
+        .join('');
+      return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+    }
+
+    let cachedToken = null;
+    let cachedConversationId = null;
+
+    function senderLogin() {
+      if (cachedToken) return cachedToken;
+      const index = ((__VU - 1) % USERS) + 1;
+      const email = `local-capacity-${RUN_ID}-${String(index).padStart(6, '0')}@finops.local`;
+      cachedToken = login(email, RUN_PASSWORD);
+      return cachedToken;
+    }
+
+    function senderConversationId(token) {
+      if (cachedConversationId) return cachedConversationId;
+      const r = http.get(`${API}/conversations`, { headers: authHeaders(token) });
+      if (r.status !== 200) {
+        throw new Error(`не удалось получить список бесед: ${r.status} ${r.body}`);
+      }
+      const items = JSON.parse(r.body).items || [];
+      if (items.length === 0) {
+        throw new Error('у пользователя нет ни одной беседы — prepare-conversations не отработал для него');
+      }
+      cachedConversationId = items[0].conversation_id;
+      return cachedConversationId;
+    }
+
+    export default function () {
+      const token = senderLogin();
+      const conversationId = senderConversationId(token);
+
+      offered.add(1);
+      const start = Date.now();
+      const res = http.post(
+        `${API}/conversations/${conversationId}/messages`,
+        JSON.stringify({
+          client_message_id: uuidv4(),
+          type: 'text',
+          payload: { text: `load-testing ${RUN_ID} ${Date.now()}` },
+          attachment_ids: [],
+        }),
+        { headers: authHeaders(token) },
+      );
+      sendDuration.add(Date.now() - start);
+
+      const ok = check(res, {
+        'сообщение принято (200/201)': (r) => r.status === 200 || r.status === 201,
+      });
+      if (ok) {
+        accepted.add(1);
+      }
+    }
+  auth.js: |
+    import http from 'k6/http';
+    import encoding from 'k6/encoding';
+    import crypto from 'k6/crypto';
+
+    export const KEYCLOAK = 'http://messenger-idp-service.keycloak.svc.cluster.local:8080';
+    export const REALM = 'messenger';
+    export const CLIENT_ID = 'messenger-web';
+    export const API = 'http://api.messenger.svc.cluster.local';
+    export const ORIGIN = 'https://app.finops.local';
+    export const REDIRECT = `${ORIGIN}/callback`;
+
+    function pkce() {
+      const verifierBytes = crypto.randomBytes(48);
+      const verifier = encoding.b64encode(verifierBytes, 'rawurl');
+      const digestBinary = crypto.sha256(verifier, 'binary');
+      const challenge = encoding.b64encode(digestBinary, 'rawurl');
+      return { verifier, challenge };
+    }
+
+    function queryParam(qs, name) {
+      const re = new RegExp(`[?&]${name}=([^&]*)`);
+      const m = qs.match(re);
+      return m ? decodeURIComponent(m[1]) : null;
+    }
+
+    function pathAndQuery(url) {
+      const idx = url.indexOf('/', url.indexOf('://') + 3);
+      return idx === -1 ? '' : url.slice(idx);
+    }
+
+    export function login(email, password) {
+      const state = `${__VU}-${__ITER}-${Date.now()}`;
+      const { verifier, challenge } = pkce();
+
+      const authUrl =
+        `${KEYCLOAK}/realms/${REALM}/protocol/openid-connect/auth?` +
+        `client_id=${CLIENT_ID}&response_type=code&scope=openid&` +
+        `redirect_uri=${encodeURIComponent(REDIRECT)}&state=${state}&` +
+        `code_challenge=${challenge}&code_challenge_method=S256`;
+
+      const page = http.get(authUrl);
+      if (page.status !== 200) {
+        throw new Error(`страница входа вернула ${page.status} для ${email}`);
+      }
+      const formMatch = page.body.match(/action="([^"]+)"/);
+      if (!formMatch) {
+        throw new Error(`форма входа не найдена для ${email}`);
+      }
+      const action = `${KEYCLOAK}${pathAndQuery(formMatch[1].replace(/&amp;/g, '&'))}`;
+
+      const submitted = http.post(
+        action,
+        { username: email, password: password },
+        { redirects: 0 },
+      );
+      const location = submitted.headers['Location'] || submitted.headers['location'];
+      if (!location) {
+        throw new Error(`форма входа не перенаправила для ${email} (status ${submitted.status})`);
+      }
+      const code = queryParam(location, 'code');
+      if (!code) {
+        throw new Error(`в перенаправлении нет code для ${email}`);
+      }
+
+      const exchanged = http.post(
+        `${API}/auth/callback`,
+        JSON.stringify({ code, code_verifier: verifier, redirect_uri: REDIRECT }),
+        { headers: { 'Content-Type': 'application/json', Origin: ORIGIN } },
+      );
+      if (exchanged.status !== 200) {
+        throw new Error(`обмен кода отказал для ${email}: ${exchanged.status} ${exchanged.body}`);
+      }
+      return JSON.parse(exchanged.body).access_token;
+    }
+
+    export function authHeaders(token) {
+      return { Authorization: `Bearer ${token}`, Origin: ORIGIN, 'Content-Type': 'application/json' };
+    }

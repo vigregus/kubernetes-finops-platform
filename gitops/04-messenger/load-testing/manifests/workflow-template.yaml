@@ -88,6 +88,13 @@ spec:
               parameters:
                 - name: run_password
                   value: "{{tasks.provision.outputs.parameters.run_password}}"
+          - name: k6-load
+            template: k6-load
+            dependencies: [prepare-conversations]
+            arguments:
+              parameters:
+                - name: run_password
+                  value: "{{tasks.provision.outputs.parameters.run_password}}"
 
     # Настоящие HTTP/TCP-пробы до зависимостей Messenger — не «под в статусе
     # Running» (раздел 7 явно требует не судить по этому), а рабочий запрос
@@ -412,6 +419,83 @@ spec:
 
 
           asyncio.run(main())
+
+    # Раздел 10/12 — Argo не генерирует нагрузку сам и не плодит N копий
+    # k6 Job: он заводит ровно один `TestRun` (k6 Operator CRD), а
+    # распределением по `parallelism` runner'ам занимается сам оператор.
+    # Скрипт берётся из ConfigMap (k6-messages-configmap.yaml) — того же
+    # содержимого, что tests/load/messenger/messages.js, живьём проверенного
+    # и как `k6 run` в одиночном поде, и как настоящий `TestRun` (см. историю
+    # PR, открывающего этот шаг). `preflight-k6-operator` уже доказал, что
+    # ServiceAccount видит CRD `k6.io`; этот шаг впервые пишет в него.
+    #
+    # Определение готовности — `status.stage == finished`, а pass/fail — не
+    # сам факт `finished` (TestRun считается finished и при отказавшем
+    # runner'е), а `status.succeeded` дочернего Job `<name>-1`: тот самый
+    # Job, который реально исполнил k6 (раздел 25 — корректностные гейты
+    # решают исход Workflow, не факт «что-то отработало»).
+    - name: k6-load
+      inputs:
+        parameters:
+          - name: run_password
+      container:
+        image: alpine/k8s:1.31.0
+        command: ["sh", "-c"]
+        args:
+          - |
+            set -eu
+            NAME="k6-load-{{workflow.parameters.run_id}}"
+
+            cat > /tmp/testrun.yaml <<EOF
+            apiVersion: k6.io/v1alpha1
+            kind: TestRun
+            metadata:
+              name: ${NAME}
+              namespace: load-testing
+            spec:
+              parallelism: {{workflow.parameters.k6_parallelism}}
+              script:
+                configMap:
+                  name: k6-messages-script
+                  file: messages.js
+              runner:
+                env:
+                  - name: RUN_ID
+                    value: "{{workflow.parameters.run_id}}"
+                  - name: USERS
+                    value: "{{workflow.parameters.users}}"
+                  - name: RUN_PASSWORD
+                    value: "{{inputs.parameters.run_password}}"
+                  - name: TARGET_RATE
+                    value: "{{workflow.parameters.target_rate}}"
+                  - name: DURATION
+                    value: "{{workflow.parameters.duration}}"
+            EOF
+
+            kubectl apply -f /tmp/testrun.yaml
+            trap 'kubectl delete testrun -n load-testing "$NAME" --ignore-not-found' EXIT
+
+            echo "жду завершения TestRun/$NAME..."
+            stage=""
+            for i in $(seq 1 180); do
+              stage="$(kubectl get testrun -n load-testing "$NAME" -o jsonpath='{.status.stage}' 2>/dev/null || true)"
+              [ "$stage" = "finished" ] || [ "$stage" = "error" ] && break
+              sleep 2
+            done
+            echo "финальный stage=$stage"
+
+            echo "--- лог runner-Job ---"
+            kubectl logs -n load-testing "job/${NAME}-1" --tail=100 2>&1 || true
+
+            succeeded="$(kubectl get job -n load-testing "${NAME}-1" -o jsonpath='{.status.succeeded}' 2>/dev/null || echo 0)"
+            if [ "$stage" != "finished" ] || [ "${succeeded:-0}" != "1" ]; then
+              echo "TestRun не завершился успешно (stage=$stage, job succeeded=$succeeded)"
+              exit 1
+            fi
+            echo "TestRun завершился успешно"
+        resources:
+          requests: {cpu: 100m, memory: 128Mi}
+          limits: {cpu: "1", memory: 256Mi}
 
     # Раздел 26 — cleanup выполняется как `onExit`, независимо от исхода
     # Workflow (в том числе после Failed/Error), и снимает только
