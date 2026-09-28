@@ -11,7 +11,7 @@ spec:
     {
       "uid": "messenger-api-red",
       "title": "03 · API — RED",
-      "description": "docs/messenger/06-observability.md, часть 3.C: RED (Rate/Errors/Duration) для FastAPI-приложения (http_requests_total/http_request_duration_seconds). Только application layer — назывался '03 · Edge / API', хотя Edge (Envoy/Cilium) здесь никогда не было ни одной панелью; переименован в '03 · API — RED', чтобы название не обещало то, чего нет. Gateway-слой остаётся в hubble-l7-http.yaml как отдельный vendor-дашборд, не встроенный сюда.",
+      "description": "docs/messenger/06-observability.md, часть 3.C: RED (Rate/Errors/Duration) для FastAPI-приложения (http_requests_total/http_request_duration_seconds). Только application layer — назывался '03 · Edge / API', хотя Edge (Envoy/Cilium) здесь никогда не было ни одной панелью; переименован в '03 · API — RED'. Gateway-слой остаётся отдельным будущим deliverable (Cilium Envoy :9964 — RPS/latency/connections/resets), а не считается покрытым Hubble L7: тот отвечает за flow visibility, не за operational-метрики самого Envoy proxy. Все запросы исключают route=/metrics,/livez,/readyz — иначе scrape и kubelet probes считались бы пользовательским трафиком, и /readyz (503 при недоступном Postgres) искажал бы 5xx %.",
       "tags": ["messenger", "red", "api"],
       "schemaVersion": 39,
       "version": 1,
@@ -44,7 +44,7 @@ spec:
           "fieldConfig": { "defaults": { "unit": "reqps" } },
           "gridPos": { "h": 5, "w": 6, "x": 0, "y": 1 },
           "targets": [
-            { "expr": "sum(rate(http_requests_total{namespace=~\"$namespace\"}[5m]))" }
+            { "expr": "sum(rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m]))" }
           ]
         },
         {
@@ -64,7 +64,7 @@ spec:
           },
           "gridPos": { "h": 5, "w": 6, "x": 6, "y": 1 },
           "targets": [
-            { "expr": "sum(rate(http_requests_total{namespace=~\"$namespace\",status_class=\"5xx\"}[5m])) / clamp_min(sum(rate(http_requests_total{namespace=~\"$namespace\"}[5m])), 0.001)" }
+            { "expr": "sum(rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\",status_class=\"5xx\"}[5m])) / clamp_min(sum(rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m])), 0.001)" }
           ]
         },
         {
@@ -76,7 +76,7 @@ spec:
           "fieldConfig": { "defaults": { "unit": "percentunit" } },
           "gridPos": { "h": 5, "w": 6, "x": 12, "y": 1 },
           "targets": [
-            { "expr": "sum(rate(http_requests_total{namespace=~\"$namespace\",status_class=\"4xx\"}[5m])) / clamp_min(sum(rate(http_requests_total{namespace=~\"$namespace\"}[5m])), 0.001)" }
+            { "expr": "sum(rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\",status_class=\"4xx\"}[5m])) / clamp_min(sum(rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m])), 0.001)" }
           ]
         },
         {
@@ -96,7 +96,7 @@ spec:
           },
           "gridPos": { "h": 5, "w": 6, "x": 18, "y": 1 },
           "targets": [
-            { "expr": "histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])))" }
+            { "expr": "histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m])))" }
           ]
         },
         {
@@ -108,7 +108,7 @@ spec:
           "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
           "targets": [
             {
-              "expr": "sum by (status_class) (rate(http_requests_total{namespace=~\"$namespace\"}[5m]))",
+              "expr": "sum by (status_class) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m]))",
               "legendFormat": "{{status_class}}"
             }
           ]
@@ -121,9 +121,9 @@ spec:
           "fieldConfig": { "defaults": { "unit": "s" } },
           "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
           "targets": [
-            { "expr": "histogram_quantile(0.50, sum by (le) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])))", "legendFormat": "p50" },
-            { "expr": "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])))", "legendFormat": "p95" },
-            { "expr": "histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])))", "legendFormat": "p99" }
+            { "expr": "histogram_quantile(0.50, sum by (le) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m])))", "legendFormat": "p50" },
+            { "expr": "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m])))", "legendFormat": "p95" },
+            { "expr": "histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m])))", "legendFormat": "p99" }
           ]
         },
         {
@@ -141,7 +141,7 @@ spec:
           "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
           "targets": [
             {
-              "expr": "sum by (route) (rate(http_requests_total{namespace=~\"$namespace\"}[5m]))",
+              "expr": "sum by (route) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m]))",
               "legendFormat": "{{route}}"
             }
           ]
@@ -155,7 +155,7 @@ spec:
           "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
           "targets": [
             {
-              "expr": "histogram_quantile(0.99, sum by (le, route) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])))",
+              "expr": "histogram_quantile(0.99, sum by (le, route) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m])))",
               "legendFormat": "{{route}}"
             }
           ]
@@ -169,7 +169,7 @@ spec:
           "gridPos": { "h": 8, "w": 24, "x": 0, "y": 23 },
           "targets": [
             {
-              "expr": "sum by (route, status_class) (rate(http_requests_total{namespace=~\"$namespace\",status_class=~\"4xx|5xx\"}[5m]))",
+              "expr": "sum by (route, status_class) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\",status_class=~\"4xx|5xx\"}[5m]))",
               "legendFormat": "{{route}} {{status_class}}"
             }
           ]
@@ -181,7 +181,7 @@ spec:
           "gridPos": { "h": 4, "w": 24, "x": 0, "y": 31 },
           "options": {
             "mode": "markdown",
-            "content": "Дашборд показывает только application-слой (наш `http_requests_total`/`http_request_duration_seconds`). Сравнение Gateway (Envoy/Cilium) latency vs API latency — из карты, предложенной для этого дашборда — не построено: метрики Hubble L7 HTTP не внесены в `EXTERNAL_METRICS` (scripts/check-dashboards.py) и не живо сверены с этим дашбордом. Envoy/Hubble остаются отдельными vendor-дашбордами (`hubble-l7-http`) для forensic drill-down, а не встроены сюда."
+            "content": "Дашборд показывает только application-слой (наш `http_requests_total`/`http_request_duration_seconds`). Cilium Envoy Gateway (порт `:9964`, RPS/2xx-4xx-5xx/p50-p95-p99/connections/upstream resets) сюда не встроен и не построен — это отдельный следующий deliverable, не пункт, закрытый ссылкой на `hubble-l7-http.yaml`: Hubble даёт L7 flow visibility, а не operational-метрики самого Envoy proxy, и одно другое не заменяет. Gateway p99 vs API p99 (`Gateway latency vs API latency`) появится только вместе с реальным Envoy scrape."
           }
         }
       ]

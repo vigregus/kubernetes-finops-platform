@@ -37,41 +37,33 @@ spec:
           "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
         },
         {
+          "id": 20,
+          "type": "stat",
+          "title": "Registered users",
+          "description": "messenger_registered_users — то же значение, что уже вычислял presence_sweeper на каждом такте (SweepResult.registered_users, для доли online), но раньше не покидало процесс отдельной метрикой. Capacity/business-контекст, не alert-метрика. Панель будет пустой до следующей выкатки образа messenger — сама метрика заведена этим PR в коде, но в кластере пока работает предыдущий образ без неё; в отличие от остальных панелей этого PR это не живо проверено значением, только тестом presence_worker.",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "short" } },
+          "gridPos": { "h": 5, "w": 6, "x": 0, "y": 1 },
+          "targets": [ { "expr": "max(messenger_registered_users{namespace=~\"$namespace\"})" } ]
+        },
+        {
           "id": 2,
           "type": "stat",
           "title": "Online users",
           "description": "messenger_presence_online_users — снимок одним тактом presence_sweeper, считается по человеку, не по соединению (docs 06-observability.md, часть 3.A).",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "short" } },
-          "gridPos": { "h": 5, "w": 4, "x": 0, "y": 1 },
+          "gridPos": { "h": 5, "w": 6, "x": 6, "y": 1 },
           "targets": [ { "expr": "max(messenger_presence_online_users{namespace=~\"$namespace\"})" } ]
         },
         {
-          "id": 3,
+          "id": 21,
           "type": "stat",
-          "title": "Connections",
+          "title": "Online %",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "short" } },
-          "gridPos": { "h": 5, "w": 4, "x": 4, "y": 1 },
-          "targets": [ { "expr": "sum(centrifugo_node_num_clients{namespace=~\"$namespace\"})" } ]
-        },
-        {
-          "id": 4,
-          "type": "stat",
-          "title": "Subscriptions",
-          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "short" } },
-          "gridPos": { "h": 5, "w": 4, "x": 8, "y": 1 },
-          "targets": [ { "expr": "sum(centrifugo_node_num_subscriptions{namespace=~\"$namespace\"})" } ]
-        },
-        {
-          "id": 5,
-          "type": "stat",
-          "title": "Channels",
-          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "short" } },
-          "gridPos": { "h": 5, "w": 4, "x": 12, "y": 1 },
-          "targets": [ { "expr": "sum(centrifugo_node_num_channels{namespace=~\"$namespace\"})" } ]
+          "fieldConfig": { "defaults": { "unit": "percentunit" } },
+          "gridPos": { "h": 5, "w": 6, "x": 12, "y": 1 },
+          "targets": [ { "expr": "max(messenger_presence_online_share{namespace=~\"$namespace\"})" } ]
         },
         {
           "id": 6,
@@ -89,24 +81,51 @@ spec:
               ]}
             }
           },
-          "gridPos": { "h": 5, "w": 4, "x": 16, "y": 1 },
+          "gridPos": { "h": 5, "w": 6, "x": 18, "y": 1 },
           "targets": [ { "expr": "sum(centrifugo_node_num_clients{namespace=~\"$namespace\"}) / clamp_min(max(messenger_presence_online_users{namespace=~\"$namespace\"}), 1)" } ]
+        },
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "Connections",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "short" } },
+          "gridPos": { "h": 5, "w": 6, "x": 0, "y": 6 },
+          "targets": [ { "expr": "sum(centrifugo_node_num_clients{namespace=~\"$namespace\"})" } ]
+        },
+        {
+          "id": 4,
+          "type": "stat",
+          "title": "Subscriptions",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "short" } },
+          "gridPos": { "h": 5, "w": 6, "x": 6, "y": 6 },
+          "targets": [ { "expr": "sum(centrifugo_node_num_subscriptions{namespace=~\"$namespace\"})" } ]
+        },
+        {
+          "id": 5,
+          "type": "stat",
+          "title": "Channels",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "short" } },
+          "gridPos": { "h": 5, "w": 6, "x": 12, "y": 6 },
+          "targets": [ { "expr": "sum(centrifugo_node_num_channels{namespace=~\"$namespace\"})" } ]
         },
         {
           "id": 7,
           "type": "stat",
-          "title": "Realtime fan-out",
-          "description": "client deliveries / user messages accepted. Числитель — centrifugo_transport_messages_sent{frame_type=\"push_publication\"}: реальные push-фреймы, отправленные КАЖДОМУ подключённому клиенту, а не число publish-вызовов. Прежняя версия панели делила messenger_realtime_delivery_total (одна публикация в канал = одно приращение независимо от числа подписчиков) на accepted — это давало ≈1 всегда и никогда не показывало настоящий fan-out группового чата. Найдено ревью PR #73, исправлено здесь.",
+          "title": "Realtime amplification",
+          "description": "Переименовано из 'Realtime fan-out' (ревью PR #73, второй проход): centrifugo_transport_messages_sent{frame_type=\"push_publication\"} считает ВСЕ publication push-фреймы клиентам — не только message.created, но и unread.changed/read receipts/session.revoked и другие realtime-публикации (см. вызовы realtime.publish() в коде). Знаменатель — только accepted messages. Значение больше единицы поэтому не всегда значит 'сообщение доставлено N получателям' — оно может значить 'одно сообщение породило N разных realtime-событий'. Точный message-only fan-out потребовал бы отдельного label на transport layer, которого сейчас нет. Как capacity-сигнал (сколько push-нагрузки Centrifugo несёт на одно принятое сообщение) величина остаётся полезной — отсюда новое название.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "short" } },
-          "gridPos": { "h": 5, "w": 4, "x": 20, "y": 1 },
+          "gridPos": { "h": 5, "w": 6, "x": 18, "y": 6 },
           "targets": [ { "expr": "sum(rate(centrifugo_transport_messages_sent{namespace=~\"$namespace\",frame_type=\"push_publication\"}[5m])) / clamp_min(sum(rate(messenger_message_send_operations_total{namespace=~\"$namespace\",result=\"success\"}[5m])), 0.001)" } ]
         },
         {
           "id": 8,
           "type": "row",
           "title": "По подам",
-          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 6 }
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 11 }
         },
         {
           "id": 9,
@@ -115,7 +134,7 @@ spec:
           "description": "10 подов и 300k соединений в среднем выглядят благополучно, даже если один под держит 100k, а остальные по 22k (docs 06-observability.md, часть 3).",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "short" } },
-          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 7 },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
           "targets": [ { "expr": "sum by (pod) (centrifugo_node_num_clients{namespace=~\"$namespace\"})", "legendFormat": "{{pod}}" } ]
         },
         {
@@ -124,14 +143,14 @@ spec:
           "title": "Subscriptions по подам",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "short" } },
-          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 7 },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
           "targets": [ { "expr": "sum by (pod) (centrifugo_node_num_subscriptions{namespace=~\"$namespace\"})", "legendFormat": "{{pod}}" } ]
         },
         {
           "id": 11,
           "type": "row",
           "title": "Пропускная способность и Redis pub/sub",
-          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 15 }
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 20 }
         },
         {
           "id": 12,
@@ -140,7 +159,7 @@ spec:
           "description": "centrifugo_node_messages_sent_count = отдано в Redis pub/sub этим узлом, received_count = получено из шины (включая от других узлов) — это не 'messages/sec' пользователя, это внутренняя шина Centrifugo.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "cps" } },
-          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 21 },
           "targets": [
             { "expr": "sum(rate(centrifugo_node_messages_sent_count{namespace=~\"$namespace\"}[5m]))", "legendFormat": "sent → broker" },
             { "expr": "sum(rate(centrifugo_node_messages_received_count{namespace=~\"$namespace\"}[5m]))", "legendFormat": "received ← broker" }
@@ -152,7 +171,7 @@ spec:
           "title": "Redis pub/sub lag p99 + dropped",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": {} },
-          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 21 },
           "targets": [
             { "expr": "histogram_quantile(0.99, sum by (le) (rate(centrifugo_node_pub_sub_lag_seconds_bucket{namespace=~\"$namespace\"}[5m])))", "legendFormat": "lag p99 (с)" },
             { "expr": "sum(rate(centrifugo_broker_redis_pub_sub_dropped_messages{namespace=~\"$namespace\"}[5m]))", "legendFormat": "dropped/s" }
@@ -162,7 +181,7 @@ spec:
           "id": 14,
           "type": "row",
           "title": "Подключение и восстановление",
-          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 24 }
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 29 }
         },
         {
           "id": 15,
@@ -171,7 +190,7 @@ spec:
           "description": "connections_accepted не отличает первое подключение от переподключения — таких данных Centrifugo не отдаёт. Резкий рост при стабильной аудитории — подозрение на reconnect-петлю.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "cps" } },
-          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 25 },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 30 },
           "targets": [
             { "expr": "sum(rate(centrifugo_client_connections_accepted{namespace=~\"$namespace\"}[5m]))", "legendFormat": "accepted" },
             { "expr": "sum(rate(centrifugo_client_num_server_disconnects{namespace=~\"$namespace\"}[5m]))", "legendFormat": "server disconnect" }
@@ -184,7 +203,7 @@ spec:
           "description": "centrifugo_client_recover{recovered=\"yes\"} / всего. Успешное восстановление после разрыва без полной resync.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1, "min": 0 } },
-          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 25 },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 30 },
           "targets": [
             { "expr": "sum(rate(centrifugo_client_recover{namespace=~\"$namespace\",recovered=\"yes\"}[15m])) / clamp_min(sum(rate(centrifugo_client_recover{namespace=~\"$namespace\"}[15m])), 0.001)" }
           ]
@@ -193,7 +212,7 @@ spec:
           "id": 17,
           "type": "text",
           "title": "Чего здесь нет",
-          "gridPos": { "h": 3, "w": 24, "x": 0, "y": 33 },
+          "gridPos": { "h": 3, "w": 24, "x": 0, "y": 38 },
           "options": {
             "mode": "markdown",
             "content": "Browser canary (§16 load-testing) считает и печатает `browser_send_to_visible_seconds`/`canary_failures_total`/`browser_reconnects_total`, но пока не пушит их в VictoriaMetrics — на этом дашборде их нет ни одной панелью. CPU/RAM/network Centrifugo по подам не построены: это vendor cAdvisor-метрики, не покрытые source.path в смысле scripts/check-dashboards.py (см. также messenger-load-run.yaml)."

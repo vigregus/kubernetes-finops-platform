@@ -11,10 +11,10 @@ spec:
     {
       "uid": "messenger-capacity",
       "title": "05 · Capacity — USE",
-      "description": "USE (Utilization/Saturation/Errors, Brendan Gregg) поперёк компонентов на одном экране: отвечает 'во что мы упираемся', а не 'где тормозит' (02 · Journey) и не 'есть ли проблема у пользователя' (01 · SLO). Ревью PR #73 указал, что первая версия этого дашборда не была USE-дашбордом (не было CPU/RAM ни у одного workload, не было Redis вовсе) — здесь это исправлено тем, что уже реально снимается: container-resource-usage.yaml (repo-local recording rules) и redis_exporter sidecar.",
+      "description": "USE (Utilization/Saturation/Errors, Brendan Gregg) поперёк компонентов на одном экране: отвечает 'во что мы упираемся', а не 'где тормозит' (02 · Journey) и не 'есть ли проблема у пользователя' (01 · SLO). Второй проход ревью PR #73: sum by (container) прятал перекос между репликами (одна упёрлась, другая нет), а raw cores/bytes без % от limit ничего не говорит о saturation — обе панели теперь per-pod и есть % от limit. Restarts/OOMKilled добавлены как Errors-сторона USE.",
       "tags": ["messenger", "use", "capacity"],
       "schemaVersion": 39,
-      "version": 2,
+      "version": 3,
       "editable": true,
       "time": { "from": "now-6h", "to": "now" },
       "templating": {
@@ -33,61 +33,138 @@ spec:
         {
           "id": 1,
           "type": "row",
-          "title": "Compute — CPU / RAM по контейнеру",
+          "title": "Compute — CPU / RAM / restarts по поду",
           "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
         },
         {
           "id": 2,
           "type": "timeseries",
-          "title": "CPU по контейнеру (cores)",
-          "description": "node_namespace_pod_container:container_cpu_usage_seconds_total:sum_irate — repo-local recording rule (gitops/02-infra/observability-objects/victoria-stack/rules/container-resource-usage.yaml), не сырой cAdvisor: обычные /metrics/cadvisor labels на этом Minikube не по контейнерам, это уже исправлено записью правила. api/outbox-relay/consumer-realtime/consumer-unread/presence-sweeper — воркеры, которые при messaging-нагрузке могут упереться раньше API.",
+          "title": "CPU по поду (cores)",
+          "description": "node_namespace_pod_container:container_cpu_usage_seconds_total:sum_irate — repo-local recording rule (container-resource-usage.yaml). По pod+container, не агрегат по container: при нескольких репликах sum by (container) прятал бы перекос ('api = 1.0 cores' могло значить одна реплика на 0.9, другая на 0.1) — найдено вторым проходом ревью PR #73.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "short" } },
           "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
           "targets": [
             {
-              "expr": "sum by (container) (node_namespace_pod_container:container_cpu_usage_seconds_total:sum_irate{namespace=~\"$namespace\"})",
-              "legendFormat": "{{container}}"
+              "expr": "sum by (pod, container) (node_namespace_pod_container:container_cpu_usage_seconds_total:sum_irate{namespace=~\"$namespace\"})",
+              "legendFormat": "{{pod}} / {{container}}"
             }
           ]
         },
         {
           "id": 3,
           "type": "timeseries",
-          "title": "Memory working set по контейнеру",
+          "title": "CPU / limit % по поду",
+          "description": "0.8 cores само по себе ничего не говорит: при limit=1 это 80%, при limit=250m — 320% (throttling). namespace_pod_container:container_resource_limits_cpu_cores — repo-local recording rule поверх kube_pod_container_resource_limits (rules/pod-capacity-signals.yaml).",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "bytes" } },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 0.8 },
+                { "color": "red", "value": 1 }
+              ]}
+            }
+          },
           "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
           "targets": [
             {
-              "expr": "sum by (container) (node_namespace_pod_container:container_memory_working_set_bytes{namespace=~\"$namespace\"})",
-              "legendFormat": "{{container}}"
+              "expr": "sum by (pod, container) (node_namespace_pod_container:container_cpu_usage_seconds_total:sum_irate{namespace=~\"$namespace\"}) / sum by (pod, container) (namespace_pod_container:container_resource_limits_cpu_cores{namespace=~\"$namespace\"})",
+              "legendFormat": "{{pod}} / {{container}}"
             }
           ]
         },
         {
           "id": 4,
-          "type": "row",
-          "title": "Postgres — DB pool (Utilization / Saturation)",
-          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 }
+          "type": "timeseries",
+          "title": "Memory working set по поду",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "bytes" } },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 9 },
+          "targets": [
+            {
+              "expr": "sum by (pod, container) (node_namespace_pod_container:container_memory_working_set_bytes{namespace=~\"$namespace\"})",
+              "legendFormat": "{{pod}} / {{container}}"
+            }
+          ]
         },
         {
           "id": 5,
           "type": "timeseries",
-          "title": "DB pool: in_use vs idle vs max, по сервису",
-          "description": "messenger_db_pool_connections{state}/messenger_db_pool_max_connections. Очередь на соединение — первое, что упирается при росте нагрузки, раньше, чем сама база (docs 06-observability.md, telemetry/metrics.py). PgBouncer/postgres-exporter-уровня метрик (server-side pool, active/waiting backends) здесь по-прежнему нет — см. текстовую панель внизу.",
+          "title": "Memory / limit % по поду",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 0.8 },
+                { "color": "red", "value": 0.95 }
+              ]}
+            }
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 9 },
+          "targets": [
+            {
+              "expr": "sum by (pod, container) (node_namespace_pod_container:container_memory_working_set_bytes{namespace=~\"$namespace\"}) / sum by (pod, container) (namespace_pod_container:container_resource_limits_memory_bytes{namespace=~\"$namespace\"})",
+              "legendFormat": "{{pod}} / {{container}}"
+            }
+          ]
+        },
+        {
+          "id": 6,
+          "type": "timeseries",
+          "title": "Restarts по поду (Errors)",
+          "description": "namespace_pod_container:container_restarts_total — счётчик из kube-state-metrics, растёт скачком на каждый рестарт. Плоская линия — здоровый под, ступенька — событие, которое стоит сопоставить с логами/событиями Kubernetes.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "short" } },
-          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 10 },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 17 },
+          "targets": [
+            {
+              "expr": "max by (pod, container) (namespace_pod_container:container_restarts_total{namespace=~\"$namespace\"})",
+              "legendFormat": "{{pod}} / {{container}}"
+            }
+          ]
+        },
+        {
+          "id": 7,
+          "type": "timeseries",
+          "title": "OOMKilled по поду (Errors)",
+          "description": "namespace_pod_container:container_last_terminated_oomkilled — 1, если ПОСЛЕДНЕЕ завершение контейнера было по OOM. Флаг истории, не текущего момента: держится и после того, как под уже перезапустился и работает нормально — сопоставлять с restarts выше по времени.",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "short", "min": 0, "max": 1 } },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 17 },
+          "targets": [
+            {
+              "expr": "max by (pod, container) (namespace_pod_container:container_last_terminated_oomkilled{namespace=~\"$namespace\"})",
+              "legendFormat": "{{pod}} / {{container}}"
+            }
+          ]
+        },
+        {
+          "id": 8,
+          "type": "row",
+          "title": "Postgres — API DB pool (Utilization / Saturation)",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 25 }
+        },
+        {
+          "id": 9,
+          "type": "timeseries",
+          "title": "API DB pool: in_use vs idle vs max",
+          "description": "Переименовано из 'DB pool: ... по сервису' (ревью PR #73, второй проход): messenger_db_pool_connections снимается Runtime/check_readiness — это в первую очередь API-процесс. Воркеры (consumer-realtime, outbox-relay, consumer-unread, presence-sweeper) держат собственные Postgres-соединения без такой же pool-телеметрии, поэтому 'API pool healthy' здесь не означает 'у всех воркеров пул здоров' — их DB pool instrumentation ещё не доведена (см. текстовую панель внизу).",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "short" } },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 26 },
           "targets": [
             { "expr": "sum by (service, state) (messenger_db_pool_connections{namespace=~\"$namespace\"})", "legendFormat": "{{service}} {{state}}" },
             { "expr": "sum by (service) (messenger_db_pool_max_connections{namespace=~\"$namespace\"})", "legendFormat": "{{service}} max" }
           ]
         },
         {
-          "id": 6,
+          "id": 10,
           "type": "timeseries",
-          "title": "DB pool saturation: in_use / max",
+          "title": "API DB pool saturation: in_use / max",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": {
             "defaults": {
@@ -99,37 +176,58 @@ spec:
               ]}
             }
           },
-          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 10 },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 26 },
           "targets": [
             { "expr": "sum by (service) (messenger_db_pool_connections{namespace=~\"$namespace\",state=\"in_use\"}) / clamp_min(sum by (service) (messenger_db_pool_max_connections{namespace=~\"$namespace\"}), 1)", "legendFormat": "{{service}}" }
           ]
         },
         {
-          "id": 7,
+          "id": 11,
           "type": "row",
           "title": "Redis (Utilization / Saturation / Errors)",
-          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 }
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 34 }
         },
         {
-          "id": 8,
+          "id": 12,
           "type": "timeseries",
-          "title": "Memory: used / RSS",
-          "description": "redis_config_maxmemory=0 в этом кластере (не выставлен явный лимит, только maxmemory-policy volatile-lru) — % от лимита не построить честно; используемая память сравнивается с лимитом контейнера (512Mi) на панели CPU/RAM выше (container=messenger-redis).",
+          "title": "Memory: used / RSS, и % от container limit",
+          "description": "redis_config_maxmemory=0 — Redis сам не имеет memory ceiling (только maxmemory-policy volatile-lru без числа), поэтому volatile-lru почти не защищает от OOMKill: раньше, чем Redis начнёт вытеснять ключи с TTL, cgroup может убить процесс по container limit. % от лимита контейнера (512Mi, redis.yaml) показывает, насколько близко к этому — используется namespace_pod_container:container_resource_limits_memory_bytes{container=\"messenger-redis\"} с той же панели Compute выше. Задать явный Redis maxmemory ниже container limit (~400-430Mi, headroom под allocator/connections/exporter) — отдельная задача, не этот PR.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "bytes" } },
-          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 19 },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 35 },
           "targets": [
             { "expr": "max(redis_memory_used_bytes{namespace=~\"$namespace\"})", "legendFormat": "used" },
-            { "expr": "max(redis_memory_used_rss_bytes{namespace=~\"$namespace\"})", "legendFormat": "RSS" }
+            { "expr": "max(redis_memory_used_rss_bytes{namespace=~\"$namespace\"})", "legendFormat": "RSS" },
+            { "expr": "max(namespace_pod_container:container_resource_limits_memory_bytes{namespace=~\"$namespace\",container=\"messenger-redis\"})", "legendFormat": "container limit" }
           ]
         },
         {
-          "id": 9,
+          "id": 13,
+          "type": "timeseries",
+          "title": "Memory used / container limit %",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 0.7 },
+                { "color": "red", "value": 0.9 }
+              ]}
+            }
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 35 },
+          "targets": [
+            { "expr": "max(redis_memory_used_bytes{namespace=~\"$namespace\"}) / clamp_min(max(namespace_pod_container:container_resource_limits_memory_bytes{namespace=~\"$namespace\",container=\"messenger-redis\"}), 1)" }
+          ]
+        },
+        {
+          "id": 14,
           "type": "timeseries",
           "title": "Ops/sec и evictions/sec",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "ops" } },
-          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 19 },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 43 },
           "targets": [
             { "expr": "sum(rate(redis_commands_processed_total{namespace=~\"$namespace\"}[5m]))", "legendFormat": "commands/s" },
             { "expr": "sum(rate(redis_evicted_keys_total{namespace=~\"$namespace\"}[5m]))", "legendFormat": "evicted/s" },
@@ -137,12 +235,12 @@ spec:
           ]
         },
         {
-          "id": 10,
+          "id": 15,
           "type": "timeseries",
           "title": "Connected / blocked clients, keyspace hit ratio",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "short" } },
-          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 27 },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 43 },
           "targets": [
             { "expr": "max(redis_connected_clients{namespace=~\"$namespace\"})", "legendFormat": "connected clients" },
             { "expr": "max(redis_blocked_clients{namespace=~\"$namespace\"})", "legendFormat": "blocked clients" },
@@ -150,13 +248,13 @@ spec:
           ]
         },
         {
-          "id": 11,
+          "id": 16,
           "type": "timeseries",
           "title": "Command latency p99 (по команде, худшие)",
           "description": "redis_latency_percentiles_usec{cmd,quantile} — готовый percentile из Redis LATENCY HISTOGRAM, не собственная гистограмма экспортёра. Единицы — микросекунды.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "µs" } },
-          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 27 },
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 51 },
           "targets": [
             {
               "expr": "topk(5, max by (cmd) (redis_latency_percentiles_usec{namespace=~\"$namespace\",quantile=\"99\"}))",
@@ -165,97 +263,97 @@ spec:
           ]
         },
         {
-          "id": 12,
+          "id": 17,
           "type": "row",
           "title": "Kafka (Utilization / Saturation)",
-          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 35 }
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 59 }
         },
         {
-          "id": 13,
+          "id": 18,
           "type": "timeseries",
           "title": "Consumer group lag (сообщений)",
           "description": "kafka_consumergroup_lag (kafka-exporter). Лаг в сообщениях, не в секундах — раздел 20/§3.B доков просит именно возраст в секундах (messenger_outbox_oldest_age_seconds ниже), но за самой Kafka-очередью следим тем, что реально снимается. Без фильтра по $namespace: kafka-exporter скрейпится в namespace kafka, не messenger — та же причина, по которой workflow-template.yaml (§20 load-testing) фильтрует эту метрику по consumergroup, а не по namespace.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "short" } },
-          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 36 },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 60 },
           "targets": [
             { "expr": "sum by (consumergroup, topic) (kafka_consumergroup_lag{consumergroup=\"messenger-realtime\"})", "legendFormat": "{{consumergroup}} / {{topic}}" }
           ]
         },
         {
-          "id": 14,
+          "id": 19,
           "type": "timeseries",
           "title": "Under-replicated partitions (Errors)",
           "description": "kafka_topic_partition_under_replicated_partition — партиция, не догнавшая ISR: раннее предупреждение о деградации кластера ещё до реального лага потребителя. Без фильтра по $namespace по той же причине, что и лаг выше.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "short" } },
-          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 36 },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 60 },
           "targets": [
             { "expr": "sum(kafka_topic_partition_under_replicated_partition{topic=~\"messenger[.].+\"})", "legendFormat": "under-replicated" }
           ]
         },
         {
-          "id": 15,
+          "id": 20,
           "type": "row",
           "title": "Outbox (Saturation)",
-          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 44 }
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 68 }
         },
         {
-          "id": 16,
+          "id": 21,
           "type": "timeseries",
           "title": "Outbox: длина очереди и возраст самой старой записи",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": {} },
-          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 45 },
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 69 },
           "targets": [
             { "expr": "sum(messenger_outbox_pending{namespace=~\"$namespace\"})", "legendFormat": "pending (шт.)" },
             { "expr": "max(messenger_outbox_oldest_age_seconds{namespace=~\"$namespace\"})", "legendFormat": "oldest age (с)" }
           ]
         },
         {
-          "id": 17,
+          "id": 22,
           "type": "row",
           "title": "Centrifugo (Utilization)",
-          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 53 }
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 77 }
         },
         {
-          "id": 18,
+          "id": 23,
           "type": "timeseries",
           "title": "Connections по подам — перекос балансировки",
           "description": "Та же панель, что на 04 · Realtime: здесь она значит другое — не 'сколько всего', а 'равномерно ли распределено', то есть Utilization отдельного пода, а не суммарная аудитория.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "short" } },
-          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 54 },
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 78 },
           "targets": [
             { "expr": "sum by (pod) (centrifugo_node_num_clients{namespace=~\"$namespace\"})", "legendFormat": "{{pod}}" }
           ]
         },
         {
-          "id": 19,
+          "id": 24,
           "type": "row",
           "title": "Зависимости (Errors)",
-          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 62 }
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 86 }
         },
         {
-          "id": 20,
+          "id": 25,
           "type": "timeseries",
           "title": "Готовность зависимостей (0/1)",
           "description": "messenger_dependency_up{service,dependency}: 0 или 1 без градаций — 'наполовину доступна' это отдельные метрики задержки/ошибок (docs 06-observability.md, часть 3.A). Список зависимостей — тот, что реально проверяет каждый сервис сам; это не полная карта межсервисных связей.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "short", "min": 0, "max": 1 } },
-          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 63 },
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 87 },
           "targets": [
             { "expr": "min by (service, dependency) (messenger_dependency_up{namespace=~\"$namespace\"})", "legendFormat": "{{service}} → {{dependency}}" }
           ]
         },
         {
-          "id": 21,
+          "id": 26,
           "type": "text",
           "title": "Чего здесь всё ещё намеренно нет",
-          "gridPos": { "h": 5, "w": 24, "x": 0, "y": 71 },
+          "gridPos": { "h": 5, "w": 24, "x": 0, "y": 95 },
           "options": {
             "mode": "markdown",
-            "content": "**CPU/RAM по контейнеру теперь есть** (панели выше, через repo-local recording rule container-resource-usage.yaml) — предыдущая версия дашборда объясняла их отсутствие тем, что check-dashboards.py не может подтвердить vendor cAdvisor; ревью PR #73 верно указало, что это была ошибка приоритетов (checker не должен диктовать архитектуру observability), а не факт отсутствия данных: recording rule — repo-local манифест, `covers()` подтверждает его тем же механизмом, что и любой другой.\n\n**PgBouncer/postgres-exporter-уровня метрики** (server-side pool occupancy, active/waiting backends, replication lag, WAL) — по-прежнему не построены: это метрики отдельных vendor-экспортёров без repo-local recording rule, тот же класс проблемы, что был у CPU/RAM до этого коммита, но ещё не решённый для Postgres. Community-дашборды `postgres.yaml`/`cnpg-pgbouncer.yaml` остаются единственным источником для них.\n\n**Kafka broker-level CPU/disk/network** (не per-topic-partition) — kafka-exporter в этом кластере не отдаёт broker resource-метрики, только consumer/topic-уровень (lag, under-replicated, offsets).\n\n**R_healthy/R_knee/R_collapse** (§18 плана нагрузочного тестирования) — этот дашборд даёт сырые ряды для визуальной классификации во время benchmark, но не автоматическую классификацию: план прямо требует не сворачивать три режима в одно число."
+            "content": "**PgBouncer/postgres-exporter-уровня метрики** (server-side pool occupancy, active/waiting backends, replication lag, WAL) — по-прежнему не построены здесь: тот же класс проблемы, что был у CPU/RAM, но ещё не решённый для Postgres. Community-дашборды `postgres.yaml`/`cnpg-pgbouncer.yaml` остаются единственным источником.\n\n**Worker-level DB pool** (consumer-realtime/outbox-relay/consumer-unread/presence-sweeper) — `messenger_db_pool_connections` снимается только Runtime/API-процессом; воркеры держат отдельные Postgres-соединения без такой же метрики, инструментация не доведена (ревью PR #73, второй проход). 'API DB pool healthy' на панели выше не означает здоровье пулов воркеров.\n\n**Kafka broker-level CPU/disk/network** (не per-topic-partition) — kafka-exporter в этом кластере не отдаёт broker resource-метрики, только consumer/topic-уровень (lag, under-replicated, offsets).\n\n**Gateway (Cilium Envoy) monitoring** — не построен вовсе, отдельный следующий deliverable (см. 03 · API — RED).\n\n**R_healthy/R_knee/R_collapse** (§18 плана нагрузочного тестирования) — этот дашборд даёт сырые ряды для визуальной классификации во время benchmark, но не автоматическую классификацию: план прямо требует не сворачивать три режима в одно число."
           }
         }
       ]

@@ -138,6 +138,27 @@ EXTERNAL_METRICS: dict[str, str] = {
         "gitops/02-infra/observability-objects/victoria-stack/rules/"
         "container-resource-usage.yaml"
     ),
+    # Тот же класс проблемы и то же решение, отдельным файлом — см. его
+    # собственные комментарии (rules/pod-capacity-signals.yaml): kube-state-
+    # metrics отдаётся третьим source Application "victoria-stack" без
+    # `path`, covers() такой source не видит вовсе, поэтому limits/
+    # restarts/OOM переизданы репозиторным recording rule.
+    "namespace_pod_container:container_resource_limits_cpu_cores": (
+        "gitops/02-infra/observability-objects/victoria-stack/rules/"
+        "pod-capacity-signals.yaml"
+    ),
+    "namespace_pod_container:container_resource_limits_memory_bytes": (
+        "gitops/02-infra/observability-objects/victoria-stack/rules/"
+        "pod-capacity-signals.yaml"
+    ),
+    "namespace_pod_container:container_restarts_total": (
+        "gitops/02-infra/observability-objects/victoria-stack/rules/"
+        "pod-capacity-signals.yaml"
+    ),
+    "namespace_pod_container:container_last_terminated_oomkilled": (
+        "gitops/02-infra/observability-objects/victoria-stack/rules/"
+        "pod-capacity-signals.yaml"
+    ),
     # oliver006/redis_exporter sidecar, redisExporter.enabled=true в самом
     # Redis CRD; снимается VMPodScrape в том же каталоге манифестов —
     # до PR #73 Redis не наблюдался вообще, ревью нашло это как P1.

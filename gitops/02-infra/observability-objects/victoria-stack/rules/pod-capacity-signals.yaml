@@ -1,0 +1,55 @@
+# Ревью PR #73 верно указало на пробел в 05 · Capacity: raw cores/bytes
+# by container ничего не говорит о saturation без сравнения с limit, и
+# without restarts/OOM в USE-дашборде есть Utilization, но нет Errors.
+#
+# Источник для всех трёх — kube-state-metrics: kube_pod_container_resource_
+# limits, kube_pod_container_status_restarts_total,
+# kube_pod_container_status_last_terminated_reason. Все три реально
+# снимаются (проверено живьём: реальные series с pod/container/namespace
+# для namespace messenger) — но Application "victoria-stack"
+# (gitops/02-infra/observability-objects/victoria-stack/application.yaml)
+# отдаёт kube-state-metrics третьим source БЕЗ поля `path` (это Helm-чарт
+# с repoURL victoriametrics.github.io, values через $values-ref), и
+# scripts/check-dashboards.py::covers() не может подтвердить такой
+# source — у него буквально нет `path`, который можно бы было сравнить
+# с манифестом. Тот же вывод уже был honestly задокументирован в
+# messenger-load-run.yaml при первой попытке дашборда 22 раздела.
+#
+# Решение то же, что уже сработало для CPU/memory usage
+# (container-resource-usage.yaml, тот же каталог): не городить вокруг
+# checker обходной путь, а завести репозиторный recording rule — этот файл
+# реально применяется этим же Application третьим source (path: .../rules,
+# recurse: true), значит covers() его видит как любой другой манифест.
+# Имя записи — наше, оно видно в диффе; то, что оно оборачивает
+# kube-state-metrics 1:1, а не агрегирует что-то новое, не отличает его
+# от EXTERNAL_METRICS-строки для centrifugo/kafka/redis: и там, и тут
+# репозиторный манифест — источник правды о том, что метрика снимается,
+# а не сама метрика написана нашим кодом.
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMRule
+metadata:
+  name: pod-capacity-signals
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: victoria-metrics-k8s-stack
+spec:
+  groups:
+    - name: messenger.pod-capacity-signals
+      interval: 30s
+      rules:
+        - record: namespace_pod_container:container_resource_limits_cpu_cores
+          expr: |
+            max(kube_pod_container_resource_limits{resource="cpu",unit="core",container!=""})
+              by (cluster,namespace,pod,container)
+        - record: namespace_pod_container:container_resource_limits_memory_bytes
+          expr: |
+            max(kube_pod_container_resource_limits{resource="memory",unit="byte",container!=""})
+              by (cluster,namespace,pod,container)
+        - record: namespace_pod_container:container_restarts_total
+          expr: |
+            max(kube_pod_container_status_restarts_total{container!=""})
+              by (cluster,namespace,pod,container)
+        - record: namespace_pod_container:container_last_terminated_oomkilled
+          expr: |
+            max(kube_pod_container_status_last_terminated_reason{reason="OOMKilled",container!=""})
+              by (cluster,namespace,pod,container)
