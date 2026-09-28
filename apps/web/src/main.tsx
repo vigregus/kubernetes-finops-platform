@@ -2,14 +2,26 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import "./index.css";
 import App from "./App.tsx";
-import { createApiClient } from "./api/client";
-import { AuthApi, ConversationsApi, MessagesApi } from "./api/generated";
+import { createApiClient, withUnwrappedErrors } from "./api/client";
+import {
+  AuthApi,
+  ConversationsApi,
+  MessagesApi,
+  SendMessageRequestTypeEnum,
+  UsersApi,
+} from "./api/generated";
 import { createRealtimeTicketIssuer } from "./api/realtimeToken";
 import { bootStateOf, completeLogin } from "./features/auth/callback";
 import { ensureDeviceId, loadDeviceId, saveDeviceId } from "./features/auth/deviceId";
 import { CALLBACK_PATH } from "./features/auth/session";
 import { createSessionState } from "./features/auth/sessionState";
+import type {
+  CreateConversation,
+  SearchUser,
+} from "./features/conversations/components/NewConversationDialog";
 import type { HistoryApi } from "./features/messages/history";
+import { createOutboxStore, type OutboxStore } from "./features/messages/outbox/outboxStore";
+import type { SendMessage } from "./features/messages/outbox/useOutbox";
 import type { SendReceipt } from "./features/receipts/useReceipts";
 import { loadRuntimeConfig } from "./runtime-config";
 
@@ -28,9 +40,14 @@ const client = createApiClient({
 
 const session = createSessionState();
 
-const authApi = new AuthApi(client.configuration);
-const conversationsApi = new ConversationsApi(client.configuration);
-const messagesApi = new MessagesApi(client.configuration);
+// `withUnwrappedErrors` — не украшение: без неё любой отказ здесь доходил бы
+// до вызывающих как `FetchError` вместо `ApiProblem`/`ServiceUnavailableError`
+// (`api/client.ts`, там же и причина). Оборачивается **конструктор**, а не
+// отдельные вызовы — тем же доводом, что и обёртка сама объясняет.
+const authApi = withUnwrappedErrors(new AuthApi(client.configuration));
+const conversationsApi = withUnwrappedErrors(new ConversationsApi(client.configuration));
+const messagesApi = withUnwrappedErrors(new MessagesApi(client.configuration));
+const usersApi = withUnwrappedErrors(new UsersApi(client.configuration));
 
 /**
  * Клиент истории отдаётся **операцией**, а не объектом: `HistorySource`
@@ -100,6 +117,85 @@ const sendReceipts: SendReceipt = (conversationId, receipt) =>
     setReceiptsRequest: { ...receipt },
   });
 
+/**
+ * Отправка сообщения (`POST /conversations/{id}/messages`) — операция рядом с
+ * квитанцией и по той же причине: у очереди нет ни адреса, ни токена.
+ *
+ * `clientMessageId` **приходит сюда**, а не чеканится здесь, и это не
+ * перекладывание работы: идентификатор принадлежит **логической** отправке, а не
+ * попытке, и чеканит его тот, кто умеет повторить, — очередь (`D4`). Заведись он
+ * в этой обёртке, повтор получил бы свежий UUID, и в Postgres легли бы две
+ * строки вместо одной.
+ *
+ * `type` — литерал из сгенерированного перечисления, а не строка `"text"`:
+ * сужение здесь проверяется `tsc -b`, а строку компилятор пропустил бы, и
+ * расхождение с контрактом всплыло бы отказом сервера на живом стенде.
+ */
+const sendMessage: SendMessage = (request) =>
+  messagesApi.sendMessage({
+    conversationId: request.conversationId,
+    sendMessageRequest: {
+      clientMessageId: request.clientMessageId,
+      type: SendMessageRequestTypeEnum.Text,
+      payload: { text: request.text },
+    },
+  });
+
+/**
+ * Поиск человека по адресу (`GET /users?email=`) — операция рядом с прочими, и по
+ * той же причине: у диалога нет ни адреса API, ни токена.
+ *
+ * Отдаётся **не** список, а объект или отказ, и это форма ответа сервера, а не
+ * упрощение: совпадение точное, адрес уникален (частичный индекс
+ * `users_email_live_uniq`), и «нашлось двое» — состояние, которого не бывает
+ * (`D1`). Поэтому и клиент не приносит сюда массива.
+ *
+ * Нормализация адреса живёт **на сервере** (`normalize_email`): сделай её здесь —
+ * и правило приведения адреса завелось бы вторым, а расхождение с регистрацией
+ * всплыло бы тем, что человек не нашёл себя же в другом регистре.
+ */
+const searchUser: SearchUser = (email) => usersApi.findUserByEmail({ email });
+
+/**
+ * Создание личной беседы (`POST /conversations`) — операция оттуда же.
+ *
+ * `participant_id` приходит **готовым** — из ответа поиска, — и это главное, что
+ * здесь есть: беседу заводит подтверждённый человек, а не строка адреса, которую
+ * никто не проверял (`D2`). Заведись поле адреса в запросе, собеседника по строке
+ * выбирал бы сервер, а человек подтверждал бы то, чего не видел.
+ *
+ * Ответ — **модель API**, а не модель интерфейса: беседа приходит без зрителя, и
+ * `sender_id` в ней ещё не переведён в `"me"`. Адаптация — работа `ChatPage`, где
+ * `currentUserId` под рукой; здесь её взять негде, и вторая модель строки списка
+ * разошлась бы с первой.
+ *
+ * Маршрут идемпотентен по составу участников (`ensure_direct_conversation`,
+ * `ON CONFLICT (direct_key)`): повторное подтверждение вернёт **ту же** беседу, а
+ * не заведёт вторую, и контракт ради этого не меняется (`D8`).
+ */
+const createConversation: CreateConversation = (participantId) =>
+  conversationsApi.createDirectConversation({
+    createDirectConversationRequest: { participantId },
+  });
+
+/**
+ * Хранилище очереди — одна константа на приложение, а не по объекту на панель.
+ *
+ * Открытие базы стоит денег, а читать её очередь обязана **один раз на
+ * монтирование**: второй объект дал бы второй круг восстановления, и запись
+ * восстановилась бы дважды (безопасно, но лишним запросом).
+ *
+ * **Названное отступление от `D7`.** Требование «выход из системы чистит очередь
+ * целиком» здесь **не исполнено**, и не по недосмотру: выхода из системы в
+ * приложении нет вовсе — ни кнопки, ни операции. `CurrentUserFooter` рисует
+ * только настройки, `SessionsApi.revokeSession` зовётся лишь из вычеркнутой
+ * страницы, а `App` не имеет даже пропа `onSignOut`. Поэтому `clearForLogout`
+ * остаётся без вызова, а заведение выхода — отдельная работа (кнопка, операция,
+ * возврат в Keycloak), которая в объём этого гейта не входит. Названо вслух,
+ * чтобы отсутствие вызова не выглядело забывчивостью.
+ */
+const outboxStore: OutboxStore = createOutboxStore();
+
 async function start(): Promise<void> {
   // Идентификатор заводится **до** первого запроса — и до ветки: на `/callback`
   // первым запросом идёт обмен, и он тоже обязан нести `X-Device-Id`, иначе
@@ -154,6 +250,10 @@ createRoot(document.getElementById("root")!).render(
       historyApi={historyApi}
       refreshConversations={refreshConversations}
       sendReceipts={sendReceipts}
+      sendMessage={sendMessage}
+      searchUser={searchUser}
+      createConversation={createConversation}
+      outboxStore={outboxStore}
       readCentrifugoUrl={readCentrifugoUrl}
       issueTicket={issueTicket}
     />

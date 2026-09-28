@@ -226,6 +226,15 @@ export function adaptMessage(
     id: dto.messageId,
     seq: dto.seq,
 
+    // Тождество логической отправки — то, чем лента сводит подтверждённое с
+    // записью очереди (`eventMerge.confirmedClientIds`, D6). Отсутствующее поле
+    // отсутствующим и остаётся: у сообщения, отправленного из другой вкладки
+    // или другим устройством, `client_message_id` нет вовсе, и подставить сюда
+    // `message_id` значило бы выдать порядковый идентификатор за тождество
+    // отправки. По нему не сведётся ничего, а запись очереди снялась бы по
+    // чужому сообщению.
+    ...(dto.clientMessageId === undefined ? {} : { clientMessageId: dto.clientMessageId }),
+
     authorId: authorIdOf(dto.senderId, currentUserId),
 
     // Имени отправителя в ответе нет — и выдуманного не появляется.
@@ -287,9 +296,11 @@ export function adaptMessages(
  * Публикация канала → модель. Второй вход в ту же таблицу соответствия, и
  * разбор здесь **защитный**, а не доверчивый: форма измерена, а не предположена.
  *
- * `_client_event` (`services/realtime_delivery.py:43-56`) отдаёт ровно пять
- * полей — `type`, `message_id`, `seq`, `sender_id`, `payload` — и публикует их
- * на `conversation:{conversation_id}`. **Привязка к беседе — это подписка**:
+ * `_client_event` (`services/realtime_delivery.py:43-56`) отдаёт шесть полей —
+ * `type`, `message_id`, `seq`, `sender_id`, `payload` и `client_message_id`
+ * (последнее по D3: без него отправившей вкладке нечем свести событие со своей
+ * записью очереди, когда ответ `POST` потерялся) — и публикует их на
+ * `conversation:{conversation_id}`. **Привязка к беседе — это подписка**:
  * `conversation_id` в теле публикации не едет вовсе, и брать его оттуда неоткуда.
  *
  * Контракт канала (`packages/contracts/websocket/channels.json`,
@@ -344,11 +355,22 @@ export function adaptPublication(event: unknown, currentUserId: string): ChatMes
   if (typeof senderId !== "string" || senderId.length === 0) return null
 
   const payload = event.payload
+  const clientMessageId = event.client_message_id
 
   return {
     id,
     seq,
     authorId: authorIdOf(senderId, currentUserId),
+
+    // Тождество отправки — тем же полем, что у ответа `POST` (D3): им лента
+    // сводит событие с записью очереди в случае, ради которого гейт и заведён,
+    // — «ответ потерян, сообщение создано». Пустая строка и нестрока поля не
+    // дают: `message_id` его не заменяет (это разные тождества), а пустое
+    // значение свело бы запись с чем угодно.
+    ...(typeof clientMessageId === "string" && clientMessageId.length > 0
+      ? { clientMessageId }
+      : {}),
+
     kind: "text",
     // Тело берётся, когда оно строка: `payload` необязателен, а `payload.text`
     // может прийти числом или объектом. Выдуманного тела не появляется —

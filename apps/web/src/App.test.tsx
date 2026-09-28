@@ -9,6 +9,7 @@ import {
 import type { BootState } from "./api/client";
 import type { SessionState } from "./features/auth/sessionState";
 import type { HistoryApi } from "./features/messages/history";
+import { createOutboxStore } from "./features/messages/outbox/outboxStore";
 import { givenFakeCentrifuge } from "./test-support/centrifuge";
 import { App } from "./App";
 
@@ -127,6 +128,25 @@ function shell(state: BootState, api: HistoryApi = historyApi) {
     // дёргают: до ветки `ready` панели нет вовсе, а та, что монтируется в
     // последнем наборе, до отправки не доходит — строки ленты не пересекаются.
     sendReceipts: async () => ({}),
+    // Отправка и очередь — операции той же природы. Настоящее хранилище, а не
+    // заглушка: в jsdom `IndexedDB` нет, `list()` отказывает, и `useOutbox`
+    // оставляет очередь пустой — ровно та названная деградация, что описана в
+    // `useOutbox` для браузера с выключенным `IndexedDB`. Заглушка-пустышка
+    // здесь скрыла бы этот путь, а не проверила его.
+    sendMessage: async () => {
+      throw new Error("эти тесты не отправляют сообщений");
+    },
+    // Поиск человека и создание беседы — операции той же природы, и здесь так же
+    // бросают: эти тесты предъявляют экраны загрузки, а до диалога не доходят.
+    // Молчаливая заглушка вернула бы «нашёлся кто-то безымянный», и тест,
+    // случайно дотянувшийся до диалога, прошёл бы на вымысле.
+    searchUser: async () => {
+      throw new Error("эти тесты не ищут людей");
+    },
+    createConversation: async () => {
+      throw new Error("эти тесты не создают бесед");
+    },
+    outboxStore: createOutboxStore(),
     readCentrifugoUrl: () => "wss://rt.example.test/connection/websocket",
     issueTicket: async () => "ticket-for-the-hunt",
     createCentrifuge: givenFakeCentrifuge().factory,

@@ -44,6 +44,18 @@ PY
 IMAGE="${INTEGRATION_IMAGE:-$DEFAULT_IMAGE}"
 API_ENDPOINT="${INTEGRATION_API_URL:-http://api.messenger.svc.cluster.local}"
 CENTRIFUGO_ENDPOINT="${INTEGRATION_CENTRIFUGO_URL:-ws://messenger-centrifugo.messenger.svc.cluster.local:8000/connection/websocket}"
+# БД 2, как у нагрузок (`values.yaml::dependencies.redis.securityUrl`). Адрес
+# продублирован здесь так же, как адреса API и Centrifugo выше: список
+# in-cluster имён, которые нужны проверкам, собран в одном месте скрипта.
+REDIS_SECURITY_ENDPOINT="${INTEGRATION_REDIS_SECURITY_URL:-redis://messenger-redis.messenger.svc.cluster.local:6379/2}"
+# БД 3 — кэш половин для той половины пути, которую проверка события
+# поднимает у себя (`message_created_event_check.py`). Отдельная база, а не
+# та же, по которой работает развёрнутый потребитель: отметка `mark_delivered`
+# живёт в Redis по `message_id`, и общий ключ означал бы гонку — кто первый
+# отметил, тот и опубликовал. Проверка, зависящая от того, кто успел, не
+# проверяла бы ничего. Занятые базы названы, чтобы номер не пришлось
+# выяснять заново: 0 — Centrifugo, 1 — кэш событий приложения, 2 — лимитер.
+REDIS_CHECK_ENDPOINT="${INTEGRATION_REDIS_CHECK_URL:-redis://messenger-redis.messenger.svc.cluster.local:6379/3}"
 echo "  образ: $IMAGE"
 
 args=(--from-file="run.sh=$ROOT/tests/integration/run.sh")
@@ -98,6 +110,17 @@ SECRET
 # ветку API прямо здесь (`ASGITransport`), а `centrifugo_client_from_env`
 # без этой тройки возвращает `None` — и тишина в канале перестала бы
 # отличаться от отсутствия публикатора.
+# `REDIS_SECURITY_URL` нужен по той же причине, и она не косметическая:
+# поднятая здесь ветка API поднимает и лимитер (`limit_settings_from_env`),
+# а тот без адреса падает на разборе URL — `RateLimiter` конструируется
+# лениво, при первом `take`. Развёрнутая нагрузка адрес получает из чарта,
+# этот под — из этого списка, поэтому проверка поиска человека, дойдя
+# до счётчика, падала бы не на своём предмете, а на пустом месте.
+# `REDIS_CHECK_URL` — того же рода, но причина другая: это не то, без чего
+# проверка падает, а то, что делает её предметом событие, а не гонку.
+# Отсутствие адреса проверка назовёт сама, отдельным утверждением, и без
+# него не пойдёт: кэш половин в общей базе столкнулся бы с развёрнутым
+# потребителем за ту же отметку `message_id`.
 kubectl -n "$NS" run "$POD" --restart=Never \
     --labels="finops.internal/component=test" \
     --image="$IMAGE" \
@@ -123,6 +146,8 @@ kubectl -n "$NS" run "$POD" --restart=Never \
         {"name":"KAFKA_BOOTSTRAP","value":"messenger-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092"},
         {"name":"KAFKA_USERNAME","value":"messenger-outbox"},
         {"name":"KAFKA_PASSWORD","valueFrom":{"secretKeyRef":{"name":"messenger-outbox","key":"password"}}},
+        {"name":"REDIS_SECURITY_URL","value":"$REDIS_SECURITY_ENDPOINT"},
+        {"name":"REDIS_CHECK_URL","value":"$REDIS_CHECK_ENDPOINT"},
         {"name":"CENTRIFUGO_CLIENT_URL","value":"$CENTRIFUGO_ENDPOINT"},
         {"name":"CENTRIFUGO_API_URL","value":"http://messenger-centrifugo.messenger.svc.cluster.local:9000/api"},
         {"name":"CENTRIFUGO_HTTP_API_KEY","valueFrom":{"secretKeyRef":{"name":"messenger-centrifugo","key":"CENTRIFUGO_HTTP_API_KEY"}}},

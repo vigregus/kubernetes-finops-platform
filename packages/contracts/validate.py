@@ -243,9 +243,25 @@ def flatten_schema(node, prefix, acc):
 
 
 def schemas_of(doc):
+    """Схемы документа по именам.
+
+    У OpenAPI это `components.schemas`. У остальных контрактов схем
+    несколько, и объявлены они в `$defs`: тела событий лежат именно там,
+    а верхний уровень описывает документ целиком. Пока схемой считался
+    только верхний уровень, `required` внутри `$defs` не проверялся вовсе
+    — объявление поля события обязательным проходило молча, хотя это
+    ровно тот разрыв, ради которого проверка и написана.
+
+    Верхний уровень остаётся отдельной схемой (пустое имя): у Kafka-контрактов
+    `required` стоит на нём, и потерять его вместе со слепотой к `$defs`
+    значило бы обменять одну дыру на другую.
+    """
     if "openapi" in doc:
         return doc.get("components", {}).get("schemas", {})
-    return {"": doc}
+    schemas = {"": doc}
+    for name, sub in (doc.get("$defs") or {}).items():
+        schemas[f"$defs.{name}"] = sub
+    return schemas
 
 
 ALLOWED_KINDS = ("field", "field_type", "required", "route", "parameter", "response")

@@ -1,11 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { ConversationSidebar } from "./components/ConversationSidebar"
 import { ChatHeader } from "./components/ChatHeader"
-import { adaptConversations } from "./adapter"
+import { NewConversationDialog } from "./components/NewConversationDialog"
+import type { CreateConversation, SearchUser } from "./components/NewConversationDialog"
+import { adaptConversation, adaptConversations, withSentPreview } from "./adapter"
 import { adaptUnreadChanged, withUnreadOverlay } from "./unreadOverlay"
-import type { ConversationListPage } from "../../api/generated"
-import { adaptPublication, adaptReadReceipt } from "../messages/message-adapter"
+import type { Conversation as ConversationDto, ConversationListPage, Message } from "../../api/generated"
+import { adaptMessage, adaptPublication, adaptReadReceipt } from "../messages/message-adapter"
+import { playIncomingMessageSound } from "../messages/notificationSound"
+import { confirmedClientIds } from "../messages/eventMerge"
+import { MessageComposer } from "../messages/components/MessageComposer"
 import { MessageList } from "../messages/components/MessageList"
+import { useOutbox } from "../messages/outbox/useOutbox"
+import type { OutboxStore } from "../messages/outbox/outboxStore"
+import type { SendMessage } from "../messages/outbox/useOutbox"
 import { advance, deliveryStateOf } from "../receipts/receiptWatermarks"
 import type { Watermarks } from "../receipts/receiptWatermarks"
 import { useReceipts } from "../receipts/useReceipts"
@@ -19,7 +27,12 @@ import { ConnectionStatusLine } from "../realtime/components/ConnectionStatusLin
 import type { CentrifugeFactory } from "../realtime/realtimeClient"
 import { useRealtimeConnection } from "../realtime/useRealtimeConnection"
 import { MessengerLayout } from "../../shared/ui/MessengerLayout"
-import type { Conversation, CurrentUser } from "../../shared/lib/types"
+import type {
+  ChatMessage,
+  Conversation,
+  CurrentUser,
+  PendingMessage,
+} from "../../shared/lib/types"
 
 /**
  * Пустой оверлей — **одна** карта на модуль, а не новая на каждый сброс.
@@ -29,6 +42,33 @@ import type { Conversation, CurrentUser } from "../../shared/lib/types"
  * рендер списка на ровном месте.
  */
 const EMPTY_OVERLAY: ReadonlyMap<string, number> = new Map()
+
+/**
+ * Пустой список записей очереди — **одна** ссылка на модуль.
+ *
+ * Та же причина, что у `EMPTY_OVERLAY`: свежий `[]` — новое значение при том же
+ * смысле, и получатель (`MessageList`) считал бы проп изменившимся на каждом
+ * рендере беседы, которой очередь не касается вовсе.
+ */
+const EMPTY_PENDING: readonly PendingMessage[] = []
+
+/**
+ * Лента **одной** беседы, какой её видит очередь, — и только то, что ей нужно.
+ *
+ * Очередь живёт выше панели (см. довод у `useOutbox`), а лента — внутри неё, и
+ * это единственное место, где две половины сходятся. Отдаётся ровно два поля, а
+ * не весь `ConversationHistory`: очередь не должна знать ни про границу слияния,
+ * ни про догрузку, ни про `applyMessage` — иначе она завела бы второе место,
+ * знающее про ленту, ровно то, что запрещает `eventMerge.confirmedClientIds`.
+ *
+ * `conversationId` здесь не для красоты: очередь одна на все беседы, а ответ
+ * приходит на **свою**, и вложение ответа в чужую ленту показало бы сообщение
+ * там, где его не отправляли. Проверка стоит на стороне, которая это знает.
+ */
+interface FeedEntry {
+  readonly conversationId: string
+  readonly accept: (message: ChatMessage) => void
+}
 
 interface ChatPageProps {
   /** Беседы из `GET /conversations`. Фикстур здесь нет и быть не может. */
@@ -58,6 +98,41 @@ interface ChatPageProps {
    * отправку на каждом рендере — вкладка не сообщила бы ничего и никогда.
    */
   sendReceipts: SendReceipt
+  /**
+   * Отправка сообщения — операция, собранная в `main.tsx`, как и квитанция.
+   *
+   * Устойчивость ссылки здесь нужна меньше, чем у `sendReceipts` (там её смена
+   * перезапускала бы дребезг), но по той же причине: очередь держит её в
+   * зависимостях попытки, и новая ссылка на каждом рендере пересобирала бы
+   * замыкание попытки без всякой пользы.
+   */
+  sendMessage: SendMessage
+  /**
+   * Хранилище очереди — **на уровень списка**, а не панели беседы.
+   *
+   * Панель пересоздаётся на каждой смене беседы (`key` ниже), и очередь,
+   * живущая в ней, обнулялась бы вместе с ней: черновик, ушедший в офлайне,
+   * исчезал бы от одного клика по другой беседе. Здесь `key` нет ни у
+   * `ChatPage`, ни у чего-либо выше него, поэтому очередь переживает и смену
+   * беседы, и (через IndexedDB) перезагрузку.
+   */
+  outboxStore: OutboxStore
+  /**
+   * Поиск человека по адресу (`GET /users?email=`) — операция из `main.tsx`.
+   *
+   * Диалог получает её **готовой**: у компонента нет ни адреса API, ни токена,
+   * и собирать `UsersApi` здесь значило бы завести второй способ говорить с
+   * сервером рядом с тем, которым говорят все остальные.
+   */
+  searchUser: SearchUser
+  /**
+   * Создание личной беседы (`POST /conversations`) — оттуда же.
+   *
+   * Отдаёт модель API: беседа, которую вернул сервер, кладётся в список
+   * **здесь**, тем же `adaptConversation`, что и список из `GET /conversations`.
+   * Второго способа собрать строку списка не появляется.
+   */
+  createConversation: CreateConversation
   /** Подмена SDK — для компонентных тестов; в production не задаётся. */
   createCentrifuge?: CentrifugeFactory
 }
@@ -80,10 +155,13 @@ interface ChatPageProps {
  * после первого же нового сообщения перестаёт быть правдой, тогда как снимок
  * остаётся фактом.
  *
- * `MessageTimeline`, `MessageBubble`, `MessageComposer`, `TypingIndicator`,
- * `SyncIndicator` и `ConnectionStateBanner` сюда не подключены: они остаются
- * проектным запасом (закрытый список B13). Лента — минимальная, её задача не
- * оформление, а наблюдаемая поверхность.
+ * `MessageComposer` (отправка, `G3-007-1`) и `MessageBubble` (оформление
+ * строки, тот же гейт — отменяет только часть `B13` про ленту без оформления)
+ * подключены. `MessageTimeline`, `TypingIndicator`, `SyncIndicator` и
+ * `ConnectionStateBanner` — по-прежнему нет, они остаются проектным запасом
+ * (закрытый список `B13`/`B15`). Наблюдаемость ленты не отменена оформлением:
+ * `MessageList` единолично владеет DOM-маркерами приёмки и видимостью строк
+ * для квитанций, `MessageBubble` рисует только содержимое узла.
  *
  * **Список бесед живёт здесь двумя половинами: базой и оверлеем.** База — то,
  * что принёс REST; оверлей — числа из `unread.changed`, пришедшие в личный
@@ -109,11 +187,24 @@ export function ChatPage({
   centrifugoUrl,
   issueTicket,
   sendReceipts,
+  sendMessage,
+  outboxStore,
+  searchUser,
+  createConversation,
   createCentrifuge,
 }: ChatPageProps) {
   // Ленивая инициализация, а не `?? conversations[0]` в рендере: запасного
   // значения у настоящих данных нет, а пустой список — законный ответ сервера.
   const [activeId, setActiveId] = useState<string | null>(() => conversations[0]?.id ?? null)
+  /**
+   * Диалог создания беседы — состояние **списка**, а не панели.
+   *
+   * Панель пересоздаётся на каждой смене беседы (`key` ниже), и диалог,
+   * живущий в ней, закрывался бы от создания первой же беседы — а его задача
+   * как раз пережить создание: после подтверждения он открывает созданную
+   * беседу и закрывается сам, по факту, а не по перерисовке.
+   */
+  const [creatingConversation, setCreatingConversation] = useState(false)
 
   /**
    * База — из пропсов, и это не дублирование состояния: пропсы приходят из
@@ -199,57 +290,227 @@ export function ChatPage({
     return () => document.removeEventListener("visibilitychange", onVisibilityChange)
   }, [refresh])
 
+  /**
+   * Своё сообщение в строке списка — **от отправки**, а не от `message.created`
+   * (`D13`).
+   *
+   * Довод тот же, что у сверки: событие доставляется best-effort, и строка,
+   * ждущая его, показывала бы «ничего не отправлено» там, где отправлено.
+   * Применяется к **базе**, а не к слитому списку: оверлей непрочитанного
+   * говорит о числах, а превью и порядок — о самой беседе, и накладывать одно
+   * на другое значило бы собирать список вторым способом.
+   *
+   * `pending` приходит снаружи, а не выводится из очереди: нажатие помечает
+   * неподтверждённое, ответ снимает пометку — и оба состояния ставит тот, кто
+   * знает, что произошло.
+   */
+  const touchConversation = useCallback(
+    (conversationId: string, text: string, pending: boolean) => {
+      setBase((current) =>
+        withSentPreview(current, { conversationId, text, at: new Date(), pending }),
+      )
+    },
+    [],
+  )
+
+  /**
+   * Созданная беседа — в список и на экран, без второго круга REST (`D10`).
+   *
+   * Ответ `POST /conversations` **уже содержит** беседу, поэтому сверка здесь
+   * была бы вторым запросом за тем, что пришло. Беседа кладётся сверху — она
+   * свежая по построению.
+   *
+   * Уже знакомая беседа **не заменяется**: `POST` идемпотентен и умеет вернуть
+   * существующую (`ensure_direct_conversation`, `D8`), и подмена показанной
+   * строки ответом, который о ней ничего нового не говорит, потеряла бы то, что
+   * список уже знает (например, счётчик непрочитанного, если сервер его в
+   * создании не назвал). Предмет здесь — открыть беседу, а не переписать список.
+   */
+  const handleConversationCreated = useCallback(
+    (dto: ConversationDto) => {
+      const conversation = adaptConversation(dto, currentUserId, new Date())
+      setBase((current) =>
+        current.some((item) => item.id === conversation.id) ? current : [conversation, ...current],
+      )
+      setActiveId(conversation.id)
+      setCreatingConversation(false)
+    },
+    [currentUserId],
+  )
+
   // Слияние — на каждом рендере списка, а не при приходе события: иначе
   // пришлось бы держать согласие между двумя состояниями в руках, и число
   // отставало бы от базы ровно на один рендер.
   const merged = useMemo(() => withUnreadOverlay(base, overlay), [base, overlay])
 
+  /**
+   * Лента активной беседы — в ссылке, потому что её владелец объявлен **ниже**.
+   *
+   * Направление выбрано измерением, а не вкусом: очередь обязана быть выше
+   * панели (иначе запись умирает на смене беседы), а лента живёт в панели, и
+   * `key` пересоздаёт её при каждом переключении. Значит связь идёт **вверх** —
+   * панель сообщает о себе, очередь пользуется. Обратное направление потребовало
+   * бы либо поднять ленту в `ChatPage` (и потерять изоляцию хука от `key`), либо
+   * положить очередь в панель (и потерять саму очередь).
+   *
+   * Ссылка, а не состояние: `onSent` зовётся из промиса попытки, и записанное в
+   * состояние значение было бы снимком того рендера, в котором попытка началась.
+   */
+  const feedRef = useRef<FeedEntry | null>(null)
+  const attachFeed = useCallback((entry: FeedEntry | null) => {
+    feedRef.current = entry
+  }, [])
+
+  /**
+   * Ответ сервера — **тем же** путём, что история и realtime (D6).
+   *
+   * Ни здесь, ни в очереди нет второй сборки модели: `adaptMessage` и
+   * `acceptPublication` — те же две функции, которыми в ленту входит публикация.
+   * Положить ответ мимо них значило бы завести второй путь слияния, и первое же
+   * расхождение — разрыв номеров, который второй путь не распознает, — осталось
+   * бы незамеченным.
+   *
+   * `new Date()` здесь на месте, в отличие от тестов адаптера: часы нужны ровно
+   * затем, чтобы отформатировать отметку, а не чтобы получить проверяемое
+   * значение. Запись при этом **не снимается** — снимет её `settle` по факту
+   * появления сообщения в ленте (`confirmedClientIds`), потому что при разрыве
+   * номеров ответа в ленте ещё нет.
+   *
+   * Беседа сверяется с записью: ответ на чужую ленту — не «сообщение не
+   * отправилось», а «его не туда положили», и различить это здесь есть чем.
+   */
+  const onSent = useCallback(
+    (record: PendingMessage, response: Message) => {
+      // Строка списка обновляется **до** вложения в ленту и независимо от него:
+      // превью и порядок — предмет списка, а лента может эту беседу и не
+      // показывать (человек ушёл в другую). Помечая подтверждённым, а не
+      // неподтверждённым: сервер уже ответил, и держать пометку дальше значило
+      // бы утверждать «не отправлено» о принятом.
+      touchConversation(record.conversationId, record.text, false)
+
+      const entry = feedRef.current
+      if (entry === null || entry.conversationId !== record.conversationId) return
+
+      entry.accept(adaptMessage(response, currentUserId, new Date()))
+    },
+    [currentUserId, touchConversation],
+  )
+
+  /**
+   * Очередь исходящих — **здесь**, а не в панели беседы.
+   *
+   * Место выбрано по измеренному свойству: панель пересоздаётся на каждой смене
+   * беседы (`key` ниже), и очередь, живущая в ней, обнулялась бы вместе с ней —
+   * черновик, ушедший в офлайне, исчезал бы от одного клика по другой беседе.
+   * Здесь `key` нет ни у `ChatPage`, ни у чего-либо выше, поэтому запись
+   * переживает смену беседы, а хранилище — ещё и перезагрузку.
+   *
+   * Очередь **одна на все беседы** (хранилище тоже одно), и запись помнит свою:
+   * читать IndexedDB заново при каждом переключении значило бы платить за то,
+   * что не менялось, и повторно запускать попытку для всех записей сразу.
+   */
+  const outbox = useOutbox({ store: outboxStore, send: sendMessage, onSent })
+
+  /**
+   * Записи **своей** беседы: очередь одна на все, а лента показывает одну.
+   *
+   * Фильтр здесь, а не в ленте. `MessageList` получает уже своё — и это не
+   * размещение кода, а отказ от второго места, знающего про беседы: такое место
+   * разошлось бы с тем, которое чистит очередь, и разошлось бы молча (тот же
+   * довод, что у фильтра `pending` в докстринге ленты).
+   */
+  const pendingForActive = useMemo(
+    () =>
+      activeId === null
+        ? EMPTY_PENDING
+        : outbox.pending.filter((record) => record.conversationId === activeId),
+    [outbox.pending, activeId],
+  )
+
   const activeConversation = merged.find((c) => c.id === activeId) ?? null
 
   return (
-    <MessengerLayout
-      sidebar={
-        <ConversationSidebar
-          conversations={merged}
-          activeConversationId={activeConversation?.id ?? null}
-          currentUser={currentUser}
-          onSelectConversation={setActiveId}
-        />
-      }
-    >
-      {activeConversation === null ? (
-        // Шапки нет: шапка — утверждение о выбранной беседе, а её нет.
-        <div className="flex flex-1 items-center justify-center px-6 text-center">
-          <p className="text-sm text-text-warm-secondary">No conversations</p>
-        </div>
-      ) : (
-        /**
-         * `key` ставит **владелец выбора беседы**, и стоит он над компонентом,
-         * который держит хук, а не внутри него.
-         *
-         * Отступление от буквы плана названо: там `key` стоит на самом
-         * `ChatPage`, а выбор беседы живёт в `App`. Вынести его туда значило бы
-         * переписать `App` (состояние выбора плюс сайдбар) и не добавить ни
-         * одного наблюдаемого свойства — требование («смена беседы сбрасывает
-         * состояние ленты») исполнено ровно так же, потому что React
-         * пересоздаёт по `key` **родительский** элемент. `key`, написанный
-         * внутри самого `ChatPage`, собственный state хука не сбросил бы: тот
-         * живёт в том же компоненте, который `key` не пересоздаёт.
-         */
-        <ConversationPane
-          key={activeConversation.id}
-          conversation={activeConversation}
-          currentUserId={currentUserId}
-          history={history}
-          centrifugoUrl={centrifugoUrl}
-          issueTicket={issueTicket}
-          sendReceipts={sendReceipts}
-          createCentrifuge={createCentrifuge}
-          onUnreadPublication={onUnreadPublication}
-          onReconcile={refresh}
+    <>
+      <MessengerLayout
+        sidebar={
+          <ConversationSidebar
+            conversations={merged}
+            activeConversationId={activeConversation?.id ?? null}
+            currentUser={currentUser}
+            onSelectConversation={setActiveId}
+            // Проп передан — кнопка новой беседы **есть** (D10). До этого среза
+            // он оставался непереданным, и кнопки не существовало вовсе: не
+            // «спрятана», а не нарисована.
+            onNewConversation={() => setCreatingConversation(true)}
+          />
+        }
+      >
+        {activeConversation === null ? (
+          // Шапки нет: шапка — утверждение о выбранной беседе, а её нет.
+          <div className="flex flex-1 items-center justify-center px-6 text-center">
+            <p className="text-sm text-text-warm-secondary">No conversations</p>
+          </div>
+        ) : (
+          /**
+           * `key` ставит **владелец выбора беседы**, и стоит он над компонентом,
+           * который держит хук, а не внутри него.
+           *
+           * Отступление от буквы плана названо: там `key` стоит на самом
+           * `ChatPage`, а выбор беседы живёт в `App`. Вынести его туда значило бы
+           * переписать `App` (состояние выбора плюс сайдбар) и не добавить ни
+           * одного наблюдаемого свойства — требование («смена беседы сбрасывает
+           * состояние ленты») исполнено ровно так же, потому что React
+           * пересоздаёт по `key` **родительский** элемент. `key`, написанный
+           * внутри самого `ChatPage`, собственный state хука не сбросил бы: тот
+           * живёт в том же компоненте, который `key` не пересоздаёт.
+           */
+          <ConversationPane
+            key={activeConversation.id}
+            conversation={activeConversation}
+            currentUserId={currentUserId}
+            history={history}
+            centrifugoUrl={centrifugoUrl}
+            issueTicket={issueTicket}
+            sendReceipts={sendReceipts}
+            createCentrifuge={createCentrifuge}
+            pending={pendingForActive}
+            // Беседа известна **здесь**, а не в композере: `enqueue` требует
+            // беседу, а композер о беседах не знает вовсе — он знает только имя
+            // собеседника для подсказки в поле.
+            //
+            // Строка списка двигается **в момент нажатия**, с пометкой «ещё не
+            // подтверждено» (D13): человек уже написал, и список, ждущий сервера,
+            // показывал бы старое превью под только что отправленным текстом.
+            onSend={(text) => {
+              outbox.enqueue(activeConversation.id, text)
+              touchConversation(activeConversation.id, text, true)
+            }}
+            onUnreadPublication={onUnreadPublication}
+            onReconcile={refresh}
+            // Лента сообщает о себе — очередь этим пользуется, чтобы вложить ответ
+            // в **свою** беседу (довод у `FeedEntry`).
+            onFeedReady={attachFeed}
+            // Обратное движение: подтверждённое дошло до ленты — снять запись.
+            // Снимает очередь, а решает лента: вопрос «что подтверждено» знает
+            // `eventMerge`, вопрос «что снять» — `confirmedClientIds`.
+            onConfirmed={outbox.settle}
+          />
+        )}
+      </MessengerLayout>
+      {/*
+        Диалог — **вне** раскладки и вне панели беседы: панель пересоздаётся по
+        `key` при смене беседы, а диалог закрывается сам, по факту создания, и
+        перерисовка панели его бы закрыла раньше.
+      */}
+      {creatingConversation && (
+        <NewConversationDialog
+          searchUser={searchUser}
+          createConversation={createConversation}
+          onCreated={handleConversationCreated}
+          onClose={() => setCreatingConversation(false)}
         />
       )}
-    </MessengerLayout>
+    </>
   )
 }
 
@@ -262,10 +523,24 @@ interface ConversationPaneProps {
   /** Транспорт квитанции — тот же, что у панели: беседа уже известна. */
   sendReceipts: SendReceipt
   createCentrifuge?: CentrifugeFactory
+  /** Записи очереди **этой** беседы; отбор сделан уровнем выше. */
+  pending: readonly PendingMessage[]
+  /** Человек нажал Send: текст уходит в очередь, тождество чеканится там же. */
+  onSend: (text: string) => void
   /** Публикация личного канала — наверх, к списку: число принадлежит не беседе. */
   onUnreadPublication: (payload: unknown) => void
   /** Выход из разрыва — повод сверки списка. */
   onReconcile: () => void
+  /**
+   * «Вот моя лента», и `null` — «её больше нет».
+   *
+   * Панель умирает по `key` при каждой смене беседы, и очередь обязана узнать об
+   * этом **сама**: ссылка на мёртвую ленту вложила бы ответ сервера в беседу,
+   * которой на экране нет.
+   */
+  onFeedReady: (entry: FeedEntry | null) => void
+  /** Подтверждённое дошло до ленты — вот его `client_message_id`. */
+  onConfirmed: (clientMessageIds: ReadonlySet<string>) => void
 }
 
 /**
@@ -292,8 +567,12 @@ function ConversationPane({
   issueTicket,
   sendReceipts,
   createCentrifuge,
+  pending,
+  onSend,
   onUnreadPublication,
   onReconcile,
+  onFeedReady,
+  onConfirmed,
 }: ConversationPaneProps) {
   /**
    * Лента этого окна — в ссылке, потому что публикации достаются обработчику,
@@ -354,6 +633,10 @@ function ConversationPane({
 
       if (message !== null) {
         historyRef.current?.acceptPublication(message)
+        // Звук — только чужому сообщению: своё уже названо отправкой (D13),
+        // и звонок по нему сообщил бы человеку о том, что он только что
+        // сделал сам.
+        if (message.authorId !== "me") playIncomingMessageSound()
         return
       }
 
@@ -431,6 +714,45 @@ function ConversationPane({
   useEffect(() => {
     historyRef.current = conversationHistory
   })
+
+  /**
+   * Лента говорит очереди, кто она, — и умолкает, когда её больше нет.
+   *
+   * `acceptPublication` берётся прямо из хука, а не из `historyRef.current`: у
+   * ссылки нет ни стабильности, ни гарантии, что она уже заполнена к моменту
+   * первого ответа сервера, — а этот эффект исполняется до того, как вкладка
+   * успеет что-либо отправить. Уборка сообщает `null`, и это не симметрия ради
+   * симметрии: панель умирает по `key` при каждой смене беседы, и очередь без
+   * этого вложила бы ответ в беседу, которой на экране уже нет.
+   *
+   * Беседа называется **панелью**, а не сверяется вызывающим: она знает своё
+   * имя, а очередь нет — у неё запись помнит беседу, но ленты за ней не стоит.
+   */
+  useEffect(() => {
+    onFeedReady({
+      conversationId: conversation.id,
+      accept: conversationHistory.acceptPublication,
+    })
+    return () => onFeedReady(null)
+  }, [onFeedReady, conversation.id, conversationHistory.acceptPublication])
+
+  /**
+   * Подтверждённое дошло до ленты — снять записи очереди по их тождеству (D6).
+   *
+   * Здесь и только здесь решается судьба оптимистичной записи, и решается она
+   * **фактом ленты**, а не исходом ответа: при разрыве номеров сообщение в
+   * `messages` не попадает (`applyMessage` оставляет дыру дырой), значит снимать
+   * нечего, и запись доживает до конца догрузки — вместо того чтобы исчезнуть
+   * вместе с ещё не приехавшим подтверждением.
+   *
+   * Это верно и для порядка «событие раньше ответа»: оба входа идут одним путём
+   * (`acceptPublication`), и подтверждённое попадает в `messages` одинаково —
+   * независимо от того, кто его принёс. Второй точки снятия не заводится: две
+   * разошлись бы ровно так же, как любые две копии правила.
+   */
+  useEffect(() => {
+    onConfirmed(confirmedClientIds(conversationHistory.messages, pending))
+  }, [onConfirmed, conversationHistory.messages, pending])
 
   /**
    * Квитанция вкладки: два числа из двух разных источников.
@@ -550,6 +872,7 @@ function ConversationPane({
           // это здесь несуще: смена её перезапускала бы наблюдателя на каждом
           // рендере, то есть строка «видна целиком» объявлялась бы заново.
           onVisibleThroughSeq={setVisibleThroughSeq}
+          pending={pending}
         />
       )}
 
@@ -560,6 +883,21 @@ function ConversationPane({
       ) : null}
 
       <ConnectionStatusLine state={connection.state} />
+
+      {/*
+        Композер рисуется и при отказе истории (`phase === "error"`), и это не
+        упущение: отказ догрузки говорит о **хвосте**, а не о праве писать —
+        сообщение уходит на сервер отдельным запросом и в ленте окажется, когда
+        её перечитают. Спрятать поле ввода значило бы запретить человеку
+        действие по причине, к нему не относящейся.
+
+        `disabled` не передаётся ничем, и это названная граница: состояния
+        «писать сюда нельзя» клиент не знает — признак блокировки доезжает
+        отсутствием метаданных (`G3-007` D14), а не флагом на беседе. Ветка
+        `blocked` композера остаётся непроизведённой, и выдавать её за
+        исполняемое правило не будем.
+      */}
+      <MessageComposer recipientName={conversation.name} onSend={onSend} />
     </div>
   )
 }

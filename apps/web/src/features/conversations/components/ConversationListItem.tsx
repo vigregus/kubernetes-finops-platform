@@ -21,6 +21,7 @@ export function ConversationListItem({ conversation, active, onSelect }: Convers
     lastMessageTimestamp,
     unreadCount,
     previewDeleted,
+    pendingPreview,
     typingNames,
   } = conversation
   const isEmpty = !lastMessagePreview && !previewDeleted
@@ -80,10 +81,21 @@ export function ConversationListItem({ conversation, active, onSelect }: Convers
           <p className="truncate text-sm italic text-text-warm-muted">No messages yet</p>
         ) : (
           <div className="flex items-center justify-between gap-2">
+            {/*
+              Пометка «ещё не подтверждено» — тем же полем, которым строка
+              обновлена: превью ставит очередь при нажатии, а снимает ответ
+              сервера (`withSentPreview`). Отдельного признака не заводится —
+              он разошёлся бы со строкой, которую помечает.
+            */}
             <p
+              data-preview-pending={pendingPreview}
               className={clsx(
                 "truncate text-sm",
-                unreadCount ? "font-medium text-on-surface" : "text-text-warm-secondary",
+                pendingPreview
+                  ? "italic text-text-warm-muted"
+                  : unreadCount
+                    ? "font-medium text-on-surface"
+                    : "text-text-warm-secondary",
               )}
             >
               {lastMessagePreview}

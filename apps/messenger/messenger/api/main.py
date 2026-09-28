@@ -52,7 +52,7 @@ from messenger.domain.receipts import (
     Receipts,
     validate_receipts,
 )
-from messenger.domain.user import capabilities_of
+from messenger.domain.user import capabilities_of, normalize_email
 from messenger.services import backchannel as backchannel_service
 from messenger.services import conversations as conversation_service
 from messenger.services import history as history_service
@@ -64,6 +64,7 @@ from messenger.services import receipts as receipts_service
 from messenger.services import runtime as runtime_service
 from messenger.services import session_management as session_service
 from messenger.services import unread as unread_service
+from messenger.services import user_lookup as user_lookup_service
 from messenger.services import verification as verification_service
 from messenger.telemetry import logging as logging_envelope
 from messenger.telemetry import metrics, trace, tracing
@@ -974,6 +975,56 @@ async def me(request: Request, response: Response) -> dict[str, object] | Respon
     }
 
 
+@app.get("/users", response_model=dict[str, object])
+async def find_user_by_email(
+    request: Request, response: Response, email: str | None = None
+) -> dict[str, object] | Response:
+    """Находит человека по точному адресу. Отвечает тем же «не найден».
+
+    Наружу из четырёх исходов видно два, и это решение, а не упущение.
+    Найденный человек отдаётся двумя полями; свободный адрес, стёртая
+    учётная запись, заблокированный и сам спрашивающий отвечают **одним
+    телом** `resource_not_found` — тем же, что несуществующая беседа.
+    Различать их значило бы превратить поиск в канал: «этот адрес есть,
+    но человек вам не отвечает» — ровно то знание, которое в беседе
+    закрывает маска `G3-007` D14, а здесь участника ещё нет.
+
+    Параметр объявлен необязательным, хотя контракт называет его
+    обязательным, и причина та же, что у `_invalid_cursors`: пропущенный
+    параметр при `required` вернул бы `422` от FastAPI — код, который
+    в контракте не объявлен нигде, — тогда как объявленный здесь `400`
+    покрывает и пропуск, и пустую строку.
+
+    Адрес нормализуется **до** обращения к сервису и до лимита: запрос без
+    предмета не должен считаться попыткой поиска и тратить счётчик.
+    """
+    runtime = request.app.state.runtime
+    async with runtime.connection() as conn:
+        auth = await _current(request, conn)
+
+        if not auth.ok or auth.user is None:
+            return _auth_failure(auth.rejection, response)
+
+        address = normalize_email(email)
+        if address is None:
+            return _problem_response(_invalid_email(), response)
+
+        result = await user_lookup_service.find_by_email(
+            conn, viewer=auth.user, email=address, limiter=runtime.limiter
+        )
+
+    if result.rejection is not None:
+        if result.rejection is Reason.RATE_LIMITED:
+            # Без Retry-After клиент повторяет вслепую и упирается снова.
+            response.headers["Retry-After"] = str(result.retry_after_seconds)
+        return _problem_response(to_problem(result.rejection), response)
+
+    return {
+        "user_id": str(result.user_id),
+        "display_name": result.display_name,
+    }
+
+
 @app.post("/conversations", response_model=dict[str, object])
 async def create_direct_conversation(
     body: CreateDirectConversation, request: Request, response: Response
@@ -1508,6 +1559,22 @@ def _invalid_receipt(exc: InvalidReceipt) -> Problem:
     одна: разойдясь, они дали бы два разных `400` на одну ошибку клиента.
     """
     return Problem(400, "invalid_receipt", str(exc))
+
+
+def _invalid_email() -> Problem:
+    """Адрес не задан: `400` с кодом `invalid_email`.
+
+    Сосед `_invalid_receipt`, и различие то же: запрос разобрался, негоден
+    его предмет. Текст статичный, потому что присланного здесь нечего
+    пересказывать — ни в пустой строке, ни в пропущенном параметре нет
+    ничего, что клиент не знал бы сам, а эхо чужого адреса обратно было бы
+    отдельной строкой в журнале и в ответе.
+
+    Код не `invalid_cursor` и не `invalid_receipt`: клиент, разбирающий
+    `code`, получил бы неверную инструкцию — «поправь курсор» вместо
+    «укажи адрес».
+    """
+    return Problem(400, "invalid_email", "Адрес не указан")
 
 
 def _receipts_body(state: ReadState) -> dict[str, object]:

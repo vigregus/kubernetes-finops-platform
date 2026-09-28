@@ -1,12 +1,14 @@
 /**
- * Минимальная лента — наблюдаемая поверхность, а не оформление.
+ * Лента — наблюдаемая поверхность, оформление на ней сидит, а не подменяет её.
  *
- * Здесь нет ни пузырей, ни аватаров, ни надгробий: штатный дизайн
- * (`MessageTimeline` и его соседи) остаётся проектным запасом и подключится
- * вместе с отправкой. Гейт доказывает **поведение**, и разметке этой ленты
- * предстоит быть заменённой, не тронув ни одного редьюсера.
+ * `MessageBubble` рисует пузырь, аватар и статус доставки; надгробий здесь
+ * по-прежнему нет — `message.deleted` в этом гейте никто не выставляет
+ * (`message.deleted` пока не разбирается в `adaptPublication`), заводить под
+ * него ветку раньше факта незачем. Оформление сидит **внутри** несущей
+ * разметки, а не вместо неё: приёмка (B8) по-прежнему читает пять вещей
+ * атрибутами, а не текстом или классами, — оформление их не трогает.
  *
- * Поэтому разметка несёт ровно четыре вещи, и все четыре — предмет приёмки (B8):
+ * Поэтому разметка несёт ровно пять вещей, и все пять — предмет приёмки (B8):
  *
  * * `data-applied-through-seq` — применённая граница беседы. По ней видно и
  *   догрузку, и её завершение, а без неё сходимость пришлось бы читать по
@@ -22,6 +24,29 @@
  *   делал. Нет атрибута и тогда, когда квитанции не было: `undefined` — это
  *   «сервер о доставке не сообщал», и рисовать вместо него состояние значило бы
  *   вывести его из молчания.
+ * * `data-pending-client-id` — запись очереди, ещё не подтверждённая сервером.
+ *   Тождество здесь **то самое**, которым сервер узнаёт повтор (`client_message_id`),
+ *   а не порядковый номер: у неотправленного сообщения номера в беседе нет и
+ *   быть не может.
+ *
+ * ## Оптимистичная запись: почему у неё **нет** `data-message-seq`, а у ленты нет `seq`
+ *
+ * Это не пропуск атрибута, а исполнение инварианта **структурой**. Наблюдатель
+ * видимости ниже наблюдает ровно `[data-message-seq]`; отсутствие атрибута у
+ * записи очереди значит, что она физически не может попасть в `read_seq` — не
+ * «мы договорились её не учитывать», а «её не видит тот, кто считает».
+ * `data-applied-through-seq` от неё не зависит по той же причине: граница
+ * слияния считает подтверждённое, и запись очереди в неё не входит.
+ *
+ * Записи рисуются **после** подтверждённых и остаются такими, пока сервер не
+ * подтвердит отправку: подтверждённое приходит своим путём (`eventMerge`), и
+ * запись снимается там, где появилось подтверждение (D6), а не здесь. Второго
+ * места снятия лента не заводит — иначе их стало бы два и они разошлись бы.
+ *
+ * Пустота беседы считается **по обеим половинам**: беседа с одной записью
+ * очереди непуста, и `EmptyConversationState` («No messages yet. Say hello to …»)
+ * рядом с отправляющимся сообщением был бы утверждением, опровергаемым тем, что
+ * человек только что сделал сам.
  *
  * Порядок элементов **не наводится здесь**: лента приходит из `eventMerge`,
  * единственной точки сортировки и дедупликации (B22). Сортировка тут завела бы
@@ -58,7 +83,8 @@
 import { useEffect, useRef } from "react"
 
 import { EmptyConversationState } from "./EmptyConversationState"
-import type { ChatMessage } from "../../../shared/lib/types"
+import { MessageBubble } from "./MessageBubble"
+import type { ChatMessage, PendingMessage } from "../../../shared/lib/types"
 
 interface MessageListProps {
   /** Отсортированные по `seq` сообщения беседы. */
@@ -95,6 +121,55 @@ interface MessageListProps {
    * какая строка сейчас видна целиком.
    */
   onVisibleThroughSeq?: (seq: number) => void
+  /**
+   * Записи очереди: отправленные человеком и ещё не подтверждённые сервером.
+   *
+   * Отдельным списком, а не дописанными в `messages`, и это не оформление
+   * вызова: у `ChatMessage` номер (`seq`) обязателен, у записи очереди его нет
+   * вовсе — значит положить её в `messages` не даст **тип**, и это проверяется
+   * сборкой, а не обещанием (D5).
+   *
+   * Беседу запись называет сама (`conversationId`), но фильтрует её **не
+   * здесь**: лента получает уже своё. Фильтр в ленте завёл бы второе место,
+   * знающее про беседы, — и оно разошлось бы с тем, которое чистит очередь.
+   */
+  pending?: readonly PendingMessage[]
+}
+
+/**
+ * Пустой список записей — **одна** ссылка на модуль, а не новая на каждый
+ * рендер: свежий `[]` в значении по умолчанию был бы новым значением при том
+ * же смысле, и `useMemo` выше пересчитывался бы на ровном месте.
+ */
+const NO_PENDING: readonly PendingMessage[] = []
+
+/**
+ * Запись очереди — в форме, которую понимает `MessageBubble`.
+ *
+ * `seq` и `timestamp` фиктивны и нигде не рисуются: `DeliveryStatus` для
+ * `sending`/`retrying`/`failed` их не читает (см. `MessageBubble.tsx`), а
+ * `id` в разметку не идёт вовсе — тождество несёт `data-pending-client-id`
+ * на обёртке, не эта запись.
+ *
+ * `expired` переводится, потому что это **наш** исход (срок очереди), а не
+ * ответ сервера: слово «expired» на экране выдавало бы наше правило за
+ * чужое сообщение. Коды сервера (`rejected`, `forbidden`, …) не
+ * переводятся: их придумали не мы, и пересказ «своими словами» разошёлся
+ * бы с тем, что действительно ответили, — а по расхождению нельзя было бы
+ * понять, что чинить.
+ */
+function pendingAsMessage(record: PendingMessage): ChatMessage {
+  return {
+    id: record.clientMessageId,
+    seq: 0,
+    authorId: "me",
+    kind: "text",
+    text: record.text,
+    timestamp: "",
+    deliveryState: record.state,
+    failureReason:
+      record.failureReason === "expired" ? "message expired" : record.failureReason,
+  }
 }
 
 export function MessageList({
@@ -102,6 +177,7 @@ export function MessageList({
   conversationName,
   appliedThroughSeq,
   onVisibleThroughSeq,
+  pending = NO_PENDING,
 }: MessageListProps) {
   const scroller = useRef<HTMLDivElement | null>(null)
 
@@ -166,20 +242,45 @@ export function MessageList({
       className="flex min-h-0 flex-1 flex-col overflow-y-auto px-6 py-4"
       data-applied-through-seq={appliedThroughSeq ?? undefined}
     >
-      {messages.length > 0 ? (
-        messages.map((message) => (
-          <div
-            key={message.id}
-            data-message-id={message.id}
-            data-message-seq={message.seq}
-            data-message-state={
-              message.authorId === "me" ? message.deliveryState : undefined
-            }
-            className="py-1 text-sm"
-          >
-            {message.text}
-          </div>
-        ))
+      {messages.length > 0 || pending.length > 0 ? (
+        <>
+          {messages.map((message) => (
+            <div
+              key={message.id}
+              data-message-id={message.id}
+              data-message-seq={message.seq}
+              data-message-state={
+                message.authorId === "me" ? message.deliveryState : undefined
+              }
+              className="py-1.5"
+            >
+              <MessageBubble message={message} />
+            </div>
+          ))}
+          {/*
+            Записи очереди — **после** подтверждённых, и это порядок ленты, а не
+            оформление: подтверждённое пришло от сервера и упорядочено `seq`,
+            запись ещё не в беседе. Без `data-message-seq` (см. докстринг модуля)
+            и без `data-message-id`: тождество записи — `client_message_id`,
+            которым сервер узнаёт повтор.
+            `MessageBubble` берёт запись очереди по её собственной форме
+            (`PendingMessage`), обёрнутой до формы `ChatMessage` рядом, в
+            `pendingAsMessage`: `seq`/`timestamp` у неё фиктивны и нигде не
+            рисуются — `DeliveryStatus` для `sending`/`retrying`/`failed` их
+            не читает, — а `id` рядом не участвует: тождество записи несёт
+            только атрибут `data-pending-client-id`, поставленный здесь же.
+          */}
+          {pending.map((record) => (
+            <div
+              key={record.clientMessageId}
+              data-pending-client-id={record.clientMessageId}
+              data-message-state={record.state}
+              className="py-1.5"
+            >
+              <MessageBubble message={pendingAsMessage(record)} />
+            </div>
+          ))}
+        </>
       ) : appliedThroughSeq === null ? (
         // Пустая лента до снимка — не «сообщений нет», а «ответа ещё не было».
         // Различие здесь не косметическое: `EmptyConversationState` говорит

@@ -127,6 +127,12 @@ EVENTS: dict[str, str] = {
     "verify_email_initial": "security",
     "verify_email_limited": "security",
     "verify_email_sent": "security",
+    # Поиск человека по адресу (`services/user_lookup.py`) — тот же вопрос
+    # «кого пустили, кого нет», только субъект решения не сессия, а адрес:
+    # miss отвечает на «этот адрес ничего не даёт спрашивающему», limited —
+    # на срабатывание лимитера, которым ограничен перебор адресов.
+    "user_lookup_miss": "security",
+    "user_lookup_limited": "security",
 }
 
 # `security` отвечает на вопрос «кого пустили, кого нет и почему» - без
