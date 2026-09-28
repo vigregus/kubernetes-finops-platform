@@ -3,9 +3,16 @@
 # передаёт `profile`/`users`/`target_rate`/..., а не копирует Workflow под
 # каждый сценарий.
 #
-# DAG в `main` сейчас доходит до `provision` (раздел 8) — preflight и
-# заведение synthetic-пользователей в Keycloak. Остальные узлы полного DAG
-# раздела 6 (prepare-auth → prepare-conversations → playwright-smoke →
+# DAG в `main` сейчас доходит до `prepare-conversations` (раздел 6/13) —
+# preflight, заведение synthetic-пользователей в Keycloak и парные диалоги
+# между ними через настоящий production-совместимый auth flow. Отдельного
+# узла `prepare-auth` из раздела 6 сознательно нет: логин и создание
+# диалога делит один процесс (`prepare-conversations`), а не два
+# Argo-шага, — иначе access/refresh токены пришлось бы протаскивать через
+# output-параметры Workflow (тот же довод, что уже был против этого в
+# `provision`, см. комментарий там).
+#
+# Остальные узлы полного DAG раздела 6 (playwright-smoke →
 # {browser-canary, k6 TestRun} → reconciliation → recovery-check →
 # summarize-run) добавляются вместе с шагом, для которого они впервые
 # понадобились — не заглушками, возвращающими успех без реальной работы
@@ -74,6 +81,13 @@ spec:
           - name: provision
             template: provision
             dependencies: [preflight-connectivity, preflight-k6-operator]
+          - name: prepare-conversations
+            template: prepare-conversations
+            dependencies: [provision]
+            arguments:
+              parameters:
+                - name: run_password
+                  value: "{{tasks.provision.outputs.parameters.run_password}}"
 
     # Настоящие HTTP/TCP-пробы до зависимостей Messenger — не «под в статусе
     # Running» (раздел 7 явно требует не судить по этому), а рабочий запрос
@@ -252,6 +266,152 @@ spec:
           - name: run_password
             valueFrom:
               path: /tmp/run-password
+
+    # Раздел 13 — до всякой нагрузки synthetic-пользователи должны иметь
+    # диалоги, чтобы будущим k6/Playwright-профилям было куда слать
+    # сообщения. Логин — тот же production-совместимый код+PKCE поток, что
+    # проверяет `tests/integration/login_check.py`: реальная страница входа
+    # Keycloak, код из редиректа, обмен через `POST /auth/callback` — не
+    # самодельный JWT (раздел 8). Пользователи разбиваются на пары
+    # (1,2)(3,4)...; нечётный последний пользователь остаётся без диалога —
+    # это осознанный компромисс этого шага, не потерянная запись.
+    - name: prepare-conversations
+      inputs:
+        parameters:
+          - name: run_password
+      script:
+        image: ghcr.io/vigregus/messenger-api@sha256:36e63da2032997821e84f3993abd988ebf837d5f58c7d61f6e3a7351f0e3d8ce
+        command: ["python"]
+        env:
+          - name: RUN_ID
+            value: "{{workflow.parameters.run_id}}"
+          - name: USERS
+            value: "{{workflow.parameters.users}}"
+          - name: RUN_PASSWORD
+            value: "{{inputs.parameters.run_password}}"
+        resources:
+          requests: {cpu: 100m, memory: 128Mi}
+          limits: {cpu: "1", memory: 256Mi}
+        source: |
+          import asyncio
+          import base64
+          import hashlib
+          import os
+          import re
+          import secrets
+          import uuid
+          from urllib.parse import parse_qs, urlparse
+
+          import httpx
+
+          KEYCLOAK = "http://messenger-idp-service.keycloak.svc.cluster.local:8080"
+          REALM = "messenger"
+          OIDC_CLIENT_ID = "messenger-web"
+          API = "http://api.messenger.svc.cluster.local"
+          ORIGIN = "https://app.finops.local"
+          REDIRECT = f"{ORIGIN}/callback"
+
+          RUN_ID = os.environ["RUN_ID"]
+          USERS = int(os.environ["USERS"])
+          PASSWORD = os.environ["RUN_PASSWORD"]
+
+
+          def pkce() -> tuple[str, str]:
+              verifier = base64.urlsafe_b64encode(secrets.token_bytes(48)).rstrip(b"=").decode()
+              digest = hashlib.sha256(verifier.encode()).digest()
+              return verifier, base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+
+
+          async def authorization_code(login: str, challenge: str) -> str | None:
+              async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as browser:
+                  page = await browser.get(
+                      f"{KEYCLOAK}/realms/{REALM}/protocol/openid-connect/auth",
+                      params={
+                          "client_id": OIDC_CLIENT_ID,
+                          "response_type": "code",
+                          "scope": "openid",
+                          "redirect_uri": REDIRECT,
+                          "state": uuid.uuid4().hex,
+                          "code_challenge": challenge,
+                          "code_challenge_method": "S256",
+                      },
+                  )
+                  page.raise_for_status()
+                  form = re.search(r'action="([^"]+)"', page.text)
+                  if not form:
+                      return None
+                  action = form.group(1).replace("&amp;", "&")
+                  parsed = urlparse(action)
+                  action = f"{KEYCLOAK}{parsed.path}" + (f"?{parsed.query}" if parsed.query else "")
+
+                  submitted = await browser.post(
+                      action,
+                      data={"username": login, "password": PASSWORD},
+                      cookies=page.cookies,
+                      headers={"Content-Type": "application/x-www-form-urlencoded"},
+                  )
+                  location = submitted.headers.get("location", "")
+                  return parse_qs(urlparse(location).query).get("code", [None])[0]
+
+
+          async def login(http: httpx.AsyncClient, login_email: str) -> str:
+              verifier, challenge = pkce()
+              code = await authorization_code(login_email, challenge)
+              if code is None:
+                  raise RuntimeError(f"login page did not return a code for {login_email}")
+              exchanged = await http.post(
+                  f"{API}/auth/callback",
+                  json={"code": code, "code_verifier": verifier, "redirect_uri": REDIRECT},
+                  headers={"Origin": ORIGIN, "User-Agent": "load-testing/prepare-conversations"},
+              )
+              exchanged.raise_for_status()
+              access_token = exchanged.json()["access_token"]
+              return access_token
+
+
+          async def user_id_of(http: httpx.AsyncClient, access_token: str) -> str:
+              r = await http.get(f"{API}/me", headers={"Authorization": f"Bearer {access_token}"})
+              r.raise_for_status()
+              return r.json()["user_id"]
+
+
+          async def ensure_conversation(http: httpx.AsyncClient, a_token: str, b_user_id: str) -> None:
+              r = await http.post(
+                  f"{API}/conversations",
+                  json={"participant_id": b_user_id},
+                  headers={"Authorization": f"Bearer {a_token}", "Origin": ORIGIN},
+              )
+              if r.status_code not in (200, 201):
+                  r.raise_for_status()
+
+
+          async def one_pair(http: httpx.AsyncClient, i: int, semaphore: asyncio.Semaphore) -> None:
+              login_a = f"local-capacity-{RUN_ID}-{i:06d}@finops.local"
+              login_b = f"local-capacity-{RUN_ID}-{i + 1:06d}@finops.local"
+              async with semaphore:
+                  token_a = await login(http, login_a)
+                  token_b = await login(http, login_b)
+                  user_id_b = await user_id_of(http, token_b)
+                  await ensure_conversation(http, token_a, user_id_b)
+
+
+          async def main() -> None:
+              pairs = USERS // 2
+              async with httpx.AsyncClient(timeout=15.0) as http:
+                  semaphore = asyncio.Semaphore(10)
+                  results = await asyncio.gather(
+                      *(one_pair(http, 2 * p + 1, semaphore) for p in range(pairs)),
+                      return_exceptions=True,
+                  )
+              failures = [r for r in results if isinstance(r, Exception)]
+              for exc in failures:
+                  print(f"pair failed: {exc}")
+              print(f"prepared {pairs - len(failures)}/{pairs} conversations for run_id={RUN_ID}")
+              if failures:
+                  raise SystemExit(1)
+
+
+          asyncio.run(main())
 
     # Раздел 26 — cleanup выполняется как `onExit`, независимо от исхода
     # Workflow (в том числе после Failed/Error), и снимает только
