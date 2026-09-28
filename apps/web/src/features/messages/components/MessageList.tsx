@@ -1,10 +1,12 @@
 /**
- * Минимальная лента — наблюдаемая поверхность, а не оформление.
+ * Лента — наблюдаемая поверхность, оформление на ней сидит, а не подменяет её.
  *
- * Здесь нет ни пузырей, ни аватаров, ни надгробий: штатный дизайн
- * (`MessageTimeline` и его соседи) остаётся проектным запасом и подключится
- * вместе с отправкой. Гейт доказывает **поведение**, и разметке этой ленты
- * предстоит быть заменённой, не тронув ни одного редьюсера.
+ * `MessageBubble` рисует пузырь, аватар и статус доставки; надгробий здесь
+ * по-прежнему нет — `message.deleted` в этом гейте никто не выставляет
+ * (`message.deleted` пока не разбирается в `adaptPublication`), заводить под
+ * него ветку раньше факта незачем. Оформление сидит **внутри** несущей
+ * разметки, а не вместо неё: приёмка (B8) по-прежнему читает пять вещей
+ * атрибутами, а не текстом или классами, — оформление их не трогает.
  *
  * Поэтому разметка несёт ровно пять вещей, и все пять — предмет приёмки (B8):
  *
@@ -81,6 +83,7 @@
 import { useEffect, useRef } from "react"
 
 import { EmptyConversationState } from "./EmptyConversationState"
+import { MessageBubble } from "./MessageBubble"
 import type { ChatMessage, PendingMessage } from "../../../shared/lib/types"
 
 interface MessageListProps {
@@ -141,26 +144,31 @@ interface MessageListProps {
 const NO_PENDING: readonly PendingMessage[] = []
 
 /**
- * Надпись состояния записи — словами человека, и код сервера — как есть.
+ * Запись очереди — в форме, которую понимает `MessageBubble`.
  *
- * `expired` переводится, потому что это **наш** исход (срок очереди), а не ответ
- * сервера: слово «expired» на экране выдавало бы наше правило за чужое
- * сообщение. Коды сервера (`rejected`, `forbidden`, …) не переводятся: их
- * придумали не мы, и пересказ «своими словами» разошёлся бы с тем, что
- * действительно ответили, — а по расхождению нельзя было бы понять, что чинить.
+ * `seq` и `timestamp` фиктивны и нигде не рисуются: `DeliveryStatus` для
+ * `sending`/`retrying`/`failed` их не читает (см. `MessageBubble.tsx`), а
+ * `id` в разметку не идёт вовсе — тождество несёт `data-pending-client-id`
+ * на обёртке, не эта запись.
  *
- * `sending` — не «отправлено», а «идёт попытка»: сообщение в этот момент ещё не
- * подтверждено, и слово, обещающее больше, показывало бы исход до исхода.
+ * `expired` переводится, потому что это **наш** исход (срок очереди), а не
+ * ответ сервера: слово «expired» на экране выдавало бы наше правило за
+ * чужое сообщение. Коды сервера (`rejected`, `forbidden`, …) не
+ * переводятся: их придумали не мы, и пересказ «своими словами» разошёлся
+ * бы с тем, что действительно ответили, — а по расхождению нельзя было бы
+ * понять, что чинить.
  */
-function stateLabel(state: PendingMessage["state"], failureReason: string | undefined): string {
-  switch (state) {
-    case "sending":
-      return "Sending…"
-    case "retrying":
-      return "Retrying…"
-    case "failed":
-      if (failureReason === undefined) return "Not sent"
-      return `Not sent — ${failureReason === "expired" ? "message expired" : failureReason}`
+function pendingAsMessage(record: PendingMessage): ChatMessage {
+  return {
+    id: record.clientMessageId,
+    seq: 0,
+    authorId: "me",
+    kind: "text",
+    text: record.text,
+    timestamp: "",
+    deliveryState: record.state,
+    failureReason:
+      record.failureReason === "expired" ? "message expired" : record.failureReason,
   }
 }
 
@@ -244,9 +252,9 @@ export function MessageList({
               data-message-state={
                 message.authorId === "me" ? message.deliveryState : undefined
               }
-              className="py-1 text-sm"
+              className="py-1.5"
             >
-              {message.text}
+              <MessageBubble message={message} />
             </div>
           ))}
           {/*
@@ -255,18 +263,21 @@ export function MessageList({
             запись ещё не в беседе. Без `data-message-seq` (см. докстринг модуля)
             и без `data-message-id`: тождество записи — `client_message_id`,
             которым сервер узнаёт повтор.
+            `MessageBubble` берёт запись очереди по её собственной форме
+            (`PendingMessage`), обёрнутой до формы `ChatMessage` рядом, в
+            `pendingAsMessage`: `seq`/`timestamp` у неё фиктивны и нигде не
+            рисуются — `DeliveryStatus` для `sending`/`retrying`/`failed` их
+            не читает, — а `id` рядом не участвует: тождество записи несёт
+            только атрибут `data-pending-client-id`, поставленный здесь же.
           */}
           {pending.map((record) => (
             <div
               key={record.clientMessageId}
               data-pending-client-id={record.clientMessageId}
               data-message-state={record.state}
-              className="py-1 text-sm text-text-warm-muted"
+              className="py-1.5"
             >
-              {record.text}
-              <span className="ml-2 text-xs">
-                {stateLabel(record.state, record.failureReason)}
-              </span>
+              <MessageBubble message={pendingAsMessage(record)} />
             </div>
           ))}
         </>

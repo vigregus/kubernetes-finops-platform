@@ -1385,7 +1385,10 @@ describe("сведение отправленного: ответ, событи�
 
     expect(container.querySelectorAll(`[data-message-id="${confirmedIdOf(2)}"]`)).toHaveLength(1);
     expect(container.querySelectorAll("[data-message-seq]")).toHaveLength(2);
-    expect(container.querySelector('[data-message-seq="2"]')?.textContent).toBe("Hello Anna");
+    // `toContain`, не `toBe`: строка теперь несёт и `MessageBubble` — время и
+    // статус доставки сидят в том же узле. Предмет проверки не изменился —
+    // текст сообщения на месте, а не стёрт слиянием.
+    expect(container.querySelector('[data-message-seq="2"]')?.textContent).toContain("Hello Anna");
   });
 
   it("событие приходит раньше ответа: запись снята, и подтверждённая — одна", async () => {
@@ -1423,7 +1426,9 @@ describe("сведение отправленного: ответ, событи�
     });
 
     expect(container.querySelectorAll("[data-message-seq]")).toHaveLength(2);
-    expect(container.querySelector('[data-message-seq="2"]')?.textContent).toBe("Hello Anna");
+    // `toContain` по той же причине, что выше: узел несёт ещё и статус
+    // доставки от `MessageBubble`, а не только текст сообщения.
+    expect(container.querySelector('[data-message-seq="2"]')?.textContent).toContain("Hello Anna");
   });
 
   it("ответ потерян, событие доехало: запись снята, дубля нет", async () => {
