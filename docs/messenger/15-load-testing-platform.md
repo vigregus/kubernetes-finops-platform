@@ -200,7 +200,7 @@ k6_parallelism=2
 Один и тот же template должен использоваться для разных нагрузочных профилей,
 а не копироваться в несколько почти одинаковых Workflow YAML.
 
-## 5. Run identity — `[ ]`
+## 5. Run identity — `[x]`
 
 Каждый прогон получает уникальный:
 
@@ -307,7 +307,7 @@ Cleanup должен быть Argo `onExit`/exit-handler логикой и вы�
 Если стенд уже находится в деградированном состоянии — benchmark не
 запускать.
 
-## 8. Provisioning — `[ ]`
+## 8. Provisioning — `[x]`
 
 Для `messages`, `connections`, `stress`, `recovery`, `mixed`:
 
