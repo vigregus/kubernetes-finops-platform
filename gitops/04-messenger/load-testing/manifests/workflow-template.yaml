@@ -78,12 +78,21 @@ spec:
             template: preflight-connectivity
           - name: preflight-k6-operator
             template: preflight-k6-operator
+          # Раздел 9 — профиль `identity` не участвует в message-нагрузке
+          # (`messages`/`connections`/`stress`/`recovery`/`mixed`): он
+          # проверяет собственный поток (регистрация → письмо → ссылка →
+          # verified), который специально не должен смешиваться с message
+          # throughput. Поэтому основная ветка выключена условием `when`
+          # ровно на границе, где до сих пор всё было общим (после
+          # preflight), а не общим отдельным набором задач.
           - name: provision
             template: provision
             dependencies: [preflight-connectivity, preflight-k6-operator]
+            when: "{{workflow.parameters.profile}} != identity"
           - name: prepare-conversations
             template: prepare-conversations
             dependencies: [provision]
+            when: "{{workflow.parameters.profile}} != identity"
             arguments:
               parameters:
                 - name: run_password
@@ -91,10 +100,23 @@ spec:
           - name: k6-load
             template: k6-load
             dependencies: [prepare-conversations]
+            when: "{{workflow.parameters.profile}} != identity"
             arguments:
               parameters:
                 - name: run_password
                   value: "{{tasks.provision.outputs.parameters.run_password}}"
+          - name: reconciliation
+            template: reconciliation
+            dependencies: [k6-load]
+            when: "{{workflow.parameters.profile}} != identity"
+            arguments:
+              parameters:
+                - name: accepted_count
+                  value: "{{tasks.k6-load.outputs.parameters.accepted_count}}"
+          - name: identity-load
+            template: identity-load
+            dependencies: [preflight-connectivity, preflight-k6-operator]
+            when: "{{workflow.parameters.profile}} == identity"
 
     # Настоящие HTTP/TCP-пробы до зависимостей Messenger — не «под в статусе
     # Running» (раздел 7 явно требует не судить по этому), а рабочий запрос
@@ -493,9 +515,469 @@ spec:
               exit 1
             fi
             echo "TestRun завершился успешно"
+
+            # Раздел 13 — HTTP 200/201 не считается доказательством
+            # доставки. k6 уже знает, сколько сообщений сервер принял
+            # (свой собственный Counter, не догадка снаружи) — это число
+            # уходит в output-параметр, и reconciliation сверяет его с тем,
+            # что реально осело в Postgres.
+            kubectl logs -n load-testing "job/${NAME}-1" --tail=200 > /tmp/k6-log.txt 2>&1 || true
+            accepted="$(grep 'load_run_accepted_messages' /tmp/k6-log.txt | awk -F': ' '{print $2}' | awk '{print $1}')"
+            echo "${accepted:-0}" > /tmp/accepted-count
         resources:
           requests: {cpu: 100m, memory: 128Mi}
           limits: {cpu: "1", memory: 256Mi}
+      outputs:
+        parameters:
+          - name: accepted_count
+            valueFrom:
+              path: /tmp/accepted-count
+
+    # Раздел 14 — REST reconciliation: не доверять только HTTP-метрикам k6.
+    # `accepted` (что подтвердил API) сверяется с тем, что реально
+    # persisted в Postgres для бесед этого прогона. `persisted < accepted`
+    # — потеря сообщений, и это должно валить Workflow (раздел 25:
+    # корректностные гейты всегда fatal), а не просто попасть в лог.
+    # `persisted > accepted` — не потеря, а сигнал повторного использования
+    # run_id (в тех же беседах остались сообщения от предыдущего прогона с
+    # тем же именем) — предупреждение, не отказ.
+    #
+    # Гранулярность пока агрегатная (count vs count), не по каждому
+    # client_message_id/message_id/seq, как того требует полный раздел 13:
+    # k6 не может пронести per-message список через границу Job без
+    # артефакт-репозитория (раздел 24, ещё не заведён) — это документированное
+    # сознательное сужение, а не то, что раздел 13 сделан целиком.
+    - name: reconciliation
+      inputs:
+        parameters:
+          - name: accepted_count
+      script:
+        image: ghcr.io/vigregus/messenger-api@sha256:36e63da2032997821e84f3993abd988ebf837d5f58c7d61f6e3a7351f0e3d8ce
+        command: ["python"]
+        env:
+          - name: RUN_ID
+            value: "{{workflow.parameters.run_id}}"
+          - name: ACCEPTED_COUNT
+            value: "{{inputs.parameters.accepted_count}}"
+        resources:
+          requests: {cpu: 100m, memory: 128Mi}
+          limits: {cpu: "1", memory: 256Mi}
+        source: |
+          import asyncio
+          import base64
+          import os
+
+          import httpx
+
+          from messenger.repositories.postgres import PoolSettings, create_pool
+
+          RUN_ID = os.environ["RUN_ID"]
+          ACCEPTED = int(os.environ["ACCEPTED_COUNT"] or "0")
+
+
+          def read_own_secret(namespace: str, name: str) -> dict[str, str]:
+              host = os.environ["KUBERNETES_SERVICE_HOST"]
+              port = os.environ["KUBERNETES_SERVICE_PORT"]
+              token = open(
+                  "/var/run/secrets/kubernetes.io/serviceaccount/token", encoding="utf-8"
+              ).read().strip()
+              ca = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+              url = f"https://{host}:{port}/api/v1/namespaces/{namespace}/secrets/{name}"
+              r = httpx.get(url, headers={"Authorization": f"Bearer {token}"}, verify=ca, timeout=10.0)
+              r.raise_for_status()
+              return {k: base64.b64decode(v).decode() for k, v in r.json()["data"].items()}
+
+
+          async def main() -> None:
+              db = read_own_secret("messenger", "messenger-db-app")
+              pool = await create_pool(
+                  PoolSettings(
+                      host="messenger-db-pool",
+                      port=5432,
+                      database=db.get("dbname", "messenger"),
+                      user=db["user"],
+                      password=db["password"],
+                      min_size=1,
+                      max_size=2,
+                  ),
+                  application_name="load-testing-reconciliation",
+              )
+              try:
+                  pattern = f"local-capacity-{RUN_ID}-%"
+                  user_ids = [
+                      r["user_id"]
+                      for r in await pool.fetch(
+                          "select user_id from users where email like $1", pattern
+                      )
+                  ]
+                  if not user_ids:
+                      persisted = 0
+                  else:
+                      conv_ids = [
+                          r["conversation_id"]
+                          for r in await pool.fetch(
+                              "select distinct conversation_id from conversation_members "
+                              "where user_id = any($1::uuid[])",
+                              user_ids,
+                          )
+                      ]
+                      persisted = (
+                          await pool.fetchval(
+                              "select count(*) from messages where conversation_id = any($1::uuid[])",
+                              conv_ids,
+                          )
+                          if conv_ids
+                          else 0
+                      )
+              finally:
+                  await pool.close()
+
+              print(f"accepted (k6/API)={ACCEPTED} persisted (Postgres)={persisted} run_id={RUN_ID}")
+
+              if persisted < ACCEPTED:
+                  missing = ACCEPTED - persisted
+                  print(f"REST reconciliation FAILED: {missing} сообщений приняты API, но не найдены в Postgres")
+                  raise SystemExit(1)
+              if persisted > ACCEPTED:
+                  print(
+                      f"предупреждение: persisted ({persisted}) > accepted ({ACCEPTED}) — "
+                      "похоже, run_id переиспользован и в беседах остались сообщения прошлого прогона"
+                  )
+              print("REST reconciliation passed")
+
+
+          asyncio.run(main())
+
+    # Раздел 9 — профиль identity не должен заранее выставлять
+    # `emailVerified=true` (в отличие от provision для остальных
+    # профилей): он проверяет настоящий поток `create user → login → /me
+    # email_verified=false → письмо в Mailpit → ссылка подтверждения →
+    # verified → /me email_verified=true → start_conversation`, а не
+    # административную подмену флага. Логика подтверждения — тот же
+    # алгоритм, что уже доказан в tests/integration/verification_check.py
+    # (multi-redirect confirm_email — повторный вход и «Click here to
+    # proceed», которые Keycloak запрашивает по ходу), перенесённый сюда
+    # самодостаточным блоком, как и остальные script-шаблоны этого
+    # Workflow.
+    #
+    # Identity throughput умышленно не смешивается с message throughput
+    # (раздел 9 требует отдельного измерения) — этот шаг не создаёт ни
+    # одной беседы и не шлёт ни одного сообщения. Keycloak CPU/RAM, DB
+    # pressure и Mailpit ingestion, которые раздел 9 тоже перечисляет,
+    # здесь не измеряются — это метрики инфраструктуры, а не этого шага, и
+    # относятся к разделу 22 (Grafana dashboards), ещё не заведённому.
+    - name: identity-load
+      script:
+        image: ghcr.io/vigregus/messenger-api@sha256:36e63da2032997821e84f3993abd988ebf837d5f58c7d61f6e3a7351f0e3d8ce
+        command: ["python"]
+        env:
+          - name: RUN_ID
+            value: "{{workflow.parameters.run_id}}"
+          - name: USERS
+            value: "{{workflow.parameters.users}}"
+          - name: TARGET_RATE
+            value: "{{workflow.parameters.target_rate}}"
+        resources:
+          requests: {cpu: 100m, memory: 128Mi}
+          limits: {cpu: "1", memory: 256Mi}
+        source: |
+          import asyncio
+          import base64
+          import hashlib
+          import html
+          import os
+          import re
+          import secrets
+          import time
+          import uuid
+          from urllib.parse import parse_qs, urljoin, urlparse
+
+          import httpx
+
+          KEYCLOAK = "http://messenger-idp-service.keycloak.svc.cluster.local:8080"
+          REALM = "messenger"
+          CLIENT_ID = "messenger-web"
+          API = "http://api.messenger.svc.cluster.local"
+          ORIGIN = "https://app.finops.local"
+          REDIRECT = f"{ORIGIN}/callback"
+          MAILPIT = "http://messenger-mailpit-http.messenger.svc.cluster.local"
+
+          RUN_ID = os.environ["RUN_ID"]
+          USERS = int(os.environ["USERS"])
+          CONCURRENCY = max(1, min(int(os.environ["TARGET_RATE"]), 20))
+
+
+          def read_own_secret(namespace: str, name: str) -> dict[str, str]:
+              host = os.environ["KUBERNETES_SERVICE_HOST"]
+              port = os.environ["KUBERNETES_SERVICE_PORT"]
+              token = open(
+                  "/var/run/secrets/kubernetes.io/serviceaccount/token", encoding="utf-8"
+              ).read().strip()
+              ca = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+              url = f"https://{host}:{port}/api/v1/namespaces/{namespace}/secrets/{name}"
+              r = httpx.get(url, headers={"Authorization": f"Bearer {token}"}, verify=ca, timeout=10.0)
+              r.raise_for_status()
+              return {k: base64.b64decode(v).decode() for k, v in r.json()["data"].items()}
+
+
+          def pkce() -> tuple[str, str]:
+              verifier = base64.urlsafe_b64encode(secrets.token_bytes(48)).rstrip(b"=").decode()
+              digest = hashlib.sha256(verifier.encode()).digest()
+              return verifier, base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+
+
+          async def admin_token(http: httpx.AsyncClient, admin: dict[str, str]) -> str:
+              r = await http.post(
+                  f"{KEYCLOAK}/realms/master/protocol/openid-connect/token",
+                  data={
+                      "grant_type": "password",
+                      "client_id": "admin-cli",
+                      "username": admin["username"],
+                      "password": admin["password"],
+                  },
+              )
+              r.raise_for_status()
+              return r.json()["access_token"]
+
+
+          async def create_user(http: httpx.AsyncClient, token: str, login_email: str, password: str) -> None:
+              headers = {"Authorization": f"Bearer {token}"}
+              r = await http.post(
+                  f"{KEYCLOAK}/admin/realms/{REALM}/users",
+                  headers=headers,
+                  json={
+                      "username": login_email,
+                      "email": login_email,
+                      "emailVerified": False,
+                      "enabled": True,
+                      "firstName": "LOCAL-CAPACITY-001",
+                      "lastName": RUN_ID,
+                      "requiredActions": [],
+                      "credentials": [{"type": "password", "value": password, "temporary": False}],
+                  },
+              )
+              r.raise_for_status()
+
+
+          async def authorization_code(
+              browser: httpx.AsyncClient, login_email: str, password: str, challenge: str
+          ) -> str | None:
+              page = await browser.get(
+                  f"{KEYCLOAK}/realms/{REALM}/protocol/openid-connect/auth",
+                  params={
+                      "client_id": CLIENT_ID,
+                      "response_type": "code",
+                      "scope": "openid",
+                      "redirect_uri": REDIRECT,
+                      "state": uuid.uuid4().hex,
+                      "code_challenge": challenge,
+                      "code_challenge_method": "S256",
+                  },
+              )
+              page.raise_for_status()
+              form = re.search(r'action="([^"]+)"', page.text)
+              if not form:
+                  return None
+              parsed = urlparse(form.group(1).replace("&amp;", "&"))
+              action = f"{KEYCLOAK}{parsed.path}" + (f"?{parsed.query}" if parsed.query else "")
+              submitted = await browser.post(
+                  action,
+                  data={"username": login_email, "password": password},
+                  cookies=page.cookies,
+                  headers={"Content-Type": "application/x-www-form-urlencoded"},
+              )
+              location = submitted.headers.get("location", "")
+              return parse_qs(urlparse(location).query).get("code", [None])[0]
+
+
+          async def login(http: httpx.AsyncClient, login_email: str, password: str) -> tuple[str, uuid.UUID] | None:
+              verifier, challenge = pkce()
+              async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as browser:
+                  code = await authorization_code(browser, login_email, password, challenge)
+              if code is None:
+                  return None
+              device = uuid.uuid4()
+              r = await http.post(
+                  f"{API}/auth/callback",
+                  json={
+                      "code": code,
+                      "code_verifier": verifier,
+                      "redirect_uri": REDIRECT,
+                      "device_id": str(device),
+                  },
+                  headers={"Origin": ORIGIN},
+              )
+              if r.status_code != 200:
+                  return None
+              return r.json()["access_token"], device
+
+
+          async def wait_for_message(http: httpx.AsyncClient, address: str) -> dict | None:
+              for _ in range(30):
+                  r = await http.get(f"{MAILPIT}/api/v1/messages", params={"limit": 100})
+                  r.raise_for_status()
+                  for message in r.json().get("messages", []):
+                      if any(rec.get("Address") == address for rec in message.get("To", [])):
+                          return message
+                  await asyncio.sleep(0.5)
+              return None
+
+
+          async def confirmation_link(http: httpx.AsyncClient, message_id: str) -> str | None:
+              r = await http.get(f"{MAILPIT}/api/v1/message/{message_id}")
+              r.raise_for_status()
+              body = r.json().get("HTML", "") + "\n" + r.json().get("Text", "")
+              candidates = re.findall(r'https?://[^"<>\s]+', html.unescape(body))
+              return next((u for u in candidates if "login-actions/action-token" in u), None)
+
+
+          def internal_link(external: str) -> str:
+              parsed = urlparse(external)
+              return f"{KEYCLOAK}{parsed.path}" + (f"?{parsed.query}" if parsed.query else "")
+
+
+          def page_text(markup: str) -> str:
+              markup = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", markup, flags=re.S | re.I)
+              without_links = re.sub(r'href="[^"]+"', 'href="…"', markup)
+              return " ".join(re.sub(r"<[^>]+>", " ", without_links).split())[:500]
+
+
+          async def confirm_email(link: str, login_email: str, password: str) -> httpx.Response:
+              async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as browser:
+                  response = await browser.get(internal_link(link))
+                  for _ in range(8):
+                      if response.status_code in (301, 302, 303, 307, 308):
+                          location = response.headers.get("location")
+                          if not location:
+                              return response
+                          target = urljoin(str(response.url), html.unescape(location))
+                          parsed = urlparse(target)
+                          if parsed.path.startswith(f"/realms/{REALM}/"):
+                              response = await browser.get(internal_link(target))
+                              continue
+                          return response
+                      form = re.search(r'<form[^>]+action="([^"]+)"', response.text)
+                      if form:
+                          action = internal_link(html.unescape(form.group(1)))
+                          response = await browser.post(
+                              action,
+                              data={"username": login_email, "password": password},
+                              headers={"Content-Type": "application/x-www-form-urlencoded"},
+                          )
+                          continue
+                      proceed = next(
+                          (
+                              href
+                              for href, label in re.findall(
+                                  r'<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
+                                  response.text,
+                                  flags=re.S | re.I,
+                              )
+                              if "proceed" in page_text(label).lower()
+                          ),
+                          None,
+                      )
+                      if proceed:
+                          response = await browser.get(internal_link(html.unescape(proceed)))
+                          continue
+                      return response
+                  return response
+
+
+          async def one_identity(http: httpx.AsyncClient, admin_tok: str, index: int, results: list[dict]) -> None:
+              email = f"local-capacity-{RUN_ID}-identity-{index:06d}@finops.local"
+              password = secrets.token_urlsafe(24)
+              record: dict = {"email": email, "error": None}
+              try:
+                  t0 = time.monotonic()
+                  await create_user(http, admin_tok, email, password)
+                  record["register_s"] = time.monotonic() - t0
+
+                  t1 = time.monotonic()
+                  first = await login(http, email, password)
+                  if first is None:
+                      raise RuntimeError("первый логин (до подтверждения) не выдал токен")
+                  access, device = first
+                  record["login1_s"] = time.monotonic() - t1
+
+                  headers = {"Authorization": f"Bearer {access}", "X-Device-Id": str(device)}
+                  me = await http.get(f"{API}/me", headers=headers)
+                  me.raise_for_status()
+                  if me.json().get("email_verified") is not False:
+                      raise RuntimeError(f"/me не показал email_verified=false: {me.text[:200]}")
+
+                  t2 = time.monotonic()
+                  message = await wait_for_message(http, email)
+                  if message is None:
+                      raise RuntimeError("письмо не дошло до Mailpit")
+                  link = await confirmation_link(http, message["ID"])
+                  if link is None:
+                      raise RuntimeError("в письме нет ссылки подтверждения")
+                  followed = await confirm_email(link, email, password)
+                  if followed.status_code not in (200, 302, 303):
+                      raise RuntimeError(f"подтверждение отказало: {followed.status_code}")
+                  record["verify_s"] = time.monotonic() - t2
+
+                  t3 = time.monotonic()
+                  second = await login(http, email, password)
+                  if second is None:
+                      raise RuntimeError("логин после подтверждения не выдал токен")
+                  access2, device2 = second
+                  record["login2_s"] = time.monotonic() - t3
+
+                  headers2 = {"Authorization": f"Bearer {access2}", "X-Device-Id": str(device2)}
+                  me2 = await http.get(f"{API}/me", headers=headers2)
+                  me2.raise_for_status()
+                  body2 = me2.json()
+                  if body2.get("email_verified") is not True or "start_conversation" not in (
+                      body2.get("capabilities") or []
+                  ):
+                      raise RuntimeError(f"после подтверждения не выданы полные capabilities: {me2.text[:200]}")
+              except Exception as exc:
+                  record["error"] = str(exc)
+              results.append(record)
+
+
+          def p95(values: list[float]) -> float:
+              if not values:
+                  return 0.0
+              ordered = sorted(values)
+              idx = min(len(ordered) - 1, int(len(ordered) * 0.95))
+              return ordered[idx]
+
+
+          async def main() -> None:
+              admin = read_own_secret("keycloak", "messenger-idp-initial-admin")
+              results: list[dict] = []
+              async with httpx.AsyncClient(timeout=15.0) as http:
+                  admin_tok = await admin_token(http, admin)
+                  semaphore = asyncio.Semaphore(CONCURRENCY)
+
+                  async def bound(i: int) -> None:
+                      async with semaphore:
+                          await one_identity(http, admin_tok, i, results)
+
+                  started = time.monotonic()
+                  await asyncio.gather(*(bound(i) for i in range(1, USERS + 1)))
+                  elapsed = max(time.monotonic() - started, 0.001)
+
+              ok = [r for r in results if r["error"] is None]
+              failed = [r for r in results if r["error"] is not None]
+
+              print(f"identity-load: {len(ok)}/{USERS} identities прошли create→login→verify→login за {elapsed:.1f}s")
+              print(f"registrations/s={len(results) / elapsed:.2f} verifications/s={len(ok) / elapsed:.2f}")
+              print(f"login latency p95 (до подтверждения)={p95([r['login1_s'] for r in ok]):.3f}s")
+              print(f"verification latency p95 (письмо→ссылка→подтверждено)={p95([r['verify_s'] for r in ok]):.3f}s")
+              print(f"login latency p95 (после подтверждения)={p95([r['login2_s'] for r in ok]):.3f}s")
+              print(f"errors={len(failed)}")
+              for r in failed[:20]:
+                  print(f"  ошибка {r['email']}: {r['error']}")
+
+              if failed:
+                  raise SystemExit(1)
+
+
+          asyncio.run(main())
 
     # Раздел 26 — cleanup выполняется как `onExit`, независимо от исхода
     # Workflow (в том числе после Failed/Error), и снимает только
