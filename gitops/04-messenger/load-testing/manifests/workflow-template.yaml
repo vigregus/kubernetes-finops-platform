@@ -790,9 +790,19 @@ spec:
                   print(f"REST reconciliation FAILED: {missing} сообщений приняты API, но не найдены в Postgres")
                   raise SystemExit(1)
               if persisted > ACCEPTED:
+                  # Раздел 16 — browser-canary шлёт настоящие сообщения в те
+                  # же беседы, что и k6 (те же synthetic-пользователи), но
+                  # k6 о них не знает — его Counter считает только то, что
+                  # отправил он сам. Живой прогон с canary дал persisted=271
+                  # при accepted=239: не потеря и не переиспользование
+                  # run_id, а ожидаемая разница на число canary-обменов.
                   print(
                       f"предупреждение: persisted ({persisted}) > accepted ({ACCEPTED}) — "
-                      "похоже, run_id переиспользован и в беседах остались сообщения прошлого прогона"
+                      "не потеря: либо run_id переиспользован (в беседах остались "
+                      "сообщения прошлого прогона), либо разница объясняется "
+                      "canary-сообщениями (раздел 16, если browser-canary "
+                      "участвовал в этом прогоне) — canary пишет в те же беседы, "
+                      "но не учтён в accepted"
                   )
               print("REST reconciliation passed")
 
