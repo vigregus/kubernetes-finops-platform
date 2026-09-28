@@ -515,11 +515,17 @@ spec:
 
             # Раздел 18 — profile=stress использует свой сценарий
             # (ступени эскалации нагрузки, tests/load/messenger/stress.js),
-            # а не messages.js с одним фиксированным rate.
+            # а не messages.js с одним фиксированным rate. Раздел 17 —
+            # profile=mixed добавляет к отправке сообщений ещё и receipts
+            # (tests/load/messenger/mixed.js): production-трафик — это
+            # всегда смесь, не только POST messages.
             PROFILE="{{workflow.parameters.profile}}"
             if [ "$PROFILE" = "stress" ]; then
               SCRIPT_CONFIGMAP="k6-stress-script"
               SCRIPT_FILE="stress.js"
+            elif [ "$PROFILE" = "mixed" ]; then
+              SCRIPT_CONFIGMAP="k6-mixed-script"
+              SCRIPT_FILE="mixed.js"
             else
               SCRIPT_CONFIGMAP="k6-messages-script"
               SCRIPT_FILE="messages.js"
