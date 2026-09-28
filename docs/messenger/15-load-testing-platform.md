@@ -237,7 +237,7 @@ local-capacity-20260928-001
 
 Без этих данных сравнение двух результатов бессмысленно.
 
-## 6. Workflow DAG — `[ ]`
+## 6. Workflow DAG — `[~]` (основная ветка + identity-ветка реализованы и живо проверены; playwright-smoke/browser-canary/recovery-check/summarize-run — нет)
 
 Основной workflow реализовать примерно так:
 
@@ -335,7 +335,7 @@ Synthetic identities должны иметь ownership:
 local-capacity-<run_id>-000001@...
 ```
 
-## 9. Identity profile — `[ ]`
+## 9. Identity profile — `[~]` (поток подтверждения адреса реализован и живо проверен, 3/3 без ошибок; Keycloak CPU/RAM, DB pressure, Mailpit ingestion — нет, это метрики раздела 22)
 
 Отдельный профиль:
 
@@ -377,7 +377,7 @@ Identity throughput измерять отдельно:
 
 Не смешивать это с message throughput.
 
-## 10. k6 profiles — `[ ]`
+## 10. k6 profiles — `[~]` (messages и identity реализованы и живо проверены; connections/stress/recovery/mixed — нет)
 
 Один framework, но отдельные сценарии:
 
@@ -395,7 +395,7 @@ Identity throughput измерять отдельно:
 
 Не копировать её между шестью JS-файлами.
 
-## 11. Open-model message load — `[ ]`
+## 11. Open-model message load — `[~]` (constant-arrival-rate для messages-профиля реализован и живо проверен — target_rate достигался точно; отдельный разбор dropped_iterations > 0, SUT vs generator — нет)
 
 Для throughput использовать arrival-rate executor, а не closed model.
 
@@ -430,7 +430,7 @@ Identity throughput измерять отдельно:
 При `dropped_iterations > 0` необходимо определить, достигнут ли предел SUT
 или самого load generator.
 
-## 12. Distributed k6 через Operator — `[ ]`
+## 12. Distributed k6 через Operator — `[~]` (TestRun CRD + k6 Operator + parallelism-параметр реализованы и живо проверены; requests/limits на k6 runner не заданы, мониторинг рядом с SUT — нет, раздел 20/22)
 
 Argo не должен самостоятельно создавать N копий k6 Job.
 
@@ -472,7 +472,7 @@ parallelism=1
 
 и мониториться наряду с SUT.
 
-## 13. Message correlation — обязательно — `[ ]`
+## 13. Message correlation — обязательно — `[~]` (агрегатная корреляция count-vs-count реализована и живо проверена, включая доказанный fatal-гейт при потере; per-message client_message_id/message_id/seq/duplicate — нет, нужен артефакт-репозиторий, раздел 24)
 
 HTTP `201` не считается доказательством доставки.
 
@@ -516,7 +516,7 @@ B
 - timeouts
 - retries
 
-## 14. REST reconciliation — `[ ]`
+## 14. REST reconciliation — `[~]` (аггрегатная сверка accepted-vs-persisted реализована и живо проверена — и штатный проход (accepted=persisted=101), и намеренный fatal-сценарий (persisted < accepted валит Workflow); message_id/seq/duplicate — нет, см. раздел 13)
 
 После основной нагрузки отдельный Argo step должен сверить accepted
 messages с REST history.
@@ -839,7 +839,7 @@ summary.json
 
 Не полагаться только на Argo stdout.
 
-## 25. Workflow status semantics — `[ ]`
+## 25. Workflow status semantics — `[~]` (functional preflight, k6 execution completion и корректностный гейт accepted-but-not-durable реализованы и живо проверены — persisted < accepted валит Workflow; duplicates==0, browser canary, recovery, saturation — нет)
 
 Workflow считается `Succeeded` только если:
 
@@ -863,7 +863,7 @@ Latency/performance thresholds могут быть отдельными configur
 
 всегда fatal.
 
-## 26. Cleanup — `[ ]`
+## 26. Cleanup — `[~]` (Keycloak и Postgres — users/conversations/messages/sessions/devices/realtime_connections и т.д. — удаляются по run_id и живо проверены прямым SELECT (0 строк после прогона); TestRun удаляется trap'ом на EXIT в k6-load. Mailpit test messages (письма identity-load) и Playwright resources — не покрыты)
 
 Cleanup выполняется независимо от результата Workflow.
 
