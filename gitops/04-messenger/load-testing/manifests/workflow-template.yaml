@@ -95,6 +95,13 @@ spec:
               parameters:
                 - name: run_password
                   value: "{{tasks.provision.outputs.parameters.run_password}}"
+          - name: reconciliation
+            template: reconciliation
+            dependencies: [k6-load]
+            arguments:
+              parameters:
+                - name: accepted_count
+                  value: "{{tasks.k6-load.outputs.parameters.accepted_count}}"
 
     # Настоящие HTTP/TCP-пробы до зависимостей Messenger — не «под в статусе
     # Running» (раздел 7 явно требует не судить по этому), а рабочий запрос
@@ -493,9 +500,138 @@ spec:
               exit 1
             fi
             echo "TestRun завершился успешно"
+
+            # Раздел 13 — HTTP 200/201 не считается доказательством
+            # доставки. k6 уже знает, сколько сообщений сервер принял
+            # (свой собственный Counter, не догадка снаружи) — это число
+            # уходит в output-параметр, и reconciliation сверяет его с тем,
+            # что реально осело в Postgres.
+            kubectl logs -n load-testing "job/${NAME}-1" --tail=200 > /tmp/k6-log.txt 2>&1 || true
+            accepted="$(grep 'load_run_accepted_messages' /tmp/k6-log.txt | awk -F': ' '{print $2}' | awk '{print $1}')"
+            echo "${accepted:-0}" > /tmp/accepted-count
         resources:
           requests: {cpu: 100m, memory: 128Mi}
           limits: {cpu: "1", memory: 256Mi}
+      outputs:
+        parameters:
+          - name: accepted_count
+            valueFrom:
+              path: /tmp/accepted-count
+
+    # Раздел 14 — REST reconciliation: не доверять только HTTP-метрикам k6.
+    # `accepted` (что подтвердил API) сверяется с тем, что реально
+    # persisted в Postgres для бесед этого прогона. `persisted < accepted`
+    # — потеря сообщений, и это должно валить Workflow (раздел 25:
+    # корректностные гейты всегда fatal), а не просто попасть в лог.
+    # `persisted > accepted` — не потеря, а сигнал повторного использования
+    # run_id (в тех же беседах остались сообщения от предыдущего прогона с
+    # тем же именем) — предупреждение, не отказ.
+    #
+    # Гранулярность пока агрегатная (count vs count), не по каждому
+    # client_message_id/message_id/seq, как того требует полный раздел 13:
+    # k6 не может пронести per-message список через границу Job без
+    # артефакт-репозитория (раздел 24, ещё не заведён) — это документированное
+    # сознательное сужение, а не то, что раздел 13 сделан целиком.
+    - name: reconciliation
+      inputs:
+        parameters:
+          - name: accepted_count
+      script:
+        image: ghcr.io/vigregus/messenger-api@sha256:36e63da2032997821e84f3993abd988ebf837d5f58c7d61f6e3a7351f0e3d8ce
+        command: ["python"]
+        env:
+          - name: RUN_ID
+            value: "{{workflow.parameters.run_id}}"
+          - name: ACCEPTED_COUNT
+            value: "{{inputs.parameters.accepted_count}}"
+        resources:
+          requests: {cpu: 100m, memory: 128Mi}
+          limits: {cpu: "1", memory: 256Mi}
+        source: |
+          import asyncio
+          import base64
+          import os
+
+          import httpx
+
+          from messenger.repositories.postgres import PoolSettings, create_pool
+
+          RUN_ID = os.environ["RUN_ID"]
+          ACCEPTED = int(os.environ["ACCEPTED_COUNT"] or "0")
+
+
+          def read_own_secret(namespace: str, name: str) -> dict[str, str]:
+              host = os.environ["KUBERNETES_SERVICE_HOST"]
+              port = os.environ["KUBERNETES_SERVICE_PORT"]
+              token = open(
+                  "/var/run/secrets/kubernetes.io/serviceaccount/token", encoding="utf-8"
+              ).read().strip()
+              ca = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+              url = f"https://{host}:{port}/api/v1/namespaces/{namespace}/secrets/{name}"
+              r = httpx.get(url, headers={"Authorization": f"Bearer {token}"}, verify=ca, timeout=10.0)
+              r.raise_for_status()
+              return {k: base64.b64decode(v).decode() for k, v in r.json()["data"].items()}
+
+
+          async def main() -> None:
+              db = read_own_secret("messenger", "messenger-db-app")
+              pool = await create_pool(
+                  PoolSettings(
+                      host="messenger-db-pool",
+                      port=5432,
+                      database=db.get("dbname", "messenger"),
+                      user=db["user"],
+                      password=db["password"],
+                      min_size=1,
+                      max_size=2,
+                  ),
+                  application_name="load-testing-reconciliation",
+              )
+              try:
+                  pattern = f"local-capacity-{RUN_ID}-%"
+                  user_ids = [
+                      r["user_id"]
+                      for r in await pool.fetch(
+                          "select user_id from users where email like $1", pattern
+                      )
+                  ]
+                  if not user_ids:
+                      persisted = 0
+                  else:
+                      conv_ids = [
+                          r["conversation_id"]
+                          for r in await pool.fetch(
+                              "select distinct conversation_id from conversation_members "
+                              "where user_id = any($1::uuid[])",
+                              user_ids,
+                          )
+                      ]
+                      persisted = (
+                          await pool.fetchval(
+                              "select count(*) from messages where conversation_id = any($1::uuid[])",
+                              conv_ids,
+                          )
+                          if conv_ids
+                          else 0
+                      )
+              finally:
+                  await pool.close()
+
+              print(f"accepted (k6/API)={ACCEPTED} persisted (Postgres)={persisted} run_id={RUN_ID}")
+
+              if persisted < ACCEPTED:
+                  missing = ACCEPTED - persisted
+                  print(f"REST reconciliation FAILED: {missing} сообщений приняты API, но не найдены в Postgres")
+                  raise SystemExit(1)
+              if persisted > ACCEPTED:
+                  print(
+                      f"предупреждение: persisted ({persisted}) > accepted ({ACCEPTED}) — "
+                      "похоже, run_id переиспользован и в беседах остались сообщения прошлого прогона"
+                  )
+              print("REST reconciliation passed")
+
+
+          asyncio.run(main())
 
     # Раздел 26 — cleanup выполняется как `onExit`, независимо от исхода
     # Workflow (в том числе после Failed/Error), и снимает только
