@@ -100,7 +100,7 @@ async def resend_verification(
             extra={
                 "event": "verify_email_limited",
                 "log_stream": logging_envelope.STREAM_SECURITY,
-                "result": "failed",
+                "result": "rejected",
                 "error_code": "rate_limited",
                 "degraded": decision.degraded,
                 "user_id": str(user.user_id),

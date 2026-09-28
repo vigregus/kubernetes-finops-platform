@@ -118,6 +118,9 @@ EVENTS: dict[str, str] = {
     "token_exchange": "security",
     "token_rejected": "security",
     "login_rejected": "security",
+    # Единственная точка принятия решений о доступе (`authorize()`) — на
+    # каждый `Decision.deny(...)`, независимо от причины (`Reason`).
+    "authorization_denied": "security",
     "user_created": "security",
     "device_id_rejected": "security",
     "session_revoked": "security",
