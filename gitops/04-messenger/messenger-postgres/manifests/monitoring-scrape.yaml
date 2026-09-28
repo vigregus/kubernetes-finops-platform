@@ -1,0 +1,75 @@
+# Scrape metrics from the CloudNativePG PostgreSQL instance and PgBouncer.
+#
+# The CNPG operator itself is already scraped separately by:
+# gitops/02-infra/cnpg-operator/manifests/pod-scrape.yaml
+#
+# This file intentionally lives with the messenger PostgreSQL resources:
+# it describes monitoring targets owned by this workload, not the CNPG
+# controller itself.
+
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMPodScrape
+metadata:
+  name: messenger-db
+  namespace: messenger
+  labels:
+    app.kubernetes.io/name: messenger-db
+    app.kubernetes.io/component: database
+    finops.internal/product: messenger
+    finops.internal/team: platform-engineering
+    finops.internal/environment: local
+    finops.internal/component: database
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgresql
+      app.kubernetes.io/component: database
+      app.kubernetes.io/instance: messenger-db
+
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: 20s
+
+      # cnpg-pgbouncer Grafana dashboard expects these target labels.
+      # Kubernetes service-discovery meta labels are converted into
+      # stable Prometheus labels here instead of coupling dashboards
+      # to __meta_* names.
+      relabelConfigs:
+        - source_labels:
+            - __meta_kubernetes_pod_label_cnpg_io_cluster
+          target_label: cnpg_cluster
+
+        - source_labels:
+            - __meta_kubernetes_pod_label_cnpg_io_instanceRole
+          target_label: instance_role
+
+---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMPodScrape
+metadata:
+  name: messenger-db-pool
+  namespace: messenger
+  labels:
+    app.kubernetes.io/name: messenger-db-pool
+    app.kubernetes.io/component: connection-pool
+    finops.internal/product: messenger
+    finops.internal/team: platform-engineering
+    finops.internal/environment: local
+    finops.internal/component: database
+spec:
+  selector:
+    matchLabels:
+      cnpg.io/poolerName: messenger-db-pool
+
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: 20s
+
+      # The custom PostgreSQL/PgBouncer dashboard filters pooler metrics
+      # using cnpg_pooler.
+      relabelConfigs:
+        - source_labels:
+            - __meta_kubernetes_pod_label_cnpg_io_poolerName
+          target_label: cnpg_pooler

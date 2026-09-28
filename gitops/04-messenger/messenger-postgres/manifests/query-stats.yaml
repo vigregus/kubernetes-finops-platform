@@ -1,0 +1,170 @@
+# Additional CNPG metrics based on pg_stat_statements.
+#
+# pg_stat_statements itself is already:
+#   1. preloaded by Cluster.spec.postgresql.shared_preload_libraries
+#   2. created declaratively by database.yaml
+#
+# This ConfigMap only exposes the accumulated statistics through
+# CloudNativePG's built-in Prometheus exporter.
+#
+# It deliberately does NOT export raw SQL as a Prometheus label:
+# normalized query text can be large and would increase metric cardinality.
+# queryid is the stable correlation key for statement-level metrics.
+#
+# Actual slow SQL text (> log_min_duration_statement) continues to go to
+# PostgreSQL logs -> Promtail -> VictoriaLogs.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: messenger-db-query-stats
+  namespace: messenger
+  labels:
+    cnpg.io/reload: ""
+    app.kubernetes.io/name: messenger-db
+    app.kubernetes.io/component: monitoring
+    finops.internal/product: messenger
+    finops.internal/team: platform-engineering
+    finops.internal/environment: local
+    finops.internal/component: database
+
+data:
+  queries: |
+    query_stats:
+      primary: true
+
+      target_databases:
+        - messenger
+
+      query: |
+        SELECT
+          CASE
+            WHEN query ~* '(^|\*/)[[:space:]]*SELECT([[:space:]]|$)'
+              THEN 'read'
+
+            WHEN query ~* '(^|\*/)[[:space:]]*(INSERT|UPDATE|DELETE|MERGE)([[:space:]]|$)'
+              THEN 'write'
+
+            ELSE 'other'
+          END AS op,
+
+          SUM(calls)::bigint AS calls,
+
+          SUM(total_exec_time)::double precision
+            AS total_exec_time_ms
+
+        FROM public.pg_stat_statements
+
+        WHERE dbid = (
+          SELECT oid
+          FROM pg_catalog.pg_database
+          WHERE datname = pg_catalog.current_database()
+        )
+
+        GROUP BY 1;
+
+      metrics:
+        - op:
+            usage: LABEL
+            description: PostgreSQL statement class
+
+        - calls:
+            usage: COUNTER
+            description: Number of PostgreSQL statement executions
+
+        - total_exec_time_ms:
+            usage: COUNTER
+            description: Total PostgreSQL statement execution time in milliseconds
+
+
+    query_fingerprint_stats:
+      primary: true
+
+      target_databases:
+        - messenger
+
+      query: |
+        SELECT
+          queryid::text AS queryid,
+
+          calls::bigint
+            AS calls,
+
+          total_exec_time::double precision
+            AS total_exec_time_ms,
+
+          mean_exec_time::double precision
+            AS mean_exec_time_ms,
+
+          max_exec_time::double precision
+            AS max_exec_time_ms,
+
+          rows::bigint
+            AS rows,
+
+          shared_blks_hit::bigint
+            AS shared_blks_hit,
+
+          shared_blks_read::bigint
+            AS shared_blks_read,
+
+          temp_blks_read::bigint
+            AS temp_blks_read,
+
+          temp_blks_written::bigint
+            AS temp_blks_written
+
+        FROM public.pg_stat_statements
+
+        WHERE
+          queryid IS NOT NULL
+          AND dbid = (
+            SELECT oid
+            FROM pg_catalog.pg_database
+            WHERE datname = pg_catalog.current_database()
+          )
+
+        ORDER BY total_exec_time DESC
+
+        LIMIT 100;
+
+      metrics:
+        - queryid:
+            usage: LABEL
+            description: PostgreSQL normalized statement fingerprint
+
+        - calls:
+            usage: COUNTER
+            description: Number of executions for this statement fingerprint
+
+        - total_exec_time_ms:
+            usage: COUNTER
+            description: Total execution time for this statement fingerprint in milliseconds
+
+        - mean_exec_time_ms:
+            usage: GAUGE
+            description: Mean execution time for this statement fingerprint in milliseconds
+
+        - max_exec_time_ms:
+            usage: GAUGE
+            description: Maximum execution time for this statement fingerprint in milliseconds
+
+        - rows:
+            usage: COUNTER
+            description: Total rows processed by this statement fingerprint
+
+        - shared_blks_hit:
+            usage: COUNTER
+            description: Shared-buffer hits for this statement fingerprint
+
+        - shared_blks_read:
+            usage: COUNTER
+            description: Shared blocks read from storage for this statement fingerprint
+
+        - temp_blks_read:
+            usage: COUNTER
+            description: Temporary blocks read by this statement fingerprint
+
+        - temp_blks_written:
+            usage: COUNTER
+            description: Temporary blocks written by this statement fingerprint
