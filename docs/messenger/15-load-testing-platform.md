@@ -577,7 +577,7 @@ A
 Нет смысла измерять performance системы, функционально уже находящейся в
 broken state.
 
-## 16. Playwright browser canary во время нагрузки — `[ ]`
+## 16. Playwright browser canary во время нагрузки — `[~]` (1–5 пар реальных Chromium-контекстов, периодический обмен уникальным текстом через реальный WS, работает параллельно k6-load в DAG — реализовано; live-верификация после мерджа. browser_send_to_visible_seconds/canary_failures_total/browser_reconnects_total считаются и печатаются, но пока не пушатся в VictoriaMetrics — раздел 21 их не включает, нужен отдельный шаг push из этого же образа)
 
 При `messages`, `stress`, `recovery`, `mixed` должен работать небольшой
 browser canary.

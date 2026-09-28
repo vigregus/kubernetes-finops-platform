@@ -123,9 +123,25 @@ spec:
               parameters:
                 - name: run_password
                   value: "{{tasks.provision.outputs.parameters.run_password}}"
+          # Раздел 16 — browser canary работает параллельно k6 workload, не
+          # до и не после него: `dependencies` — тот же playwright-smoke
+          # (после него UI уже доказанно живой), не k6-load. Argo сам
+          # дожидается результатов обоих раньше reconciliation — это и есть
+          # «Argo Workflow должен дождаться результатов обоих» из плана,
+          # выраженное структурой DAG, а не отдельной синхронизацией.
+          - name: browser-canary
+            template: browser-canary
+            dependencies: [playwright-smoke]
+            when: "{{workflow.parameters.profile}} != identity"
+            arguments:
+              parameters:
+                - name: gateway_ip
+                  value: "{{tasks.resolve-gateway-address.outputs.parameters.gateway_ip}}"
+                - name: run_password
+                  value: "{{tasks.provision.outputs.parameters.run_password}}"
           - name: reconciliation
             template: reconciliation
-            dependencies: [k6-load]
+            dependencies: [k6-load, browser-canary]
             when: "{{workflow.parameters.profile}} != identity"
             arguments:
               parameters:
@@ -1233,6 +1249,98 @@ spec:
             npm ci --no-audit --no-fund
             cd /repo
             bash scripts/web-e2e-fixture.sh --project=acceptance
+        resources:
+          requests: {cpu: "1", memory: 1Gi}
+          limits: {cpu: "2", memory: 2Gi}
+
+    # Раздел 16 — небольшой browser canary параллельно k6 workload: 1–5
+    # пар живых Chromium-контекстов, каждая периодически шлёт уникальный
+    # текст и проверяет, что партнёр видит его без перезагрузки (реальный
+    # WS через Centrifugo), а затем получает ответ тем же путём. k6 меряет
+    # throughput через HTTP, reconciliation сверяет Postgres — ни один из
+    # них не свидетель того, что реальный браузер с реальным соединением
+    # видит сообщения в момент нагрузки; canary — этот свидетель.
+    #
+    # tests/e2e/canary.spec.ts переиспользует уже готовых synthetic-
+    # пользователей и их беседы (provision/prepare-conversations) — своих
+    # учётных записей не заводит и потому не нуждается в RBAC на Keycloak/
+    # Postgres, которые нужны playwright-smoke: DB_POD/kubectl здесь не
+    # используются вовсе.
+    - name: browser-canary
+      inputs:
+        parameters:
+          - name: gateway_ip
+          - name: run_password
+      hostAliases:
+        - ip: "{{inputs.parameters.gateway_ip}}"
+          hostnames: ["app.finops.local", "idp.finops.local", "rt.finops.local"]
+      volumes:
+        - name: repo
+          emptyDir: {}
+      initContainers:
+        - name: clone
+          image: alpine/git:2.45.2
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -eu
+              git clone --quiet https://github.com/vigregus/kubernetes-finops-platform.git /repo
+              cd /repo
+              git checkout --quiet "{{workflow.parameters.git_sha}}"
+          volumeMounts:
+            - name: repo
+              mountPath: /repo
+      container:
+        image: mcr.microsoft.com/playwright:v1.63.0-noble
+        command: ["bash", "-c"]
+        env:
+          - name: RUN_ID
+            value: "{{workflow.parameters.run_id}}"
+          - name: RUN_PASSWORD
+            value: "{{inputs.parameters.run_password}}"
+          - name: USERS
+            value: "{{workflow.parameters.users}}"
+          - name: DURATION
+            value: "{{workflow.parameters.duration}}"
+          - name: E2E_BASE_URL
+            value: "https://app.finops.local"
+          - name: E2E_IDP_ORIGIN
+            value: "https://idp.finops.local"
+          - name: E2E_STATE_FILE
+            value: "/tmp/canary-state.json"
+        volumeMounts:
+          - name: repo
+            mountPath: /repo
+        args:
+          - |
+            set -eu
+
+            # CANARY_PAIRS — не выше 5 (раздел 16: "не тысячи Chromium"), не
+            # выше того, сколько пар prepare-conversations реально завёл
+            # (USERS/2), и не ниже 1.
+            PAIRS=$(( USERS / 2 ))
+            [ "$PAIRS" -gt 5 ] && PAIRS=5
+            [ "$PAIRS" -lt 1 ] && PAIRS=1
+            export CANARY_PAIRS="$PAIRS"
+
+            # DURATION — тот же k6-style формат ("2m", "30s"), что и у
+            # k6-load: canary работает весь k6-прогон, не дольше и не
+            # короче, поэтому окно должно совпасть, а не подбираться
+            # отдельным параметром Workflow.
+            case "$DURATION" in
+              *ms) SECONDS=$(( ${DURATION%ms} / 1000 )) ;;
+              *s) SECONDS=${DURATION%s} ;;
+              *m) SECONDS=$(( ${DURATION%m} * 60 )) ;;
+              *h) SECONDS=$(( ${DURATION%h} * 3600 )) ;;
+              *) echo "неизвестный формат DURATION: $DURATION" >&2; exit 1 ;;
+            esac
+            export CANARY_DURATION_SECONDS="$SECONDS"
+
+            echo "browser-canary: $CANARY_PAIRS пар(ы), ${CANARY_DURATION_SECONDS}s"
+
+            cd /repo/apps/web
+            npm ci --no-audit --no-fund
+            npx playwright test --project=canary
         resources:
           requests: {cpu: "1", memory: 1Gi}
           limits: {cpu: "2", memory: 2Gi}
