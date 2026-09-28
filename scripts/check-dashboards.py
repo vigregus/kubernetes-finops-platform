@@ -80,6 +80,35 @@ EXTERNAL_METRICS: dict[str, str] = {
     "kafka_consumergroup_lag": (
         "gitops/02-infra/kafka-cluster/manifests/service-scrape.yaml"
     ),
+    # Раздел 21 — summary-метрики load_run_* пушатся напрямую в
+    # VictoriaMetrics встроенным Python внутри шага reconciliation
+    # (/api/v1/import/prometheus), а не собираются обычным скрейпом —
+    # поэтому их не найти в apps/**, они объявлены в самом
+    # workflow-template.yaml.
+    "load_run_accepted_messages": (
+        "gitops/04-messenger/load-testing/manifests/workflow-template.yaml"
+    ),
+    "load_run_persisted_messages": (
+        "gitops/04-messenger/load-testing/manifests/workflow-template.yaml"
+    ),
+    "load_run_missing_messages": (
+        "gitops/04-messenger/load-testing/manifests/workflow-template.yaml"
+    ),
+    "load_run_http_p95_seconds": (
+        "gitops/04-messenger/load-testing/manifests/workflow-template.yaml"
+    ),
+    "load_run_http_p99_seconds": (
+        "gitops/04-messenger/load-testing/manifests/workflow-template.yaml"
+    ),
+    "load_run_delivery_p95_seconds": (
+        "gitops/04-messenger/load-testing/manifests/workflow-template.yaml"
+    ),
+    "load_run_max_outbox_age_seconds": (
+        "gitops/04-messenger/load-testing/manifests/workflow-template.yaml"
+    ),
+    "load_run_max_kafka_lag": (
+        "gitops/04-messenger/load-testing/manifests/workflow-template.yaml"
+    ),
 }
 
 # Ключевые слова PromQL, которые не сопровождаются скобкой и потому не
