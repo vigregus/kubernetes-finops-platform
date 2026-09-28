@@ -1,0 +1,20 @@
+# k6 Operator — load execution layer для LOCAL-CAPACITY-001
+# (docs/messenger/15-load-testing-platform.md, раздел 1, 12). Создаёт и
+# распределяет k6-раннеры по `TestRun`; Argo Workflows (../argo-workflows)
+# сам такие Job'ы не плодит — только заводит один `TestRun` на прогон.
+
+# Namespaced RBAC (`rbac.namespaced: true`) ограничил бы оператора одним
+# namespace — своим же, `k6-operator`. `TestRun`-ресурсы будут заводиться в
+# `load-testing` (RBAC service account'а Argo — там же), отдельно от самого
+# оператора, поэтому нужен кластерный RBAC (умолчание чарта).
+rbac:
+  namespaced: false
+
+# `ServiceMonitor` — CRD Prometheus Operator, которого в кластере нет:
+# метрики здесь собирает VictoriaMetrics Operator через `VMPodScrape` (см.
+# `cnpg-operator/manifests/pod-scrape.yaml` за прецедентом), не заведён в
+# этом файле намеренно — у чарта нет параметра для него, а порт метрик
+# оператора здесь не выяснялся. Отдельная небольшая правка при необходимости.
+metrics:
+  serviceMonitor:
+    enabled: false

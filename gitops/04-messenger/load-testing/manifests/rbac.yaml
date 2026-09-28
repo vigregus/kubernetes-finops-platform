@@ -1,0 +1,56 @@
+# Права выполняющего workflow — минимум, названный в
+# docs/messenger/15-load-testing-platform.md, раздел 3: TestRun k6-оператора,
+# Job/Pod для фикстур и сверки, чтение статуса и конфигурации. Не
+# cluster-admin и не namespace-admin: список ролей закрытый, и новое право
+# добавляется вместе с шагом, которому оно понадобилось, а не заранее.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: load-testing-workflow
+  namespace: load-testing
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: load-testing-workflow
+  namespace: load-testing
+rules:
+  # k6 Operator: заводит и снимает TestRun, которым Argo поручает нагрузку
+  # (раздел 12 — Argo создаёt ровно один TestRun на прогон, распределение —
+  # работа оператора, не воркфлоу).
+  - apiGroups: ["k6.io"]
+    resources: ["testruns", "privateloadzones"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  # Fixture/reconciliation-шаги (provisioning, REST reconciliation, cleanup)
+  # — обычные Job'ы и их Pod'ы, не k6-раннеры: теми управляет оператор через
+  # TestRun, этими — сам workflow.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+  # Временные ConfigMap на время прогона (например, сгенерированный список
+  # synthetic-пользователей для шага reconciliation) — создаются и снимаются
+  # cleanup'ом (раздел 26). Secret — только читается: тестовые
+  # учётные данные заводятся отдельно (раздел 3), workflow их не пишет.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: load-testing-workflow
+  namespace: load-testing
+subjects:
+  - kind: ServiceAccount
+    name: load-testing-workflow
+    namespace: load-testing
+roleRef:
+  kind: Role
+  name: load-testing-workflow
+  apiGroup: rbac.authorization.k8s.io

@@ -1,0 +1,34 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: argo-workflows
+  namespace: argocd
+  annotations:
+    # Волна 0, рядом с остальными операторами (cnpg, kafka, keycloak): сам по
+    # себе не зависит ни от чего специфичного для messenger, и workflow'ы,
+    # которые на него опираются (LOCAL-CAPACITY-001, `04-messenger/load-testing`),
+    # идут в волне 1+ и не должны стартовать раньше контроллера.
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  project: finops-platform
+  sources:
+    - repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
+      targetRevision: HEAD
+      ref: values
+    - repoURL: https://argoproj.github.io/argo-helm
+      chart: argo-workflows
+      targetRevision: 2.0.8
+      helm:
+        releaseName: argo-workflows
+        valueFiles:
+          - $values/gitops/02-infra/argo-workflows/values.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argo
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
