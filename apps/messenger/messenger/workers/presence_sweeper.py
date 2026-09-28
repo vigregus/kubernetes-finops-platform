@@ -104,7 +104,11 @@ async def run(stop: asyncio.Event) -> None:
                 continue
 
         metrics.dependency_up("postgres", up=True)
-        metrics.presence_online(online=result.online_users, share=result.share)
+        metrics.presence_online(
+            online=result.online_users,
+            registered=result.registered_users,
+            share=result.share,
+        )
         # Запись на каждый такт, а не только когда убрали что-то: молчащий
         # уборщик и уборщик, которому нечего убирать, различимы только по
         # этому. Число удалённых — в записи, а не вместо неё.

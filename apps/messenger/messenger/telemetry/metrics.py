@@ -280,9 +280,22 @@ PRESENCE_ONLINE_SHARE = Gauge(
     ["service"],
 )
 
+# Знаменатель доли выше — уже вычислялся presence_sweeper на каждом такте
+# (`services/presence.py`, `SweepResult.registered_users`), но нигде не
+# покидал процесс отдельной метрикой: значение читалось только через
+# производную `share`. Найдено ревью PR #73 (карта дашбордов 06-observability.md
+# хотела Registered users как третье число рядом с Online/Connections,
+# capacity/business-контекст, не alert-метрику).
+REGISTERED_USERS = Gauge(
+    "messenger_registered_users",
+    "Всего заведённых учётных записей (не удалённых)",
+    ["service"],
+)
 
-def presence_online(*, online: int, share: float) -> None:
+
+def presence_online(*, online: int, registered: int, share: float) -> None:
     PRESENCE_ONLINE.labels(service=SERVICE).set(online)
+    REGISTERED_USERS.labels(service=SERVICE).set(registered)
     PRESENCE_ONLINE_SHARE.labels(service=SERVICE).set(share)
 
 

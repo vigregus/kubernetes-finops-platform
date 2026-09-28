@@ -62,7 +62,7 @@ class Stand:
         self.pools_opened = 0
         self.pauses: list[float] = []
         self.dependencies: list[bool] = []
-        self.online: list[tuple[int, float]] = []
+        self.online: list[tuple[int, int, float]] = []
         self._stop_at_pause = pauses
         self._sweep_fails = sweep_fails
         self._pool_fails = pool_fails
@@ -99,7 +99,9 @@ class Stand:
         )
         monkeypatch.setattr(
             worker.metrics, "presence_online",
-            lambda *, online, share: self.online.append((online, share)),
+            lambda *, online, registered, share: self.online.append(
+                (online, registered, share)
+            ),
         )
 
     def запустить(self) -> None:
@@ -132,7 +134,7 @@ def test_такт_снимает_метрики_и_пишет_журнал(monke
 
     stand.запустить()
 
-    assert stand.online == [(3, 0.25)]
+    assert stand.online == [(3, 12, 0.25)]
     assert stand.dependencies == [True]
     запись = записи(caplog_info, СОБЫТИЕ)[-1]
     assert запись.result == "ok"
@@ -195,7 +197,7 @@ def test_отказ_не_выдаёт_прошлые_метрики_присут
 
     stand.запустить()
 
-    assert stand.online == [(0, 0.0)], "метрики сняты и за упавший такт"
+    assert stand.online == [(0, 0, 0.0)], "метрики сняты и за упавший такт"
 
 
 def test_недоступный_пул_это_пропущенный_такт(monkeypatch, caplog_info):

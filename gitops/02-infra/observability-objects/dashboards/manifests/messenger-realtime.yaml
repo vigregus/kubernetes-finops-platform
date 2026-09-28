@@ -1,0 +1,248 @@
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: messenger-realtime
+  namespace: observability
+spec:
+  instanceSelector:
+    matchLabels:
+      dashboards: "grafana-local"
+  json: |
+    {
+      "uid": "messenger-realtime",
+      "title": "04 · Realtime — Centrifugo",
+      "description": "docs/messenger/06-observability.md, часть 3 'Centrifugo — отдельный случай': WebSocket не ведёт себя как обычный API (RPS почти всегда мал, всё живёт в открытых соединениях), поэтому connections/subscriptions/fan-out и разрез по подам — отдельный дашборд, а не строка на 03 · Edge/API.",
+      "tags": ["messenger", "realtime", "centrifugo"],
+      "schemaVersion": 39,
+      "version": 2,
+      "editable": true,
+      "time": { "from": "now-6h", "to": "now" },
+      "links": [
+        { "title": "01 · SLO Overview", "type": "link", "url": "/d/messenger-slo-overview", "icon": "dashboard" },
+        { "title": "02 · Message Journey", "type": "link", "url": "/d/messenger-messaging-pipeline", "icon": "dashboard" },
+        { "title": "03 · API — RED", "type": "link", "url": "/d/messenger-api-red", "icon": "dashboard" },
+        { "title": "05 · Capacity — USE", "type": "link", "url": "/d/messenger-capacity", "icon": "dashboard" }
+      ],
+      "templating": {
+        "list": [
+          {
+            "name": "namespace",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+            "query": "label_values(centrifugo_node_num_clients, namespace)",
+            "current": { "text": "messenger", "value": "messenger" },
+            "refresh": 2
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1,
+          "type": "row",
+          "title": "Аудитория",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+        },
+        {
+          "id": 20,
+          "type": "stat",
+          "title": "Registered users",
+          "description": "messenger_registered_users — то же значение, что уже вычислял presence_sweeper на каждом такте (SweepResult.registered_users, для доли online), но раньше не покидало процесс отдельной метрикой. Capacity/business-контекст, не alert-метрика. Живо проверено: реальное значение 192.",
+          "options": { "graphMode": "area" },
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "short" } },
+          "gridPos": { "h": 5, "w": 6, "x": 0, "y": 1 },
+          "targets": [ { "expr": "max(messenger_registered_users{namespace=~\"$namespace\"})" } ]
+        },
+        {
+          "id": 2,
+          "type": "stat",
+          "title": "Online users",
+          "description": "messenger_presence_online_users — снимок одним тактом presence_sweeper, считается по человеку, не по соединению (docs 06-observability.md, часть 3.A).",
+          "options": { "graphMode": "area" },
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "short" } },
+          "gridPos": { "h": 5, "w": 6, "x": 6, "y": 1 },
+          "targets": [ { "expr": "max(messenger_presence_online_users{namespace=~\"$namespace\"})" } ]
+        },
+        {
+          "id": 21,
+          "type": "stat",
+          "title": "Online %",
+          "options": { "graphMode": "area" },
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "percentunit" } },
+          "gridPos": { "h": 5, "w": 6, "x": 12, "y": 1 },
+          "targets": [ { "expr": "max(messenger_presence_online_share{namespace=~\"$namespace\"})" } ]
+        },
+        {
+          "id": 6,
+          "type": "stat",
+          "title": "Connections / online user",
+          "description": "Резкий рост (например с 1.2 до 3.7) — подозрение на reconnect-петлю или множественные соединения на пользователя, не рост аудитории.",
+          "options": { "graphMode": "area" },
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 2 },
+                { "color": "red", "value": 3 }
+              ]}
+            }
+          },
+          "gridPos": { "h": 5, "w": 6, "x": 18, "y": 1 },
+          "targets": [ { "expr": "sum(centrifugo_node_num_clients{namespace=~\"$namespace\"}) / clamp_min(max(messenger_presence_online_users{namespace=~\"$namespace\"}), 1)" } ]
+        },
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "Connections",
+          "options": { "graphMode": "area" },
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "short" } },
+          "gridPos": { "h": 5, "w": 6, "x": 0, "y": 6 },
+          "targets": [ { "expr": "sum(centrifugo_node_num_clients{namespace=~\"$namespace\"})" } ]
+        },
+        {
+          "id": 4,
+          "type": "stat",
+          "title": "Subscriptions",
+          "options": { "graphMode": "area" },
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "short" } },
+          "gridPos": { "h": 5, "w": 6, "x": 6, "y": 6 },
+          "targets": [ { "expr": "sum(centrifugo_node_num_subscriptions{namespace=~\"$namespace\"})" } ]
+        },
+        {
+          "id": 5,
+          "type": "stat",
+          "title": "Channels",
+          "options": { "graphMode": "area" },
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "short" } },
+          "gridPos": { "h": 5, "w": 6, "x": 12, "y": 6 },
+          "targets": [ { "expr": "sum(centrifugo_node_num_channels{namespace=~\"$namespace\"})" } ]
+        },
+        {
+          "id": 7,
+          "type": "stat",
+          "title": "Realtime amplification",
+          "description": "Переименовано из 'Realtime fan-out' (ревью PR #73, второй проход): centrifugo_transport_messages_sent{frame_type=\"push_publication\"} считает ВСЕ publication push-фреймы клиентам — не только message.created, но и unread.changed/read receipts/session.revoked и другие realtime-публикации (см. вызовы realtime.publish() в коде). Знаменатель — только accepted messages. Значение больше единицы поэтому не всегда значит 'сообщение доставлено N получателям' — оно может значить 'одно сообщение породило N разных realtime-событий'. Точный message-only fan-out потребовал бы отдельного label на transport layer, которого сейчас нет. Как capacity-сигнал (сколько push-нагрузки Centrifugo несёт на одно принятое сообщение) величина остаётся полезной — отсюда новое название.",
+          "options": { "graphMode": "area" },
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "short" } },
+          "gridPos": { "h": 5, "w": 6, "x": 18, "y": 6 },
+          "targets": [ { "expr": "sum(rate(centrifugo_transport_messages_sent{namespace=~\"$namespace\",frame_type=\"push_publication\"}[5m])) / clamp_min(sum(rate(messenger_message_send_operations_total{namespace=~\"$namespace\",result=\"success\"}[5m])), 0.001)" } ]
+        },
+        {
+          "id": 8,
+          "type": "row",
+          "title": "По подам",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 11 }
+        },
+        {
+          "id": 9,
+          "type": "bargauge",
+          "title": "Connections по подам",
+          "description": "Bar gauge, не timeseries (ревью PR #73, визуальный проход): 10 подов и 300k соединений в среднем выглядят благополучно, даже если один под держит 100k, а остальные по 22k (docs 06-observability.md, часть 3) — ranking читается быстрее line chart с 10 накладывающимися сериями. Тренд общего числа во времени — панель 'Connections' в верхней строке.",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "options": {
+            "orientation": "horizontal",
+            "displayMode": "gradient",
+            "showUnfilled": true,
+            "reduceOptions": { "calcs": ["lastNotNull"] }
+          },
+          "fieldConfig": { "defaults": { "unit": "short" } },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+          "targets": [ { "expr": "sum by (pod) (centrifugo_node_num_clients{namespace=~\"$namespace\"})", "legendFormat": "{{pod}}" } ]
+        },
+        {
+          "id": 10,
+          "type": "bargauge",
+          "title": "Subscriptions по подам",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "options": {
+            "orientation": "horizontal",
+            "displayMode": "gradient",
+            "showUnfilled": true,
+            "reduceOptions": { "calcs": ["lastNotNull"] }
+          },
+          "fieldConfig": { "defaults": { "unit": "short" } },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+          "targets": [ { "expr": "sum by (pod) (centrifugo_node_num_subscriptions{namespace=~\"$namespace\"})", "legendFormat": "{{pod}}" } ]
+        },
+        {
+          "id": 11,
+          "type": "row",
+          "title": "Пропускная способность и Redis pub/sub",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 20 }
+        },
+        {
+          "id": 12,
+          "type": "timeseries",
+          "title": "Сообщения узла: отправлено в broker / получено из broker",
+          "description": "centrifugo_node_messages_sent_count = отдано в Redis pub/sub этим узлом, received_count = получено из шины (включая от других узлов) — это не 'messages/sec' пользователя, это внутренняя шина Centrifugo.",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "cps" } },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 21 },
+          "targets": [
+            { "expr": "sum(rate(centrifugo_node_messages_sent_count{namespace=~\"$namespace\"}[5m]))", "legendFormat": "sent → broker" },
+            { "expr": "sum(rate(centrifugo_node_messages_received_count{namespace=~\"$namespace\"}[5m]))", "legendFormat": "received ← broker" }
+          ]
+        },
+        {
+          "id": 13,
+          "type": "timeseries",
+          "title": "Redis pub/sub lag p99 + dropped",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": {} },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 21 },
+          "targets": [
+            { "expr": "histogram_quantile(0.99, sum by (le) (rate(centrifugo_node_pub_sub_lag_seconds_bucket{namespace=~\"$namespace\"}[5m])))", "legendFormat": "lag p99 (с)" },
+            { "expr": "sum(rate(centrifugo_broker_redis_pub_sub_dropped_messages{namespace=~\"$namespace\"}[5m]))", "legendFormat": "dropped/s" }
+          ]
+        },
+        {
+          "id": 14,
+          "type": "row",
+          "title": "Подключение и восстановление",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 29 }
+        },
+        {
+          "id": 15,
+          "type": "timeseries",
+          "title": "Подключения приняты vs disconnect, инициированный сервером",
+          "description": "connections_accepted не отличает первое подключение от переподключения — таких данных Centrifugo не отдаёт. Резкий рост при стабильной аудитории — подозрение на reconnect-петлю.",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "cps" } },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 30 },
+          "targets": [
+            { "expr": "sum(rate(centrifugo_client_connections_accepted{namespace=~\"$namespace\"}[5m]))", "legendFormat": "accepted" },
+            { "expr": "sum(rate(centrifugo_client_num_server_disconnects{namespace=~\"$namespace\"}[5m]))", "legendFormat": "server disconnect" }
+          ]
+        },
+        {
+          "id": 16,
+          "type": "timeseries",
+          "title": "Recovery success ratio",
+          "description": "centrifugo_client_recover{recovered=\"yes\"} / всего. Успешное восстановление после разрыва без полной resync.",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1, "min": 0 } },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 30 },
+          "targets": [
+            { "expr": "sum(rate(centrifugo_client_recover{namespace=~\"$namespace\",recovered=\"yes\"}[15m])) / clamp_min(sum(rate(centrifugo_client_recover{namespace=~\"$namespace\"}[15m])), 0.001)" }
+          ]
+        },
+        {
+          "id": 17,
+          "type": "text",
+          "title": "ℹ Scope",
+          "gridPos": { "h": 2, "w": 24, "x": 0, "y": 38 },
+          "options": {
+            "mode": "markdown",
+            "content": "Browser canary (§16 load-testing) метрики пока не пушатся в VictoriaMetrics. CPU/RAM Centrifugo по подам — на 05 · Capacity (recording rule, не отсутствует, как считалось до второго прохода ревью)."
+          }
+        }
+      ]
+    }

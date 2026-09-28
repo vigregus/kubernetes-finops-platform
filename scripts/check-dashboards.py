@@ -75,10 +75,126 @@ EXTERNAL_METRICS: dict[str, str] = {
     "centrifugo_node_num_clients": (
         "gitops/04-messenger/messenger-centrifugo/manifests/service-scrape.yaml"
     ),
+    # Тот же скрейп, что и centrifugo_node_num_clients выше — новые имена
+    # того же экспортёра, использованы в 04·Realtime и 05·Capacity.
+    "centrifugo_node_num_subscriptions": (
+        "gitops/04-messenger/messenger-centrifugo/manifests/service-scrape.yaml"
+    ),
+    "centrifugo_node_num_channels": (
+        "gitops/04-messenger/messenger-centrifugo/manifests/service-scrape.yaml"
+    ),
+    "centrifugo_client_connections_accepted": (
+        "gitops/04-messenger/messenger-centrifugo/manifests/service-scrape.yaml"
+    ),
+    "centrifugo_client_num_server_disconnects": (
+        "gitops/04-messenger/messenger-centrifugo/manifests/service-scrape.yaml"
+    ),
+    "centrifugo_client_recover": (
+        "gitops/04-messenger/messenger-centrifugo/manifests/service-scrape.yaml"
+    ),
+    # base_name() снимает суффикс "_count" как гистограммный — у этих двух
+    # он на самом деле часть настоящего имени счётчика (centrifugo пишет
+    # его так), поэтому в таблице стоит уже урезанная форма, ровно то, что
+    # base_name() вернёт для "centrifugo_node_messages_sent_count".
+    "centrifugo_node_messages_sent": (
+        "gitops/04-messenger/messenger-centrifugo/manifests/service-scrape.yaml"
+    ),
+    "centrifugo_node_messages_received": (
+        "gitops/04-messenger/messenger-centrifugo/manifests/service-scrape.yaml"
+    ),
+    "centrifugo_node_pub_sub_lag_seconds": (
+        "gitops/04-messenger/messenger-centrifugo/manifests/service-scrape.yaml"
+    ),
+    "centrifugo_broker_redis_pub_sub_dropped_messages": (
+        "gitops/04-messenger/messenger-centrifugo/manifests/service-scrape.yaml"
+    ),
+    # frame_type="push_publication" — реальные push-фреймы клиенту, то есть
+    # настоящий fan-out (04·Realtime, панель "Realtime fan-out"; исправляет
+    # находку ревью PR #73 про семантически неверный прежний расчёт).
+    "centrifugo_transport_messages_sent": (
+        "gitops/04-messenger/messenger-centrifugo/manifests/service-scrape.yaml"
+    ),
     # kafka-exporter, снимается тем же ServiceMonitor, что уже использует
     # 02·Pipeline/messenger-messaging-pipeline для T_kafka.
     "kafka_consumergroup_lag": (
         "gitops/02-infra/kafka-cluster/manifests/service-scrape.yaml"
+    ),
+    # Тот же экспортёр, тот же скрейп — партиция без полного набора реплик,
+    # 05·Capacity, row Kafka.
+    "kafka_topic_partition_under_replicated_partition": (
+        "gitops/02-infra/kafka-cluster/manifests/service-scrape.yaml"
+    ),
+    # Repo-local VMRule, не vendor cAdvisor: этот кластер отдаёт container
+    # labels только через /metrics/resource, а не /metrics/cadvisor, и
+    # правило переписывает upstream-рекординг под это (см. сам манифест).
+    # Ревью PR #73 верно указало, что предыдущая версия 05·Capacity считала
+    # эти данные недостижимыми из-за ограничения checker'а — они репозиторные
+    # и покрываются covers() ровно как любой другой манифест.
+    "node_namespace_pod_container:container_cpu_usage_seconds_total:sum_irate": (
+        "gitops/02-infra/observability-objects/victoria-stack/rules/"
+        "container-resource-usage.yaml"
+    ),
+    "node_namespace_pod_container:container_memory_working_set_bytes": (
+        "gitops/02-infra/observability-objects/victoria-stack/rules/"
+        "container-resource-usage.yaml"
+    ),
+    # Тот же класс проблемы и то же решение, отдельным файлом — см. его
+    # собственные комментарии (rules/pod-capacity-signals.yaml): kube-state-
+    # metrics отдаётся третьим source Application "victoria-stack" без
+    # `path`, covers() такой source не видит вовсе, поэтому limits/
+    # restarts/OOM переизданы репозиторным recording rule.
+    "namespace_pod_container:container_resource_limits_cpu_cores": (
+        "gitops/02-infra/observability-objects/victoria-stack/rules/"
+        "pod-capacity-signals.yaml"
+    ),
+    "namespace_pod_container:container_resource_limits_memory_bytes": (
+        "gitops/02-infra/observability-objects/victoria-stack/rules/"
+        "pod-capacity-signals.yaml"
+    ),
+    "namespace_pod_container:container_restarts_total": (
+        "gitops/02-infra/observability-objects/victoria-stack/rules/"
+        "pod-capacity-signals.yaml"
+    ),
+    "namespace_pod_container:container_last_terminated_oomkilled": (
+        "gitops/02-infra/observability-objects/victoria-stack/rules/"
+        "pod-capacity-signals.yaml"
+    ),
+    # oliver006/redis_exporter sidecar, redisExporter.enabled=true в самом
+    # Redis CRD; снимается VMPodScrape в том же каталоге манифестов —
+    # до PR #73 Redis не наблюдался вообще, ревью нашло это как P1.
+    "redis_memory_used_bytes": (
+        "gitops/04-messenger/messenger-redis/manifests/pod-scrape.yaml"
+    ),
+    "redis_memory_used_rss_bytes": (
+        "gitops/04-messenger/messenger-redis/manifests/pod-scrape.yaml"
+    ),
+    "redis_commands_processed_total": (
+        "gitops/04-messenger/messenger-redis/manifests/pod-scrape.yaml"
+    ),
+    "redis_evicted_keys_total": (
+        "gitops/04-messenger/messenger-redis/manifests/pod-scrape.yaml"
+    ),
+    "redis_rejected_connections_total": (
+        "gitops/04-messenger/messenger-redis/manifests/pod-scrape.yaml"
+    ),
+    "redis_connected_clients": (
+        "gitops/04-messenger/messenger-redis/manifests/pod-scrape.yaml"
+    ),
+    "redis_blocked_clients": (
+        "gitops/04-messenger/messenger-redis/manifests/pod-scrape.yaml"
+    ),
+    "redis_keyspace_hits_total": (
+        "gitops/04-messenger/messenger-redis/manifests/pod-scrape.yaml"
+    ),
+    "redis_keyspace_misses_total": (
+        "gitops/04-messenger/messenger-redis/manifests/pod-scrape.yaml"
+    ),
+    # Гейдж с меткой quantile — готовый percentile из Redis LATENCY
+    # HISTOGRAM, не собственная гистограмма экспортёра; base_name() его не
+    # трогает, суффикса _bucket/_count/_sum у самого имени нет (у _sum/_count
+    # есть отдельные серии той же метрики, но панель их не использует).
+    "redis_latency_percentiles_usec": (
+        "gitops/04-messenger/messenger-redis/manifests/pod-scrape.yaml"
     ),
     # Раздел 21 — summary-метрики load_run_* пушатся напрямую в
     # VictoriaMetrics встроенным Python внутри шага reconciliation

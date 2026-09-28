@@ -1,0 +1,249 @@
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: messenger-api-red
+  namespace: observability
+spec:
+  instanceSelector:
+    matchLabels:
+      dashboards: "grafana-local"
+  json: |
+    {
+      "uid": "messenger-api-red",
+      "title": "03 · API — RED",
+      "description": "docs/messenger/06-observability.md, часть 3.C: RED (Rate/Errors/Duration) для FastAPI-приложения (http_requests_total/http_request_duration_seconds). Только application layer — назывался '03 · Edge / API', хотя Edge (Envoy/Cilium) здесь никогда не было ни одной панелью; переименован в '03 · API — RED'. Gateway-слой остаётся отдельным будущим deliverable (Cilium Envoy :9964 — RPS/latency/connections/resets), а не считается покрытым Hubble L7: тот отвечает за flow visibility, не за operational-метрики самого Envoy proxy. Все запросы исключают route=/metrics,/livez,/readyz — иначе scrape и kubelet probes считались бы пользовательским трафиком, и /readyz (503 при недоступном Postgres) искажал бы 5xx %.",
+      "tags": ["messenger", "red", "api"],
+      "schemaVersion": 39,
+      "version": 2,
+      "editable": true,
+      "time": { "from": "now-6h", "to": "now" },
+      "links": [
+        { "title": "01 · SLO Overview", "type": "link", "url": "/d/messenger-slo-overview", "icon": "dashboard" },
+        { "title": "02 · Message Journey", "type": "link", "url": "/d/messenger-messaging-pipeline", "icon": "dashboard" },
+        { "title": "04 · Realtime — Centrifugo", "type": "link", "url": "/d/messenger-realtime", "icon": "dashboard" },
+        { "title": "05 · Capacity — USE", "type": "link", "url": "/d/messenger-capacity", "icon": "dashboard" }
+      ],
+      "templating": {
+        "list": [
+          {
+            "name": "namespace",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+            "query": "label_values(http_requests_total, namespace)",
+            "current": { "text": "messenger", "value": "messenger" },
+            "refresh": 2
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1,
+          "type": "row",
+          "title": "Rate / Errors / Duration",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+        },
+        {
+          "id": 2,
+          "type": "stat",
+          "title": "RPS",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "options": { "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "fieldConfig": { "defaults": { "unit": "reqps" } },
+          "gridPos": { "h": 5, "w": 4, "x": 0, "y": 1 },
+          "targets": [
+            { "expr": "sum(rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m]))" }
+          ]
+        },
+        {
+          "id": 13,
+          "type": "stat",
+          "title": "Success rate",
+          "description": "(2xx+3xx) / total. Крупнее, чем 4xx/5xx по отдельности (визуальный проход ревью PR #73): это единственное число, отвечающее 'всё хорошо?' одним взглядом — диагностика по классам статуса рядом, но вторична.",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "options": { "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "red", "value": null },
+                { "color": "yellow", "value": 0.95 },
+                { "color": "green", "value": 0.99 }
+              ]}
+            }
+          },
+          "gridPos": { "h": 5, "w": 4, "x": 4, "y": 1 },
+          "targets": [
+            { "expr": "sum(rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\",status_class=~\"2xx|3xx\"}[5m])) / clamp_min(sum(rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m])), 0.001)" }
+          ]
+        },
+        {
+          "id": 4,
+          "type": "stat",
+          "title": "4xx %",
+          "description": "4xx не обязательно отказ сервиса — часть этого потока штатные rejected (валидация, авторизация, лимитер). См. docs/messenger/06-observability.md, часть 4, поле result.",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "options": { "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "fieldConfig": { "defaults": { "unit": "percentunit" } },
+          "gridPos": { "h": 5, "w": 4, "x": 8, "y": 1 },
+          "targets": [
+            { "expr": "sum(rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\",status_class=\"4xx\"}[5m])) / clamp_min(sum(rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m])), 0.001)" }
+          ]
+        },
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "5xx %",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "options": { "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 0.01 },
+                { "color": "red", "value": 0.05 }
+              ]}
+            }
+          },
+          "gridPos": { "h": 5, "w": 4, "x": 12, "y": 1 },
+          "targets": [
+            { "expr": "sum(rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\",status_class=\"5xx\"}[5m])) / clamp_min(sum(rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m])), 0.001)" }
+          ]
+        },
+        {
+          "id": 14,
+          "type": "stat",
+          "title": "p95",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "options": { "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 0.3 },
+                { "color": "red", "value": 0.7 }
+              ]}
+            }
+          },
+          "gridPos": { "h": 5, "w": 4, "x": 16, "y": 1 },
+          "targets": [
+            { "expr": "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m])))" }
+          ]
+        },
+        {
+          "id": 5,
+          "type": "stat",
+          "title": "p99",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "options": { "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 0.5 },
+                { "color": "red", "value": 1 }
+              ]}
+            }
+          },
+          "gridPos": { "h": 5, "w": 4, "x": 20, "y": 1 },
+          "targets": [
+            { "expr": "histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m])))" }
+          ]
+        },
+        {
+          "id": 6,
+          "type": "timeseries",
+          "title": "RPS по классу статуса",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } } },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+          "targets": [
+            {
+              "expr": "sum by (status_class) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m]))",
+              "legendFormat": "{{status_class}}"
+            }
+          ]
+        },
+        {
+          "id": 7,
+          "type": "timeseries",
+          "title": "p50 / p95 / p99 (все маршруты)",
+          "description": "Цветовая конвенция (визуальный проход ревью PR #73): p50 приглушённый синий, p95 сильнее, p99 самый насыщенный — та же семантика на 02 · Journey/01 · SLO, легенду не приходится читать заново на каждом дашборде.",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": {
+            "defaults": { "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } },
+            "overrides": [
+              { "matcher": { "id": "byName", "options": "p50" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "light-blue" } } ] },
+              { "matcher": { "id": "byName", "options": "p95" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } } ] },
+              { "matcher": { "id": "byName", "options": "p99" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "dark-blue" } } ] }
+            ]
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+          "targets": [
+            { "expr": "histogram_quantile(0.50, sum by (le) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m])))", "legendFormat": "p50" },
+            { "expr": "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m])))", "legendFormat": "p95" },
+            { "expr": "histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m])))", "legendFormat": "p99" }
+          ]
+        },
+        {
+          "id": 8,
+          "type": "row",
+          "title": "По маршруту",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 }
+        },
+        {
+          "id": 9,
+          "type": "timeseries",
+          "title": "RPS по маршруту",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } } },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
+          "targets": [
+            {
+              "expr": "sum by (route) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m]))",
+              "legendFormat": "{{route}}"
+            }
+          ]
+        },
+        {
+          "id": 10,
+          "type": "timeseries",
+          "title": "p99 по маршруту",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } } },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.99, sum by (le, route) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m])))",
+              "legendFormat": "{{route}}"
+            }
+          ]
+        },
+        {
+          "id": 11,
+          "type": "timeseries",
+          "title": "4xx/5xx по маршруту",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } } },
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 23 },
+          "targets": [
+            {
+              "expr": "sum by (route, status_class) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\",status_class=~\"4xx|5xx\"}[5m]))",
+              "legendFormat": "{{route}} {{status_class}}"
+            }
+          ]
+        },
+        {
+          "id": 12,
+          "type": "text",
+          "title": "ℹ Scope",
+          "gridPos": { "h": 2, "w": 24, "x": 0, "y": 31 },
+          "options": {
+            "mode": "markdown",
+            "content": "Application layer только. Gateway (Cilium Envoy :9964) — отдельный следующий deliverable, не покрыт `hubble-l7-http.yaml` (тот про flow visibility, не про Envoy operational-метрики)."
+          }
+        }
+      ]
+    }
