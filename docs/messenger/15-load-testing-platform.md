@@ -626,7 +626,7 @@ Argo Workflow должен дождаться результатов обоих.
 
 и имеет другой resource profile.
 
-## 18. Stress test — `[ ]`
+## 18. Stress test — `[~]` (эскалация нагрузки — пять ступеней 25/50/100/150/200% от target_rate, каждая свой k6-scenario с автоматическим тегом `scenario` — реализована; k6 сам решает, куда стартовать следующую ступень через `startTime`. Автоматическая классификация R_healthy/R_knee/R_collapse не реализована — раздел прямо требует не сворачивать три режима в одно число, здесь только данные для того, чтобы это увидеть на графике)
 
 Нужно экспериментально найти:
 
@@ -717,7 +717,7 @@ k6 metrics отправлять в существующий metrics backend та
 
 Они принадлежат logs/traces/test artifacts.
 
-## 21. Summary metrics — `[ ]`
+## 21. Summary metrics — `[~]` (8 из 12: load_run_accepted/persisted/missing_messages, load_run_http_p95/p99_seconds, load_run_delivery_p95_seconds, load_run_max_outbox_age_seconds, load_run_max_kafka_lag — reconciliation пушит их в VictoriaMetrics с run_id/git_sha/profile через `/api/v1/import/prometheus`, живо проверен сам механизм импорта. received/duplicate_messages, recovery_seconds, browser_canary_failures — нет, нужны разделы 13 (WS-телеметрия), 19, 16 соответственно)
 
 Помимо raw k6 series сохранить компактный набор run-level результатов:
 

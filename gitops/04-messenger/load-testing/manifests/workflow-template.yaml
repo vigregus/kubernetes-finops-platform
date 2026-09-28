@@ -497,6 +497,18 @@ spec:
             set -eu
             NAME="k6-load-{{workflow.parameters.run_id}}"
 
+            # Раздел 18 — profile=stress использует свой сценарий
+            # (ступени эскалации нагрузки, tests/load/messenger/stress.js),
+            # а не messages.js с одним фиксированным rate.
+            PROFILE="{{workflow.parameters.profile}}"
+            if [ "$PROFILE" = "stress" ]; then
+              SCRIPT_CONFIGMAP="k6-stress-script"
+              SCRIPT_FILE="stress.js"
+            else
+              SCRIPT_CONFIGMAP="k6-messages-script"
+              SCRIPT_FILE="messages.js"
+            fi
+
             cat > /tmp/testrun.yaml <<EOF
             apiVersion: k6.io/v1alpha1
             kind: TestRun
@@ -508,8 +520,8 @@ spec:
               arguments: "-o experimental-prometheus-rw --tag run_id={{workflow.parameters.run_id}} --tag git_sha={{workflow.parameters.git_sha}} --tag profile={{workflow.parameters.profile}}"
               script:
                 configMap:
-                  name: k6-messages-script
-                  file: messages.js
+                  name: ${SCRIPT_CONFIGMAP}
+                  file: ${SCRIPT_FILE}
               runner:
                 env:
                   - name: K6_PROMETHEUS_RW_SERVER_URL
@@ -591,6 +603,12 @@ spec:
         env:
           - name: RUN_ID
             value: "{{workflow.parameters.run_id}}"
+          - name: GIT_SHA
+            value: "{{workflow.parameters.git_sha}}"
+          - name: PROFILE
+            value: "{{workflow.parameters.profile}}"
+          - name: DURATION
+            value: "{{workflow.parameters.duration}}"
           - name: ACCEPTED_COUNT
             value: "{{inputs.parameters.accepted_count}}"
         resources:
@@ -606,7 +624,11 @@ spec:
           from messenger.repositories.postgres import PoolSettings, create_pool
 
           RUN_ID = os.environ["RUN_ID"]
+          GIT_SHA = os.environ["GIT_SHA"]
+          PROFILE = os.environ["PROFILE"]
+          DURATION = os.environ["DURATION"]
           ACCEPTED = int(os.environ["ACCEPTED_COUNT"] or "0")
+          VM = "http://vmsingle-vm-local-victoria-metrics-k8s-stack.observability.svc.cluster.local:8428"
 
 
           def read_own_secret(namespace: str, name: str) -> dict[str, str]:
@@ -667,6 +689,66 @@ spec:
                   await pool.close()
 
               print(f"accepted (k6/API)={ACCEPTED} persisted (Postgres)={persisted} run_id={RUN_ID}")
+
+              # Раздел 21 — сводные load_run_* метрики этого прогона, тегированные
+              # run_id/git_sha/profile, пушатся в VictoriaMetrics ещё до решения
+              # pass/fail: даже упавший по корректностному гейту прогон должен
+              # оставить свою сводку, иначе именно проблемные прогоны — самые
+              # интересные для последующего разбора — выпадали бы из истории.
+              #
+              # Из полного списка раздела 21 здесь — 8 из 12: offered
+              # (load_run_accepted_messages — это HTTP-подтверждённое k6,
+              # "offered" отдельно не считается), persisted, missing, HTTP
+              # p95/p99, delivery p95, max outbox age, max Kafka lag. Не
+              # хватает received_messages/duplicate_messages (нужна WS-
+              # телеметрия браузера, раздел 13 не реализован целиком),
+              # recovery_seconds (раздел 19 не реализован),
+              # browser_canary_failures (раздел 16 не реализован).
+              async def vm_query(client: httpx.AsyncClient, expr: str) -> float:
+                  r = await client.get(f"{VM}/api/v1/query", params={"query": expr}, timeout=10.0)
+                  r.raise_for_status()
+                  result = r.json()["data"]["result"]
+                  return float(result[0]["value"][1]) if result else 0.0
+
+              async with httpx.AsyncClient() as client:
+                  http_p95 = await vm_query(
+                      client,
+                      f'histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{{namespace="messenger"}}[{DURATION}])))',
+                  )
+                  http_p99 = await vm_query(
+                      client,
+                      f'histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{{namespace="messenger"}}[{DURATION}])))',
+                  )
+                  delivery_p95 = await vm_query(
+                      client,
+                      f'histogram_quantile(0.95, sum by (le) (rate(messenger_message_delivery_duration_seconds_bucket{{namespace="messenger"}}[{DURATION}])))',
+                  )
+                  max_outbox_age = await vm_query(
+                      client,
+                      f'max(max_over_time(messenger_outbox_oldest_age_seconds{{namespace="messenger"}}[{DURATION}]))',
+                  )
+                  max_kafka_lag = await vm_query(
+                      client,
+                      f'max(max_over_time(kafka_consumergroup_lag{{consumergroup="messenger-realtime"}}[{DURATION}]))',
+                  )
+
+                  missing = max(ACCEPTED - persisted, 0)
+                  labels = f'run_id="{RUN_ID}",git_sha="{GIT_SHA}",profile="{PROFILE}"'
+                  summary = "\n".join(
+                      [
+                          f"load_run_accepted_messages{{{labels}}} {ACCEPTED}",
+                          f"load_run_persisted_messages{{{labels}}} {persisted}",
+                          f"load_run_missing_messages{{{labels}}} {missing}",
+                          f"load_run_http_p95_seconds{{{labels}}} {http_p95}",
+                          f"load_run_http_p99_seconds{{{labels}}} {http_p99}",
+                          f"load_run_delivery_p95_seconds{{{labels}}} {delivery_p95}",
+                          f"load_run_max_outbox_age_seconds{{{labels}}} {max_outbox_age}",
+                          f"load_run_max_kafka_lag{{{labels}}} {max_kafka_lag}",
+                      ]
+                  ) + "\n"
+                  push = await client.post(f"{VM}/api/v1/import/prometheus", content=summary, timeout=10.0)
+                  push.raise_for_status()
+                  print(f"summary-метрики раздела 21 отправлены в VictoriaMetrics (load_run_* × 8, run_id={RUN_ID})")
 
               if persisted < ACCEPTED:
                   missing = ACCEPTED - persisted
