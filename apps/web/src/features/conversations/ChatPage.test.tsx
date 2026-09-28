@@ -14,6 +14,7 @@ import type {
   ConversationListPage,
   Message,
 } from "../../api/generated";
+import { ApiProblem } from "../../api/problems";
 import { givenFakeCentrifuge, givenTicketIssuer } from "../../test-support/centrifuge";
 import { VIEWER, conversationOf } from "../../test-support/fixtures";
 import {
@@ -967,6 +968,116 @@ describe("неподтверждённая почта не гасит компо
     );
     expect(calls.sent).toHaveLength(1);
     expect(calls.sent[0]?.text).toBe("Hello Anna");
+  });
+});
+
+/**
+ * Окончательный отказ (`403`/`404`/`400`/`422`) — не сетевой сбой, и очередь
+ * это уважает: `classify`/`nextAttempt` (`pendingMessages.ts`) относят такой
+ * код к `final`, а не к `retry`, и не ставят таймер вовсе. Здесь проверяется
+ * не сама классификация — она уже доказана без хранилища и без панели, — а
+ * то, что **до DOM** она доезжает ровно так же: одна попытка транспорта, а
+ * не первая из бесконечной серии.
+ */
+describe("окончательный отказ не крутит очередь вечно", () => {
+  it("403 — одна попытка транспорта, запись помечена failed, повтора нет", async () => {
+    const { container, calls } = setup({
+      conversations: [ANNA],
+      tail: () => Promise.resolve(tailOf([messageOf(1)])),
+      sendMessage: () =>
+        Promise.reject(new ApiProblem({ status: 403, code: "blocked" })),
+    });
+
+    await waitFor(() => expect(screen.getByText("message 1")).toBeTruthy());
+
+    fireEvent.change(container.querySelector("[data-composer-input]")!, {
+      target: { value: "Hello Anna" },
+    });
+    fireEvent.click(container.querySelector("[data-composer-send]")!);
+
+    await waitFor(() =>
+      expect(
+        container.querySelector("[data-pending-client-id]")?.getAttribute("data-message-state"),
+      ).toBe("failed"),
+    );
+    expect(calls.sent).toHaveLength(1);
+
+    // Секунда с четвертью — заведомо больше первой паузы `retry`-веток
+    // (`baseMs=1000`), но здесь таймера нет вовсе: `final` его не ставит.
+    // Если бы классификация где-то по пути потерялась, `send` позвали бы
+    // второй раз именно в этом окне.
+    await new Promise((resolve) => setTimeout(resolve, 1250));
+    expect(calls.sent).toHaveLength(1);
+    expect(
+      container.querySelector("[data-pending-client-id]")?.getAttribute("data-message-state"),
+    ).toBe("failed");
+  });
+});
+
+/**
+ * Очередь исходящих живёт **над** панелью беседы (`useOutbox` в `ChatPage`,
+ * не в `ConversationPane` — докстринг `MessageList.tsx`), и переключение
+ * беседы пересоздаёт только панель (`key={activeConversation.id}`). Предмет
+ * здесь — не то, что очередь **переживает** размонтирование (это следствие
+ * места в дереве), а то, что запись **не течёт** в чужую беседу и не
+ * теряется при уходе и возврате.
+ */
+describe("переключение беседы не роняет и не путает pending-запись", () => {
+  it("запись из Anna не видна у Marcus и остаётся на месте после возврата", async () => {
+    const pending = deferred<Message>();
+    const { container, calls } = setup({
+      conversations: [ANNA, MARCUS_NO_MESSAGES],
+      tail: (conversationId) =>
+        conversationId === "c1"
+          ? Promise.resolve(tailOf([messageOf(1)]))
+          : Promise.resolve(tailOf([])),
+      sendMessage: () => pending.promise,
+    });
+
+    await waitFor(() => expect(screen.getByText("message 1")).toBeTruthy());
+
+    fireEvent.change(container.querySelector("[data-composer-input]")!, {
+      target: { value: "Hello Anna" },
+    });
+    fireEvent.click(container.querySelector("[data-composer-send]")!);
+
+    await waitFor(() =>
+      expect(container.querySelector("[data-pending-client-id]")).toBeTruthy(),
+    );
+    const queuedId = container
+      .querySelector("[data-pending-client-id]")!
+      .getAttribute("data-pending-client-id");
+
+    fireEvent.click(screen.getByText("Marcus Chen").closest("button")!);
+
+    // Панель Marcus пуста и своего chat`а не видит: беседа фильтрует записи
+    // очереди по `conversationId` (`ChatPage.tsx::pendingForActive`), и утечка
+    // сюда была бы нарушением этого фильтра, а не просто лишней строкой.
+    await waitFor(() => expect(screen.queryByText("message 1")).toBeNull());
+    expect(container.querySelector("[data-pending-client-id]")).toBeNull();
+
+    fireEvent.click(screen.getByText("Anna Petrova").closest("button")!);
+
+    // Панель Anna ремонтируется целиком (`key`), но очередь — нет: та же
+    // запись, тот же идентификатор, то же состояние «идёт попытка», ни
+    // повторной отправки, ни дубля.
+    await waitFor(() => expect(screen.getByText("message 1")).toBeTruthy());
+    await waitFor(() =>
+      expect(container.querySelector("[data-pending-client-id]")).toBeTruthy(),
+    );
+    expect(
+      container.querySelector("[data-pending-client-id]")?.getAttribute("data-pending-client-id"),
+    ).toBe(queuedId);
+    expect(calls.sent).toHaveLength(1);
+
+    // Ответ приходит уже после возврата — панель Anna снова смонтирована, и
+    // снятие обязано дойти до неё, а не потеряться в размонтированной.
+    await act(async () => {
+      pending.resolve(replyOf(ANNA.id, 2, queuedId!, "Hello Anna"));
+    });
+    await waitFor(() =>
+      expect(container.querySelector("[data-pending-client-id]")).toBeNull(),
+    );
   });
 });
 
