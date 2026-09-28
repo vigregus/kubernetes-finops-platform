@@ -75,6 +75,39 @@ EXTERNAL_METRICS: dict[str, str] = {
     "centrifugo_node_num_clients": (
         "gitops/04-messenger/messenger-centrifugo/manifests/service-scrape.yaml"
     ),
+    # Тот же скрейп, что и centrifugo_node_num_clients выше — новые имена
+    # того же экспортёра, использованы в 04·Realtime и 05·Capacity.
+    "centrifugo_node_num_subscriptions": (
+        "gitops/04-messenger/messenger-centrifugo/manifests/service-scrape.yaml"
+    ),
+    "centrifugo_node_num_channels": (
+        "gitops/04-messenger/messenger-centrifugo/manifests/service-scrape.yaml"
+    ),
+    "centrifugo_client_connections_accepted": (
+        "gitops/04-messenger/messenger-centrifugo/manifests/service-scrape.yaml"
+    ),
+    "centrifugo_client_num_server_disconnects": (
+        "gitops/04-messenger/messenger-centrifugo/manifests/service-scrape.yaml"
+    ),
+    "centrifugo_client_recover": (
+        "gitops/04-messenger/messenger-centrifugo/manifests/service-scrape.yaml"
+    ),
+    # base_name() снимает суффикс "_count" как гистограммный — у этих двух
+    # он на самом деле часть настоящего имени счётчика (centrifugo пишет
+    # его так), поэтому в таблице стоит уже урезанная форма, ровно то, что
+    # base_name() вернёт для "centrifugo_node_messages_sent_count".
+    "centrifugo_node_messages_sent": (
+        "gitops/04-messenger/messenger-centrifugo/manifests/service-scrape.yaml"
+    ),
+    "centrifugo_node_messages_received": (
+        "gitops/04-messenger/messenger-centrifugo/manifests/service-scrape.yaml"
+    ),
+    "centrifugo_node_pub_sub_lag_seconds": (
+        "gitops/04-messenger/messenger-centrifugo/manifests/service-scrape.yaml"
+    ),
+    "centrifugo_broker_redis_pub_sub_dropped_messages": (
+        "gitops/04-messenger/messenger-centrifugo/manifests/service-scrape.yaml"
+    ),
     # kafka-exporter, снимается тем же ServiceMonitor, что уже использует
     # 02·Pipeline/messenger-messaging-pipeline для T_kafka.
     "kafka_consumergroup_lag": (

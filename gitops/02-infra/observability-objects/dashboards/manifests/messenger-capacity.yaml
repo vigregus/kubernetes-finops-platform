@@ -1,0 +1,155 @@
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: messenger-capacity
+  namespace: observability
+spec:
+  instanceSelector:
+    matchLabels:
+      dashboards: "grafana-local"
+  json: |
+    {
+      "uid": "messenger-capacity",
+      "title": "05 · Capacity — USE",
+      "description": "USE (Utilization/Saturation/Errors, Brendan Gregg) поперёк компонентов на одном экране: отвечает 'во что мы упираемся', а не 'где тормозит' (02 · Journey) и не 'есть ли проблема у пользователя' (01 · SLO). Собирает только то, что реально снято и живо проверено — vendor CPU/RAM см. текстовую панель внизу.",
+      "tags": ["messenger", "use", "capacity"],
+      "schemaVersion": 39,
+      "version": 1,
+      "editable": true,
+      "time": { "from": "now-6h", "to": "now" },
+      "templating": {
+        "list": [
+          {
+            "name": "namespace",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+            "query": "label_values(messenger_db_pool_connections, namespace)",
+            "current": { "text": "messenger", "value": "messenger" },
+            "refresh": 2
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1,
+          "type": "row",
+          "title": "Postgres — DB pool (Utilization / Saturation)",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+        },
+        {
+          "id": 2,
+          "type": "timeseries",
+          "title": "DB pool: in_use vs idle vs max, по сервису",
+          "description": "messenger_db_pool_connections{state}/messenger_db_pool_max_connections. Очередь на соединение — первое, что упирается при росте нагрузки, раньше, чем сама база (docs 06-observability.md, telemetry/metrics.py).",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "short" } },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+          "targets": [
+            { "expr": "sum by (service, state) (messenger_db_pool_connections{namespace=~\"$namespace\"})", "legendFormat": "{{service}} {{state}}" },
+            { "expr": "sum by (service) (messenger_db_pool_max_connections{namespace=~\"$namespace\"})", "legendFormat": "{{service}} max" }
+          ]
+        },
+        {
+          "id": 3,
+          "type": "timeseries",
+          "title": "DB pool saturation: in_use / max",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit", "max": 1, "min": 0,
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 0.7 },
+                { "color": "red", "value": 0.9 }
+              ]}
+            }
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+          "targets": [
+            { "expr": "sum by (service) (messenger_db_pool_connections{namespace=~\"$namespace\",state=\"in_use\"}) / clamp_min(sum by (service) (messenger_db_pool_max_connections{namespace=~\"$namespace\"}), 1)", "legendFormat": "{{service}}" }
+          ]
+        },
+        {
+          "id": 4,
+          "type": "row",
+          "title": "Kafka (Saturation)",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 }
+        },
+        {
+          "id": 5,
+          "type": "timeseries",
+          "title": "Consumer group lag (сообщений)",
+          "description": "kafka_consumergroup_lag (kafka-exporter). Лаг в сообщениях, не в секундах — раздел 20/§3.B доков просит именно возраст в секундах (messenger_outbox_oldest_age_seconds ниже), но за самой Kafka-очередью следим тем, что реально снимается. Без фильтра по $namespace: kafka-exporter скрейпится в namespace kafka, не messenger — та же причина, по которой workflow-template.yaml (§20 load-testing) фильтрует эту метрику по consumergroup, а не по namespace.",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "short" } },
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 10 },
+          "targets": [
+            { "expr": "sum by (consumergroup, topic) (kafka_consumergroup_lag{consumergroup=\"messenger-realtime\"})", "legendFormat": "{{consumergroup}} / {{topic}}" }
+          ]
+        },
+        {
+          "id": 6,
+          "type": "row",
+          "title": "Outbox (Saturation)",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 }
+        },
+        {
+          "id": 7,
+          "type": "timeseries",
+          "title": "Outbox: длина очереди и возраст самой старой записи",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": {} },
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 19 },
+          "targets": [
+            { "expr": "sum(messenger_outbox_pending{namespace=~\"$namespace\"})", "legendFormat": "pending (шт.)" },
+            { "expr": "max(messenger_outbox_oldest_age_seconds{namespace=~\"$namespace\"})", "legendFormat": "oldest age (с)" }
+          ]
+        },
+        {
+          "id": 8,
+          "type": "row",
+          "title": "Centrifugo (Utilization)",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 27 }
+        },
+        {
+          "id": 9,
+          "type": "timeseries",
+          "title": "Connections по подам — перекос балансировки",
+          "description": "Та же панель, что на 04 · Realtime: здесь она значит другое — не 'сколько всего', а 'равномерно ли распределено', то есть Utilization отдельного пода, а не суммарная аудитория.",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "short" } },
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 28 },
+          "targets": [
+            { "expr": "sum by (pod) (centrifugo_node_num_clients{namespace=~\"$namespace\"})", "legendFormat": "{{pod}}" }
+          ]
+        },
+        {
+          "id": 10,
+          "type": "row",
+          "title": "Зависимости (Errors)",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 36 }
+        },
+        {
+          "id": 11,
+          "type": "timeseries",
+          "title": "Готовность зависимостей (0/1)",
+          "description": "messenger_dependency_up{service,dependency}: 0 или 1 без градаций — 'наполовину доступна' это отдельные метрики задержки/ошибок (docs 06-observability.md, часть 3.A).",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "short", "min": 0, "max": 1 } },
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 37 },
+          "targets": [
+            { "expr": "min by (service, dependency) (messenger_dependency_up{namespace=~\"$namespace\"})", "legendFormat": "{{service}} → {{dependency}}" }
+          ]
+        },
+        {
+          "id": 12,
+          "type": "text",
+          "title": "Чего здесь намеренно нет",
+          "gridPos": { "h": 5, "w": 24, "x": 0, "y": 45 },
+          "options": {
+            "mode": "markdown",
+            "content": "**CPU/RAM/throttling подов** (API, Centrifugo, Postgres, Kafka) — не построены. Это метрики cAdvisor/kube-state-metrics/postgres-exporter/pgbouncer-exporter — внешних Helm-чартов с `repoURL`, не пути в этом репозитории, и `covers()` в scripts/check-dashboards.py не может подтвердить, что такой манифест реально применяется (тот же вывод, что и в messenger-load-run.yaml). Ссылку на них даёт не эта панель, а компонентные vendor-дашборды каталога: `kubernetes-capacity`, `postgres`, `cnpg-pgbouncer`, `kafka`, `k8s-views-pods` — они остаются источником Utilization/Saturation по CPU/RAM, drill-down отсюда делается вручную, не встроенной ссылкой.\n\n**Disk I/O, network** Kafka/Postgres — не построены по той же причине.\n\n**R_healthy/R_knee/R_collapse** (§18 плана нагрузочного тестирования) — этот дашборд даёт сырые ряды для визуальной классификации во время benchmark, но не автоматическую классификацию: план прямо требует не сворачивать три режима в одно число."
+          }
+        }
+      ]
+    }

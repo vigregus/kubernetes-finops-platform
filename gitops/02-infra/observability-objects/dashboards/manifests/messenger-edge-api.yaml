@@ -1,0 +1,188 @@
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: messenger-edge-api
+  namespace: observability
+spec:
+  instanceSelector:
+    matchLabels:
+      dashboards: "grafana-local"
+  json: |
+    {
+      "uid": "messenger-edge-api",
+      "title": "03 · Edge / API — RED",
+      "description": "docs/messenger/06-observability.md, часть 3.C: RED (Rate/Errors/Duration) для HTTP слоя API. Отвечает 'что происходит с HTTP', не 'где тормозит сообщение' — за этим на 02 · Message Journey.",
+      "tags": ["messenger", "red", "api"],
+      "schemaVersion": 39,
+      "version": 1,
+      "editable": true,
+      "time": { "from": "now-6h", "to": "now" },
+      "templating": {
+        "list": [
+          {
+            "name": "namespace",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+            "query": "label_values(http_requests_total, namespace)",
+            "current": { "text": "messenger", "value": "messenger" },
+            "refresh": 2
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1,
+          "type": "row",
+          "title": "Rate / Errors / Duration",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+        },
+        {
+          "id": 2,
+          "type": "stat",
+          "title": "Total RPS",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "reqps" } },
+          "gridPos": { "h": 5, "w": 6, "x": 0, "y": 1 },
+          "targets": [
+            { "expr": "sum(rate(http_requests_total{namespace=~\"$namespace\"}[5m]))" }
+          ]
+        },
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "5xx %",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 0.01 },
+                { "color": "red", "value": 0.05 }
+              ]}
+            }
+          },
+          "gridPos": { "h": 5, "w": 6, "x": 6, "y": 1 },
+          "targets": [
+            { "expr": "sum(rate(http_requests_total{namespace=~\"$namespace\",status_class=\"5xx\"}[5m])) / clamp_min(sum(rate(http_requests_total{namespace=~\"$namespace\"}[5m])), 0.001)" }
+          ]
+        },
+        {
+          "id": 4,
+          "type": "stat",
+          "title": "4xx %",
+          "description": "4xx не обязательно отказ сервиса — часть этого потока штатные rejected (валидация, авторизация, лимитер). См. docs/messenger/06-observability.md, часть 4, поле result.",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "percentunit" } },
+          "gridPos": { "h": 5, "w": 6, "x": 12, "y": 1 },
+          "targets": [
+            { "expr": "sum(rate(http_requests_total{namespace=~\"$namespace\",status_class=\"4xx\"}[5m])) / clamp_min(sum(rate(http_requests_total{namespace=~\"$namespace\"}[5m])), 0.001)" }
+          ]
+        },
+        {
+          "id": 5,
+          "type": "stat",
+          "title": "p99 (все маршруты)",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 0.5 },
+                { "color": "red", "value": 1 }
+              ]}
+            }
+          },
+          "gridPos": { "h": 5, "w": 6, "x": 18, "y": 1 },
+          "targets": [
+            { "expr": "histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])))" }
+          ]
+        },
+        {
+          "id": 6,
+          "type": "timeseries",
+          "title": "RPS по классу статуса",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "reqps" } },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+          "targets": [
+            {
+              "expr": "sum by (status_class) (rate(http_requests_total{namespace=~\"$namespace\"}[5m]))",
+              "legendFormat": "{{status_class}}"
+            }
+          ]
+        },
+        {
+          "id": 7,
+          "type": "timeseries",
+          "title": "p50 / p95 / p99 (все маршруты)",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "s" } },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+          "targets": [
+            { "expr": "histogram_quantile(0.50, sum by (le) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])))", "legendFormat": "p50" },
+            { "expr": "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])))", "legendFormat": "p95" },
+            { "expr": "histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])))", "legendFormat": "p99" }
+          ]
+        },
+        {
+          "id": 8,
+          "type": "row",
+          "title": "По маршруту",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 }
+        },
+        {
+          "id": 9,
+          "type": "timeseries",
+          "title": "RPS по маршруту",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "reqps" } },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
+          "targets": [
+            {
+              "expr": "sum by (route) (rate(http_requests_total{namespace=~\"$namespace\"}[5m]))",
+              "legendFormat": "{{route}}"
+            }
+          ]
+        },
+        {
+          "id": 10,
+          "type": "timeseries",
+          "title": "p99 по маршруту",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "s" } },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.99, sum by (le, route) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])))",
+              "legendFormat": "{{route}}"
+            }
+          ]
+        },
+        {
+          "id": 11,
+          "type": "timeseries",
+          "title": "4xx/5xx по маршруту",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "reqps" } },
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 23 },
+          "targets": [
+            {
+              "expr": "sum by (route, status_class) (rate(http_requests_total{namespace=~\"$namespace\",status_class=~\"4xx|5xx\"}[5m]))",
+              "legendFormat": "{{route}} {{status_class}}"
+            }
+          ]
+        },
+        {
+          "id": 12,
+          "type": "text",
+          "title": "Чего здесь нет",
+          "gridPos": { "h": 4, "w": 24, "x": 0, "y": 31 },
+          "options": {
+            "mode": "markdown",
+            "content": "Дашборд показывает только application-слой (наш `http_requests_total`/`http_request_duration_seconds`). Сравнение Gateway (Envoy/Cilium) latency vs API latency — из карты, предложенной для этого дашборда — не построено: метрики Hubble L7 HTTP не внесены в `EXTERNAL_METRICS` (scripts/check-dashboards.py) и не живо сверены с этим дашбордом. Envoy/Hubble остаются отдельными vendor-дашбордами (`hubble-l7-http`) для forensic drill-down, а не встроены сюда."
+          }
+        }
+      ]
+    }
