@@ -39,7 +39,7 @@ Tempo / VictoriaLogs
 Его результаты не являются production capacity claim и не заменяют будущий
 `PERF-009`.
 
-## 1. Архитектурное решение — `[ ]`
+## 1. Архитектурное решение — `[x]`
 
 ### Argo Workflows — orchestration layer
 
@@ -100,7 +100,7 @@ Playwright не используется для создания основно�
 
 Не добавлять отдельную InfluxDB только ради k6.
 
-## 2. Deployment model — `[ ]`
+## 2. Deployment model — `[x]`
 
 Argo Workflows и k6 Operator должны ставиться декларативно через существующий
 GitOps.
@@ -141,7 +141,7 @@ tests/
 Не создавать отдельный `test-platform/` root, если существующий
 `gitops/02-infra` и `tests/` уже выражают эти границы.
 
-## 3. Namespace и RBAC — `[ ]`
+## 3. Namespace и RBAC — `[x]`
 
 Выделить отдельный namespace, например:
 
@@ -164,7 +164,7 @@ Provisioning пользователей в Keycloak должен происхо�
 предназначенный test credential/Secret, а не через секрет, зашитый в
 repository.
 
-## 4. Главный Argo WorkflowTemplate — `[ ]`
+## 4. Главный Argo WorkflowTemplate — `[x]`
 
 Создать reusable:
 
@@ -280,7 +280,7 @@ finally / exit handler
 Cleanup должен быть Argo `onExit`/exit-handler логикой и выполняться также
 после failed workflow.
 
-## 7. Preflight — `[ ]`
+## 7. Preflight — `[~]` (реализована доступность зависимостей и k6-оператора; baseline ресурсов — нет)
 
 До нагрузки проверить:
 
