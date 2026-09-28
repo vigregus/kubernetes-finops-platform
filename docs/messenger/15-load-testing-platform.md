@@ -740,7 +740,7 @@ k6 metrics отправлять в существующий metrics backend та
 - git_sha
 - profile
 
-## 22. Grafana dashboards — `[ ]`
+## 22. Grafana dashboards — `[~]` (03·Load Run и 04·Load Compare — оба реализованы и живо проверены на реальных данных; k6/Playwright canary-панели и сравнение по run_id — нет, см. текстовые панели самих дашбордов)
 
 Создать минимум два dashboard.
 

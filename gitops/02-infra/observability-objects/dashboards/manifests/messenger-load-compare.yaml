@@ -1,0 +1,150 @@
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: messenger-load-compare
+  namespace: observability
+spec:
+  instanceSelector:
+    matchLabels:
+      dashboards: "grafana-local"
+  json: |
+    {
+      "uid": "messenger-load-compare",
+      "title": "04 · Load Compare",
+      "description": "docs/messenger/15-load-testing-platform.md, раздел 22 (Messenger / Load Compare) — baseline vs current без хранения истории по run_id (раздел 20/28 не реализованы: ни одна метрика не размечена run_id/git_sha, и отдельного performance-history storage нет). Сравнение здесь — текущее окно дашборда против того же окна, сдвинутого назад на $baseline_offset через PromQL offset, а не выбор двух конкретных прошлых прогонов по имени. Это временная, честная замена: работает уже сейчас на реальных данных, но не даёт выбрать 'baseline commit A vs current commit B' явно — для этого нужен раздел 20 (лейблы run_id/git_sha на метриках) и, скорее всего, раздел 24 (Argo artifacts) для хранения сводки каждого прогона.",
+      "tags": ["messenger", "load-testing"],
+      "schemaVersion": 39,
+      "version": 1,
+      "editable": true,
+      "time": { "from": "now-15m", "to": "now" },
+      "templating": {
+        "list": [
+          {
+            "name": "namespace",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+            "query": "label_values(messenger_message_send_operations_total, namespace)",
+            "current": { "text": "messenger", "value": "messenger" },
+            "refresh": 2
+          },
+          {
+            "name": "baseline_offset",
+            "type": "custom",
+            "query": "15m,1h,6h,1d,7d",
+            "current": { "text": "1h", "value": "1h" }
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1,
+          "type": "text",
+          "title": "Как читать",
+          "gridPos": { "h": 3, "w": 24, "x": 0, "y": 0 },
+          "options": {
+            "mode": "markdown",
+            "content": "**Current** — текущее окно дашборда (временной диапазон сверху). **Baseline** — то же окно, сдвинутое назад на `$baseline_offset` (PromQL `offset`), а не конкретный прошлый прогон по `run_id` — эта разметка ещё не реализована (раздел 20). Чтобы сравнить два конкретных прогона: выставьте окно дашборда на current-прогон и подберите `baseline_offset` так, чтобы сдвиг попадал в окно baseline-прогона. **Чего здесь нет**: R_healthy как отдельная метрика (заменена долей `success` в темпе записи сообщений — тот же смысл), `missing`/`duplicate` (нужны per-message correlation из раздела 13, сейчас только агрегатная сверка в логе шага `reconciliation`), `recovery` (раздел 19 не реализован)."
+          }
+        },
+        {
+          "id": 2,
+          "type": "row",
+          "title": "Current (окно дашборда)",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 3 }
+        },
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "HTTP p95 — current",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "s" } },
+          "gridPos": { "h": 5, "w": 6, "x": 0, "y": 4 },
+          "targets": [
+            { "expr": "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\"}[$__range])))" }
+          ]
+        },
+        {
+          "id": 4,
+          "type": "stat",
+          "title": "HTTP p99 — current",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "s" } },
+          "gridPos": { "h": 5, "w": 6, "x": 6, "y": 4 },
+          "targets": [
+            { "expr": "histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\"}[$__range])))" }
+          ]
+        },
+        {
+          "id": 5,
+          "type": "stat",
+          "title": "Доля успешных отправок — current",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 } },
+          "gridPos": { "h": 5, "w": 6, "x": 12, "y": 4 },
+          "targets": [
+            { "expr": "sum(rate(messenger_message_send_operations_total{namespace=~\"$namespace\",result=\"success\"}[$__range])) / clamp_min(sum(rate(messenger_message_send_operations_total{namespace=~\"$namespace\"}[$__range])), 0.001)" }
+          ]
+        },
+        {
+          "id": 6,
+          "type": "stat",
+          "title": "Max outbox age — current",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "s" } },
+          "gridPos": { "h": 5, "w": 6, "x": 18, "y": 4 },
+          "targets": [
+            { "expr": "max(max_over_time(messenger_outbox_oldest_age_seconds{namespace=~\"$namespace\"}[$__range]))" }
+          ]
+        },
+        {
+          "id": 7,
+          "type": "row",
+          "title": "Baseline (то же окно, offset $baseline_offset назад)",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 }
+        },
+        {
+          "id": 8,
+          "type": "stat",
+          "title": "HTTP p95 — baseline",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "s" } },
+          "gridPos": { "h": 5, "w": 6, "x": 0, "y": 10 },
+          "targets": [
+            { "expr": "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\"}[$__range] offset $baseline_offset)))" }
+          ]
+        },
+        {
+          "id": 9,
+          "type": "stat",
+          "title": "HTTP p99 — baseline",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "s" } },
+          "gridPos": { "h": 5, "w": 6, "x": 6, "y": 10 },
+          "targets": [
+            { "expr": "histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\"}[$__range] offset $baseline_offset)))" }
+          ]
+        },
+        {
+          "id": 10,
+          "type": "stat",
+          "title": "Доля успешных отправок — baseline",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 } },
+          "gridPos": { "h": 5, "w": 6, "x": 12, "y": 10 },
+          "targets": [
+            { "expr": "sum(rate(messenger_message_send_operations_total{namespace=~\"$namespace\",result=\"success\"}[$__range] offset $baseline_offset)) / clamp_min(sum(rate(messenger_message_send_operations_total{namespace=~\"$namespace\"}[$__range] offset $baseline_offset)), 0.001)" }
+          ]
+        },
+        {
+          "id": 11,
+          "type": "stat",
+          "title": "Max outbox age — baseline",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "s" } },
+          "gridPos": { "h": 5, "w": 6, "x": 18, "y": 10 },
+          "targets": [
+            { "expr": "max(max_over_time(messenger_outbox_oldest_age_seconds{namespace=~\"$namespace\"}[$__range] offset $baseline_offset))" }
+          ]
+        }
+      ]
+    }
