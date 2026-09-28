@@ -22,6 +22,4 @@ spec:
   # База уже создана bootstrap.initdb, поэтому оператор её перенимает,
   # а не создаёт заново.
   ensure: present
-  extensions:
-    - name: pg_stat_statements
-      ensure: present
+

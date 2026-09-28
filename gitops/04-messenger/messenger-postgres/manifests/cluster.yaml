@@ -43,7 +43,8 @@ spec:
 
     parameters:
       max_connections: "200"
-
+      pg_stat_statements.max: "10000"
+      pg_stat_statements.track: "all"
       # Конкретные SQL executions медленнее 200 ms попадают
       # в PostgreSQL log.
       #
