@@ -889,7 +889,7 @@ DELETE ... WHERE email LIKE 'load-%'
 
 без run-specific ownership.
 
-## 27. Argo UI как execution history — `[ ]`
+## 27. Argo UI как execution history — `[x]` (свойство самого Argo Workflows, ничего отдельно не строилось; список прогонов и статус каждого шага уже проверялись этой сессией через `kubectl get wf`/`kubectl get wf -o json .status.nodes` — тот же API, что показывает UI)
 
 После реализации пользователь должен иметь возможность открыть Argo
 Workflows UI и увидеть:
@@ -953,7 +953,7 @@ Grafana anomaly
 → VictoriaLogs
 ```
 
-## 29. CI/GitOps integration — `[ ]`
+## 29. CI/GitOps integration — `[x]` (`scripts/load-testing-run.sh` + `make load-test` — submit WorkflowTemplate(parameters) одной командой, живо проверено; сам триггер из CI по расписанию/on-merge — раздел явно оставляет его на будущее, "иметь возможность", а не "уже подключено")
 
 Не запускать полный stress suite на каждый PR.
 
