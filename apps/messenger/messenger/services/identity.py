@@ -82,7 +82,7 @@ async def authenticate(
             extra={
                 "event": "token_rejected",
                 "log_stream": logging_envelope.STREAM_SECURITY,
-                "result": "failed",
+                "result": "rejected",
                 # Причина — в журнал и в метку метрики, но не в ответ:
                 # разница между «подпись неверна» и «ключ неизвестен»
                 # экономит время тому, кто подбирает.

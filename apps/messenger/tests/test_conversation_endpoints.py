@@ -1,6 +1,7 @@
 """HTTP-контракт создания беседы один-на-один."""
 from __future__ import annotations
 
+import json
 import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -53,13 +54,13 @@ class Runtime:
         yield None
 
 
-def _user(user_id: UserId, name: str) -> User:
+def _user(user_id: UserId, name: str, *, email_verified: bool = True) -> User:
     return User(
         user_id=user_id,
         external_id=f"kc-{user_id}",
         display_name=name,
         email=f"{user_id}@example.org",
-        email_verified=True,
+        email_verified=email_verified,
         created_at=NOW,
         updated_at=NOW,
     )
@@ -106,9 +107,9 @@ def runtime():
     app.state.runtime = original
 
 
-def authenticated(monkeypatch):
+def authenticated(monkeypatch, *, email_verified: bool = True):
     async def _current(*args, **kwargs):
-        return identity.AuthResult(user=_user(ACTOR_ID, "Аня"))
+        return identity.AuthResult(user=_user(ACTOR_ID, "Аня", email_verified=email_verified))
 
     monkeypatch.setattr(main, "_current", _current)
 
@@ -219,6 +220,70 @@ def test_ожидаемые_отказы_переводятся_в_контра�
         headers={"Authorization": "Bearer token"},
     )
     отказ(response, status=status, code=code)
+
+
+class _FakeTransaction:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+
+class _FakeConnection:
+    def transaction(self):
+        return _FakeTransaction()
+
+
+def test_403_и_authorization_denied_делят_request_id_и_trace_id(client, monkeypatch, capsys):
+    """Ровно та связь, которой не хватало для расследования исходного `403`.
+
+    Через `service.create_direct` в реальный `authorization.authorize()`
+    (не через инъекцию готового `Reason`, как в тесте выше): только так
+    доказывается, что `http_request` и `authorization_denied` — две записи
+    об одном запросе, а не два независимо настроенных лога, зелёных порознь.
+    `EMAIL_UNVERIFIED` выбран потому, что `_create_conversation` отказывает
+    по нему до единого обращения к базе — `_FakeConnection` не должна уметь
+    ничего, кроме `transaction()`.
+    """
+    from messenger.telemetry.logging import configure
+
+    configure()
+    authenticated(monkeypatch, email_verified=False)
+
+    @asynccontextmanager
+    async def _connection(mode=None):
+        yield _FakeConnection()
+
+    monkeypatch.setattr(app.state.runtime, "connection", _connection)
+
+    response = client.post(
+        "/conversations",
+        json={"participant_id": str(OTHER_ID)},
+        headers={"Authorization": "Bearer token"},
+    )
+    assert response.status_code == 403
+
+    records = [
+        json.loads(line)
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith("{")
+    ]
+    http_request = [r for r in records if r.get("event") == "http_request"][-1]
+    denied = [r for r in records if r.get("event") == "authorization_denied"][-1]
+
+    assert http_request["status"] == 403
+    assert http_request["result"] == "rejected"
+
+    assert denied["result"] == "rejected"
+    assert denied["error_code"] == "email_unverified"
+    assert denied["action"] == "conversation.create"
+    assert denied["resource_kind"] == "user"
+    assert denied["user_id"] == str(ACTOR_ID)
+
+    assert denied["request_id"] == http_request["request_id"]
+    assert denied["trace_id"] == http_request["trace_id"]
+    assert denied["span_id"]
 
 
 def test_без_токена_сервис_не_вызывается(client, monkeypatch, отказ):

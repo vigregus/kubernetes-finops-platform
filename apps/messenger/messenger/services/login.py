@@ -164,7 +164,7 @@ async def _finish(
         log.warning(
             "выданный токен не прошёл собственную проверку",
             extra={"event": "login_rejected", "operation": operation,
-                   "result": "failed", "error_code": reason,
+                   "result": "rejected", "error_code": reason,
                    "log_stream": logging_envelope.STREAM_SECURITY},
         )
         return LoginResult(error_code=reason)

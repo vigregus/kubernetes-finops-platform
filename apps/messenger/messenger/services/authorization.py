@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Protocol
 
@@ -23,12 +24,45 @@ from messenger.domain.ids import ConversationId, UserId
 from messenger.domain.user import Capability, can
 from messenger.repositories import authorization as authorization_repository
 from messenger.repositories import conversations, users
+from messenger.telemetry import logging as logging_envelope
+
+log = logging.getLogger(__name__)
 
 
 class MembershipCache(Protocol):
     async def get(
         self, *, conversation_id: ConversationId, user_id: UserId
     ) -> ConversationMember | None: ...
+
+
+def _log_authorization_denied(
+    *, decision: Decision, subject: Subject, resource: ResourceRef, action: Action
+) -> None:
+    """Один след на каждый отказ доступа — независимо от причины.
+
+    Централизовано, а не рядом с каждым `Decision.deny(...)`: у
+    `_create_conversation` и `_conversation` уже несколько причин отказа, и
+    список растёт. Запись рядом с каждым `return` гарантированно забыли бы
+    при следующей причине; здесь она покрывается автоматически, потому что
+    привязана к результату, а не к конкретной ветке.
+
+    `request_id`/`trace_id`/`span_id` не передаются: это свойства
+    logging-контекста запроса, а не решения авторизации, и formatter
+    подставляет их сам из contextvar.
+    """
+    assert decision.reason is not None
+    log.info(
+        "доступ отклонён",
+        extra={
+            "event": "authorization_denied",
+            "log_stream": logging_envelope.STREAM_SECURITY,
+            "result": "rejected",
+            "error_code": decision.reason.value,
+            "action": action.value,
+            "resource_kind": resource.kind.value,
+            "user_id": str(subject.user.user_id),
+        },
+    )
 
 
 async def authorize(
@@ -41,20 +75,30 @@ async def authorize(
 ) -> Decision:
     """Возвращает решение; привилегированное разрешение сначала аудируется."""
     if action is Action.CREATE_CONVERSATION and resource.kind is ResourceKind.USER:
-        return await _create_conversation(conn, subject=subject, resource=resource)
+        decision = await _create_conversation(conn, subject=subject, resource=resource)
+        if not decision.allowed:
+            _log_authorization_denied(
+                decision=decision, subject=subject, resource=resource, action=action
+            )
+        return decision
 
     if resource.kind is ResourceKind.CONVERSATION and action in {
         Action.READ_CONVERSATION,
         Action.WRITE_CONVERSATION,
         Action.SUBSCRIBE_CONVERSATION,
     }:
-        return await _conversation(
+        decision = await _conversation(
             conn,
             subject=subject,
             resource=resource,
             action=action,
             membership_cache=membership_cache,
         )
+        if not decision.allowed:
+            _log_authorization_denied(
+                decision=decision, subject=subject, resource=resource, action=action
+            )
+        return decision
 
     if action is Action.ADMIN_EXECUTE and resource.kind is ResourceKind.ADMIN_ACTION:
         decision = _admin(subject)
