@@ -75,6 +75,11 @@ EXTERNAL_METRICS: dict[str, str] = {
     "centrifugo_node_num_clients": (
         "gitops/04-messenger/messenger-centrifugo/manifests/service-scrape.yaml"
     ),
+    # kafka-exporter, снимается тем же ServiceMonitor, что уже использует
+    # 02·Pipeline/messenger-messaging-pipeline для T_kafka.
+    "kafka_consumergroup_lag": (
+        "gitops/02-infra/kafka-cluster/manifests/service-scrape.yaml"
+    ),
 }
 
 # Ключевые слова PromQL, которые не сопровождаются скобкой и потому не

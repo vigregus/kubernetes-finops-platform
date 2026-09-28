@@ -550,7 +550,7 @@ REST     = 99999
 
 это correctness failure и весь Workflow должен завершиться `Failed`.
 
-## 15. Playwright smoke перед нагрузкой — `[ ]`
+## 15. Playwright smoke перед нагрузкой — `[x]` (реализовано и живо проверено: полный прогон `local-capacity-messages-wmw9p` прошёл playwright-smoke → k6-load → reconciliation → cleanup целиком; при сбое smoke k6-load не стартует, `when`-зависимость в DAG)
 
 До benchmark два browser context должны пройти production UI:
 
@@ -698,7 +698,7 @@ drain_rate > incoming_rate
 
 пока backlog существует.
 
-## 20. VictoriaMetrics как performance history — `[ ]`
+## 20. VictoriaMetrics как performance history — `[~]` (k6 теперь пишет свои метрики в VictoriaMetrics через `-o experimental-prometheus-rw`, размеченные `run_id`/`git_sha`/`profile` — живо проверено; метрики самого приложения, например `messenger_message_send_operations_total`, этой разметки не несут и не могут быть сгруппированы по run_id тем же способом — только k6-side метрики)
 
 k6 metrics отправлять в существующий metrics backend таким образом, чтобы
 результаты можно было группировать по:
@@ -740,7 +740,7 @@ k6 metrics отправлять в существующий metrics backend та
 - git_sha
 - profile
 
-## 22. Grafana dashboards — `[ ]`
+## 22. Grafana dashboards — `[~]` (03·Load Run и 04·Load Compare — оба реализованы и живо проверены на реальных данных; k6/Playwright canary-панели и сравнение по run_id — нет, см. текстовые панели самих дашбордов)
 
 Создать минимум два dashboard.
 

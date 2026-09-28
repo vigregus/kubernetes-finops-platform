@@ -474,6 +474,17 @@ spec:
     # runner'е), а `status.succeeded` дочернего Job `<name>-1`: тот самый
     # Job, который реально исполнил k6 (раздел 25 — корректностные гейты
     # решают исход Workflow, не факт «что-то отработало»).
+    #
+    # Раздел 20 — метрики k6 (offered/accepted вплотную к HTTP-percentile,
+    # dropped_iterations) до сих пор не попадали в VictoriaMetrics вообще:
+    # `arguments`/`-o experimental-prometheus-rw` пишет их туда же, куда уже
+    # пишет Tempo (тот же remote-write endpoint, см.
+    # gitops/02-infra/observability-objects/tempo/values.yaml). `--tag
+    # run_id=/git_sha=/profile=` — та самая разметка, которой разделу 20
+    # не хватало для группировки: без неё k6_* метрики одного прогона
+    # неотличимы от k6_* метрики другого. Экспортируется как обычный k6
+    # output, а не отдельный sidecar — минимальное изменение, работающее
+    # на встроенном в grafana/k6 механизме.
     - name: k6-load
       inputs:
         parameters:
@@ -506,12 +517,17 @@ spec:
               namespace: load-testing
             spec:
               parallelism: {{workflow.parameters.k6_parallelism}}
+              arguments: "-o experimental-prometheus-rw --tag run_id={{workflow.parameters.run_id}} --tag git_sha={{workflow.parameters.git_sha}} --tag profile={{workflow.parameters.profile}}"
               script:
                 configMap:
                   name: ${SCRIPT_CONFIGMAP}
                   file: ${SCRIPT_FILE}
               runner:
                 env:
+                  - name: K6_PROMETHEUS_RW_SERVER_URL
+                    value: "http://vmsingle-vm-local-victoria-metrics-k8s-stack.observability.svc.cluster.local:8428/api/v1/write"
+                  - name: K6_PROMETHEUS_RW_TREND_STATS
+                    value: "p95,p99,min,max,avg"
                   - name: RUN_ID
                     value: "{{workflow.parameters.run_id}}"
                   - name: USERS
