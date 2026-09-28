@@ -23,6 +23,8 @@ import {
   useConversationHistory,
   type ConversationHistory,
 } from "../messages/useConversationHistory"
+import { EmailVerificationBanner } from "../auth/components/EmailVerificationBanner"
+import type { ResendVerificationEmail } from "../auth/components/EmailVerificationBanner"
 import { ConnectionStatusLine } from "../realtime/components/ConnectionStatusLine"
 import type { CentrifugeFactory } from "../realtime/realtimeClient"
 import { useRealtimeConnection } from "../realtime/useRealtimeConnection"
@@ -133,6 +135,13 @@ interface ChatPageProps {
    * Второго способа собрать строку списка не появляется.
    */
   createConversation: CreateConversation
+  /**
+   * `POST /auth/verify-email/resend` — операция оттуда же, `G3-007-1a`.
+   *
+   * Баннер получает её **готовой** по той же причине, что и `searchUser`: у
+   * компонента нет ни адреса API, ни токена.
+   */
+  resendVerificationEmail: ResendVerificationEmail
   /** Подмена SDK — для компонентных тестов; в production не задаётся. */
   createCentrifuge?: CentrifugeFactory
 }
@@ -155,13 +164,23 @@ interface ChatPageProps {
  * после первого же нового сообщения перестаёт быть правдой, тогда как снимок
  * остаётся фактом.
  *
- * `MessageComposer` (отправка, `G3-007-1`) и `MessageBubble` (оформление
- * строки, тот же гейт — отменяет только часть `B13` про ленту без оформления)
- * подключены. `MessageTimeline`, `TypingIndicator`, `SyncIndicator` и
+ * `MessageComposer` (отправка, `G3-007-1`), `MessageBubble` (оформление
+ * строки, тот же гейт) и `EmailVerificationBanner` (`G3-007-1a`) подключены.
+ * `MessageTimeline`, `TypingIndicator`, `SyncIndicator` и
  * `ConnectionStateBanner` — по-прежнему нет, они остаются проектным запасом
- * (закрытый список `B13`/`B15`). Наблюдаемость ленты не отменена оформлением:
+ * (закрытый список `B15`). Наблюдаемость ленты не отменена оформлением:
  * `MessageList` единолично владеет DOM-маркерами приёмки и видимостью строк
  * для квитанций, `MessageBubble` рисует только содержимое узла.
+ *
+ * **Баннер не трогает композер.** `EmailVerificationBanner` показывается по
+ * `currentUser.emailVerified === false`, но `MessageComposer` ниже не знает
+ * про `emailVerified` вовсе — и это исполнение домена, а не пропуск: до
+ * подтверждения почты у `Capability.SEND_MESSAGE` отказа нет
+ * (`_UNVERIFIED = {READ, SEND_MESSAGE}`, `domain/user.py`), под запретом
+ * только `START_CONVERSATION`. Ветка «неподтверждён, но пишет в уже
+ * существующей беседе» — не то, что здесь чинится, а то, чему нельзя дать
+ * сломаться: гасить композер по одному лишь `emailVerified` значило бы
+ * молча сузить домен до того, что удобнее нарисовать.
  *
  * **Список бесед живёт здесь двумя половинами: базой и оверлеем.** База — то,
  * что принёс REST; оверлей — числа из `unread.changed`, пришедшие в личный
@@ -191,6 +210,7 @@ export function ChatPage({
   outboxStore,
   searchUser,
   createConversation,
+  resendVerificationEmail,
   createCentrifuge,
 }: ChatPageProps) {
   // Ленивая инициализация, а не `?? conversations[0]` в рендере: запасного
@@ -432,6 +452,17 @@ export function ChatPage({
   return (
     <>
       <MessengerLayout
+        // `=== false`, а не `!currentUser.emailVerified`: `undefined` —
+        // «сервер об этом не сообщал», а не «не подтверждён» (тот же довод,
+        // что у `peerReadState`/`lastSeenAt` в `shared/lib/types.ts`), и
+        // показывать баннер на одной лишь неизвестности значило бы утверждать
+        // то, чего `/me` не говорил. Адрес тоже проверяется: без него банеру
+        // нечего вставить в «Confirm ‹email›».
+        banner={
+          currentUser.emailVerified === false && currentUser.email !== undefined ? (
+            <EmailVerificationBanner email={currentUser.email} resend={resendVerificationEmail} />
+          ) : undefined
+        }
         sidebar={
           <ConversationSidebar
             conversations={merged}

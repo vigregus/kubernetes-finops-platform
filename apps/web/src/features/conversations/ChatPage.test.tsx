@@ -21,7 +21,7 @@ import {
   installObserverForJsdom,
   restoreIntersectionObserver,
 } from "../../test-support/intersectionObserver";
-import type { ChatMessage } from "../../shared/lib/types";
+import type { ChatMessage, CurrentUser } from "../../shared/lib/types";
 import type { Conversation } from "../../shared/lib/types";
 import { createOutboxStore } from "../messages/outbox/outboxStore";
 import type { SendMessage, SendMessageRequest } from "../messages/outbox/useOutbox";
@@ -30,6 +30,7 @@ import type { HistorySource, TailPage } from "../messages/history";
 import type { SyncPage, SyncPageResult } from "../messages/sync";
 import { ChatPage } from "./ChatPage";
 import type { CreateConversation, SearchUser } from "./components/NewConversationDialog";
+import type { ResendVerificationEmail } from "../auth/components/EmailVerificationBanner";
 
 /**
  * Главная панель: **одна** дорога данных для любой беседы.
@@ -182,6 +183,10 @@ interface SetupOptions {
   readonly searchUser?: SearchUser;
   /** Исход создания беседы. Не задан — отказ, ровно как у поиска. */
   readonly createConversation?: CreateConversation;
+  /** Исход повторной отправки письма. Не задан — отказ, ровно как у поиска. */
+  readonly resendVerificationEmail?: ResendVerificationEmail;
+  /** Зритель. Не задан — `VIEWER` (`emailVerified: true`, баннер скрыт). */
+  readonly currentUser?: CurrentUser;
 }
 
 function setup({
@@ -193,6 +198,8 @@ function setup({
   sendMessage,
   searchUser,
   createConversation,
+  resendVerificationEmail,
+  currentUser,
 }: SetupOptions) {
   const fake = givenFakeCentrifuge();
   const tickets = givenTicketIssuer();
@@ -225,6 +232,7 @@ function setup({
      */
     searches: [] as string[],
     created: [] as string[],
+    resends: 0,
   };
 
   const history: HistorySource = {
@@ -299,6 +307,14 @@ function setup({
       : Promise.reject(new Error("эти тесты не создают бесед"));
   };
 
+  const resend: ResendVerificationEmail = () => {
+    calls.resends += 1;
+
+    return resendVerificationEmail
+      ? resendVerificationEmail()
+      : Promise.reject(new Error("эти тесты не отправляют письмо подтверждения повторно"));
+  };
+
   // Собирается функцией, а не литералом на месте: повтор загрузки приносит
   // **тот же** компонент с другим списком, и собрать его вторым литералом
   // значило бы разойтись с первым на первой же правке пропсов.
@@ -306,7 +322,7 @@ function setup({
     <ChatPage
       conversations={list}
       refreshConversations={refreshConversations}
-      currentUser={VIEWER}
+      currentUser={currentUser ?? VIEWER}
       currentUserId={VIEWER_ID}
       history={history}
       centrifugoUrl={CENTRIFUGO_URL}
@@ -315,6 +331,7 @@ function setup({
       sendMessage={submit}
       searchUser={lookup}
       createConversation={startChat}
+      resendVerificationEmail={resend}
       outboxStore={outboxStore}
       createCentrifuge={fake.factory}
     />
@@ -912,6 +929,44 @@ describe("композер в дереве: человек производит 
 
     expect(calls.sent).toEqual([]);
     expect(container.querySelector("[data-pending-client-id]")).toBeNull();
+  });
+});
+
+/**
+ * `G3-007-1a`: до подтверждения почты отказано только в `START_CONVERSATION`
+ * (`_UNVERIFIED = {READ, SEND_MESSAGE}`, `domain/user.py`) — не в отправке.
+ *
+ * Баннер и композер проверяются в **одном** тесте намеренно: раздельные
+ * тесты доказали бы каждый факт по отдельности, но не то, что баннер
+ * появился **вместо** отключения композера, а не вместе с ним — а именно
+ * эта связка и есть предмет гейта («не гасить композер по одному лишь
+ * `emailVerified`»).
+ */
+describe("неподтверждённая почта не гасит композер в уже существующей беседе", () => {
+  it("баннер виден, а отправка в открытую беседу проходит как обычно", async () => {
+    const { container, calls } = setup({
+      conversations: [ANNA],
+      tail: () => Promise.resolve(tailOf([messageOf(1)])),
+      currentUser: { ...VIEWER, emailVerified: false },
+    });
+
+    await waitFor(() => expect(screen.getByText("message 1")).toBeTruthy());
+
+    expect(container.querySelector("[data-verification-banner-state]")).toBeTruthy();
+
+    const input = container.querySelector("[data-composer-input]");
+    const send = container.querySelector("[data-composer-send]");
+    expect(input).toBeTruthy();
+    expect(send).toBeTruthy();
+
+    fireEvent.change(input!, { target: { value: "Hello Anna" } });
+    fireEvent.click(send!);
+
+    await waitFor(() =>
+      expect(container.querySelector("[data-pending-client-id]")).toBeTruthy(),
+    );
+    expect(calls.sent).toHaveLength(1);
+    expect(calls.sent[0]?.text).toBe("Hello Anna");
   });
 });
 

@@ -17,6 +17,7 @@ import type { ConversationListPage } from "./api/generated";
 import type { SendReceipt } from "./features/receipts/useReceipts";
 import type { BootState } from "./api/client";
 import type { SessionState } from "./features/auth/sessionState";
+import type { ResendVerificationEmail } from "./features/auth/components/EmailVerificationBanner";
 
 interface AppProps {
   session: SessionState;
@@ -78,6 +79,13 @@ interface AppProps {
    */
   createConversation: CreateConversation;
   /**
+   * `POST /auth/verify-email/resend` — операция оттуда же, `G3-007-1a`.
+   *
+   * Транзитом до баннера в `ChatPage`, той же причиной, что у `searchUser`:
+   * ни у `App`, ни у панели нет ни адреса API, ни токена.
+   */
+  resendVerificationEmail: ResendVerificationEmail;
+  /**
    * Хранилище очереди — **значением**, а не фабрикой: очередь обязана читать ту
    * же базу, в которую писала, а второй объект завёл бы второй круг
    * восстановления при монтировании.
@@ -135,6 +143,7 @@ export function App({
   sendMessage,
   searchUser,
   createConversation,
+  resendVerificationEmail,
   outboxStore,
   readCentrifugoUrl,
   issueTicket,
@@ -184,6 +193,7 @@ export function App({
           sendMessage={sendMessage}
           searchUser={searchUser}
           createConversation={createConversation}
+          resendVerificationEmail={resendVerificationEmail}
           outboxStore={outboxStore}
           readCentrifugoUrl={readCentrifugoUrl}
           issueTicket={issueTicket}
@@ -201,6 +211,7 @@ interface ReadyScreenProps {
   sendMessage: SendMessage;
   searchUser: SearchUser;
   createConversation: CreateConversation;
+  resendVerificationEmail: ResendVerificationEmail;
   outboxStore: OutboxStore;
   readCentrifugoUrl: () => string;
   issueTicket: RealtimeTicketIssuer;
@@ -215,6 +226,7 @@ function ReadyScreen({
   sendMessage,
   searchUser,
   createConversation,
+  resendVerificationEmail,
   outboxStore,
   readCentrifugoUrl,
   issueTicket,
@@ -265,6 +277,7 @@ function ReadyScreen({
       sendMessage={sendMessage}
       searchUser={searchUser}
       createConversation={createConversation}
+      resendVerificationEmail={resendVerificationEmail}
       outboxStore={outboxStore}
       currentUser={viewer.user}
       currentUserId={viewer.userId}
