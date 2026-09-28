@@ -10,13 +10,19 @@ spec:
   json: |
     {
       "uid": "messenger-messaging-pipeline",
-      "title": "02 · Messaging Pipeline",
-      "description": "docs/messenger/06-observability.md, часть 1: разбивка сквозного пути сообщения по стадиям (T_commit/T_outbox/T_kafka/T_consumer/T_realtime), а не суммарное 'p99 доставки 8с' без ответа, где именно эти секунды потеряны.",
-      "tags": ["messenger", "pipeline"],
+      "title": "02 · Message Journey",
+      "description": "docs/messenger/06-observability.md, часть 1: разбивка сквозного пути сообщения по стадиям (T_commit/T_outbox/T_kafka/T_consumer/T_realtime), а не суммарное 'p99 доставки 8с' без ответа, где именно эти секунды потеряны. Название 'Messaging Pipeline' -> 'Message Journey' для единообразия с картой в docs (uid не менялся). Приведён к визуальному стандарту пакета 01-05: pipeline bar gauge наверху, разделены панели со смешанными единицами, единая цветовая конвенция.",
+      "tags": ["messenger", "pipeline", "journey"],
       "schemaVersion": 39,
-      "version": 1,
+      "version": 2,
       "editable": true,
       "time": { "from": "now-6h", "to": "now" },
+      "links": [
+        { "title": "01 · SLO Overview", "type": "link", "url": "/d/messenger-slo-overview", "icon": "dashboard" },
+        { "title": "03 · API — RED", "type": "link", "url": "/d/messenger-api-red", "icon": "dashboard" },
+        { "title": "04 · Realtime — Centrifugo", "type": "link", "url": "/d/messenger-realtime", "icon": "dashboard" },
+        { "title": "05 · Capacity — USE", "type": "link", "url": "/d/messenger-capacity", "icon": "dashboard" }
+      ],
       "templating": {
         "list": [
           {
@@ -40,19 +46,50 @@ spec:
           "id": 2,
           "type": "text",
           "title": "Как читать",
-          "gridPos": { "h": 3, "w": 24, "x": 0, "y": 1 },
+          "gridPos": { "h": 2, "w": 24, "x": 0, "y": 1 },
           "options": {
             "mode": "markdown",
-            "content": "t1 T_commit (API/Postgres) → t2 T_outbox (аренда outbox-relay) → t3 T_kafka (публикация брокеру) → t4 T_consumer (обработка пачки consumer-realtime) → t5 T_realtime (публикация в Centrifugo). T_delivery (панель ниже) — приближение от occurred_at до Centrifugo, не ack браузера (телеметрии браузера ещё нет, G3)."
+            "content": "t1 T_commit → t2 T_outbox → t3 T_kafka → t4 T_consumer → t5 T_realtime. T_delivery — приближение occurred_at → Centrifugo, не ack браузера Б (телеметрии браузера ещё нет, G3)."
           }
+        },
+        {
+          "id": 13,
+          "type": "bargauge",
+          "title": "Где сейчас теряются секунды — p99 по стадиям",
+          "description": "Bar gauge вместо пяти отдельных графиков (визуальный стандарт пакета 01-05): глазами сразу видно, какая стадия — bottleneck, не сравнивая пять line chart с разным масштабом Y. Детальные тренды во времени — панели ниже, для каждой стадии отдельно.",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "options": {
+            "orientation": "horizontal",
+            "displayMode": "gradient",
+            "showUnfilled": true,
+            "reduceOptions": { "calcs": ["lastNotNull"] }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 0.5 },
+                { "color": "red", "value": 2 }
+              ]}
+            }
+          },
+          "gridPos": { "h": 6, "w": 24, "x": 0, "y": 3 },
+          "targets": [
+            { "expr": "histogram_quantile(0.99, sum by (le) (rate(messenger_message_commit_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])))", "legendFormat": "T_commit" },
+            { "expr": "histogram_quantile(0.99, sum by (le) (rate(messenger_outbox_claim_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])))", "legendFormat": "T_outbox" },
+            { "expr": "histogram_quantile(0.99, sum by (le) (rate(messenger_outbox_kafka_publish_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])))", "legendFormat": "T_kafka" },
+            { "expr": "histogram_quantile(0.99, sum by (le) (rate(messenger_consumer_processing_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])))", "legendFormat": "T_consumer" },
+            { "expr": "histogram_quantile(0.99, sum by (le) (rate(messenger_realtime_publish_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])))", "legendFormat": "T_realtime" }
+          ]
         },
         {
           "id": 3,
           "type": "timeseries",
           "title": "T_commit p99 (API → Postgres)",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "s" } },
-          "gridPos": { "h": 7, "w": 8, "x": 0, "y": 4 },
+          "fieldConfig": { "defaults": { "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } } },
+          "gridPos": { "h": 7, "w": 8, "x": 0, "y": 9 },
           "targets": [
             { "expr": "histogram_quantile(0.99, sum by (le) (rate(messenger_message_commit_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])))" }
           ]
@@ -62,8 +99,8 @@ spec:
           "type": "timeseries",
           "title": "T_outbox p99 (аренда пачки)",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "s" } },
-          "gridPos": { "h": 7, "w": 8, "x": 8, "y": 4 },
+          "fieldConfig": { "defaults": { "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } } },
+          "gridPos": { "h": 7, "w": 8, "x": 8, "y": 9 },
           "targets": [
             { "expr": "histogram_quantile(0.99, sum by (le) (rate(messenger_outbox_claim_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])))" }
           ]
@@ -73,8 +110,8 @@ spec:
           "type": "timeseries",
           "title": "T_kafka p99 (публикация брокеру)",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "s" } },
-          "gridPos": { "h": 7, "w": 8, "x": 16, "y": 4 },
+          "fieldConfig": { "defaults": { "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } } },
+          "gridPos": { "h": 7, "w": 8, "x": 16, "y": 9 },
           "targets": [
             { "expr": "histogram_quantile(0.99, sum by (le) (rate(messenger_outbox_kafka_publish_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])))" }
           ]
@@ -84,8 +121,8 @@ spec:
           "type": "timeseries",
           "title": "T_consumer p99 (обработка пачки)",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "s" } },
-          "gridPos": { "h": 7, "w": 8, "x": 0, "y": 11 },
+          "fieldConfig": { "defaults": { "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } } },
+          "gridPos": { "h": 7, "w": 8, "x": 0, "y": 16 },
           "targets": [
             {
               "expr": "histogram_quantile(0.99, sum by (le, consumer) (rate(messenger_consumer_processing_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])))",
@@ -98,8 +135,8 @@ spec:
           "type": "timeseries",
           "title": "T_realtime p99 (публикация в Centrifugo)",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "s" } },
-          "gridPos": { "h": 7, "w": 8, "x": 8, "y": 11 },
+          "fieldConfig": { "defaults": { "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } } },
+          "gridPos": { "h": 7, "w": 8, "x": 8, "y": 16 },
           "targets": [
             { "expr": "histogram_quantile(0.99, sum by (le) (rate(messenger_realtime_publish_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])))" }
           ]
@@ -110,8 +147,8 @@ spec:
           "title": "T_delivery p99 (приближение, occurred_at → Centrifugo)",
           "description": "Не t7 из документа - подтверждение браузера Б. См. текстовую панель выше.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "s" } },
-          "gridPos": { "h": 7, "w": 8, "x": 16, "y": 11 },
+          "fieldConfig": { "defaults": { "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } } },
+          "gridPos": { "h": 7, "w": 8, "x": 16, "y": 16 },
           "targets": [
             { "expr": "histogram_quantile(0.99, sum by (le) (rate(messenger_message_delivery_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])))" }
           ]
@@ -120,15 +157,15 @@ spec:
           "id": 9,
           "type": "row",
           "title": "Исходы по стадиям",
-          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 }
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 23 }
         },
         {
           "id": 10,
           "type": "timeseries",
           "title": "outbox: события по исходу",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "reqps" } },
-          "gridPos": { "h": 7, "w": 12, "x": 0, "y": 19 },
+          "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } } },
+          "gridPos": { "h": 7, "w": 12, "x": 0, "y": 24 },
           "targets": [
             {
               "expr": "sum by (outcome) (rate(messenger_outbox_events_total{namespace=~\"$namespace\"}[5m]))",
@@ -142,8 +179,8 @@ spec:
           "title": "realtime: доставка по исходу",
           "description": "duplicate - не отказ, а доказательство того, что дедупликация работает (at-least-once транспорт).",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "reqps" } },
-          "gridPos": { "h": 7, "w": 12, "x": 12, "y": 19 },
+          "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } } },
+          "gridPos": { "h": 7, "w": 12, "x": 12, "y": 24 },
           "targets": [
             {
               "expr": "sum by (outcome) (rate(messenger_realtime_delivery_total{namespace=~\"$namespace\"}[5m]))",
@@ -154,18 +191,27 @@ spec:
         {
           "id": 12,
           "type": "timeseries",
-          "title": "Очередь outbox: длина и возраст самой старой записи",
+          "title": "Outbox pending (шт.)",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": {} },
-          "gridPos": { "h": 7, "w": 24, "x": 0, "y": 26 },
+          "fieldConfig": { "defaults": { "unit": "short", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } } },
+          "gridPos": { "h": 7, "w": 12, "x": 0, "y": 31 },
           "targets": [
             {
-              "expr": "sum(messenger_outbox_pending{namespace=~\"$namespace\"})",
-              "legendFormat": "pending (шт.)"
-            },
+              "expr": "sum(messenger_outbox_pending{namespace=~\"$namespace\"})"
+            }
+          ]
+        },
+        {
+          "id": 14,
+          "type": "timeseries",
+          "title": "Outbox oldest age (с)",
+          "description": "Разнесено с pending count (визуальный стандарт пакета, тот же фикс, что на 05 · Capacity): штуки и секунды на одной оси взаимно маскировали друг друга.",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } } },
+          "gridPos": { "h": 7, "w": 12, "x": 12, "y": 31 },
+          "targets": [
             {
-              "expr": "max(messenger_outbox_oldest_age_seconds{namespace=~\"$namespace\"})",
-              "legendFormat": "oldest age (с)"
+              "expr": "max(messenger_outbox_oldest_age_seconds{namespace=~\"$namespace\"})"
             }
           ]
         }
