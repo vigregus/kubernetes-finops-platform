@@ -609,7 +609,7 @@ Canary должен работать параллельно k6 workload.
 
 Argo Workflow должен дождаться результатов обоих.
 
-## 17. Receipts в mixed profile — `[ ]`
+## 17. Receipts в mixed profile — `[~]` (реализован новый k6-скрипт mixed.js: два независимых сценария constant-arrival-rate — messages (нечётные пары) и receipts POST /conversations/{id}/receipts (чётные пары, delivered_seq=read_seq=текущий seq беседы, доля от target_rate); подключено в k6-load через profile=mixed. Живая проверка после мерджа)
 
 `mixed` обязан создавать не только `POST messages`.
 
