@@ -3,15 +3,17 @@
 # передаёт `profile`/`users`/`target_rate`/..., а не копирует Workflow под
 # каждый сценарий.
 #
-# DAG в `main` сейчас останавливается после preflight (раздел 7) — это
-# единственная стадия, для которой в этой фазе есть настоящая реализация.
-# Остальные узлы полного DAG раздела 6 (provision → prepare-auth →
-# prepare-conversations → playwright-smoke → {browser-canary, k6 TestRun} →
-# reconciliation → recovery-check → summarize-run, plus onExit cleanup)
-# добавляются вместе с шагом, для которого они впервые понадобились — не
-# заглушками, возвращающими успех без реальной работы (раздел 25: workflow
-# считается `Succeeded`, только когда пройдены настоящие корректностные
-# гейты).
+# DAG в `main` сейчас доходит до `provision` (раздел 8) — preflight и
+# заведение synthetic-пользователей в Keycloak. Остальные узлы полного DAG
+# раздела 6 (prepare-auth → prepare-conversations → playwright-smoke →
+# {browser-canary, k6 TestRun} → reconciliation → recovery-check →
+# summarize-run) добавляются вместе с шагом, для которого они впервые
+# понадобились — не заглушками, возвращающими успех без реальной работы
+# (раздел 25: workflow считается `Succeeded`, только когда пройдены
+# настоящие корректностные гейты). `onExit: cleanup` уже реализован
+# (раздел 26 — снимает только пользователей текущего `run_id`), потому что
+# оставлять synthetic-аккаунты в Keycloak между прогонами значило бы
+# засорять кластер собственными тестами этого же PR.
 #
 # preflight сам покрыт не полностью: раздел 7 требует также записывать
 # baseline ресурсов (CPU/RAM ноды, restarts подов, DB connections, Kafka lag,
@@ -25,6 +27,7 @@ metadata:
 spec:
   serviceAccountName: load-testing-workflow
   entrypoint: main
+  onExit: cleanup
   arguments:
     parameters:
       # Без значения по умолчанию: раздел 5 требует уникальный run_id на
@@ -68,6 +71,9 @@ spec:
             template: preflight-connectivity
           - name: preflight-k6-operator
             template: preflight-k6-operator
+          - name: provision
+            template: provision
+            dependencies: [preflight-connectivity, preflight-k6-operator]
 
     # Настоящие HTTP/TCP-пробы до зависимостей Messenger — не «под в статусе
     # Running» (раздел 7 явно требует не судить по этому), а рабочий запрос
@@ -126,3 +132,221 @@ spec:
         image: rancher/kubectl:v1.31.0
         command: ["kubectl"]
         args: ["get", "testruns.k6.io", "-n", "load-testing"]
+
+    # Раздел 8 — Keycloak Admin API заводит synthetic-пользователей с
+    # именем `local-capacity-<run_id>-NNNNNN@finops.local`; для профиля
+    # `identity` (раздел 9) адрес намеренно остаётся неподтверждённым, чтобы
+    # тот профиль проверял настоящий поток верификации, а не заранее
+    # выставленный флаг. Настоящую application-сессию (не самодельный JWT)
+    # каждый synthetic-пользователь получает не здесь, а в момент, когда его
+    # подхватит k6/Playwright-скрипт — тем же production-совместимым потоком
+    # логина, каким пройдёт браузер, а не заранее размноженными токенами,
+    # которые пришлось бы протаскивать через состояние самого Workflow.
+    #
+    # Пароль на run — один общий, генерируется здесь и уходит только в
+    # output-параметр `run_password` (Argo хранит output в статусе Workflow,
+    # но это одноразовый synthetic-fixture пароль, не боевая учётная
+    # запись — в отличие от admin-пароля IdP, который скрипт читает и держит
+    # только в памяти процесса, см. rbac-keycloak-admin-secret.yaml).
+    - name: provision
+      script:
+        image: ghcr.io/vigregus/messenger-api@sha256:36e63da2032997821e84f3993abd988ebf837d5f58c7d61f6e3a7351f0e3d8ce
+        command: ["python"]
+        env:
+          - name: RUN_ID
+            value: "{{workflow.parameters.run_id}}"
+          - name: USERS
+            value: "{{workflow.parameters.users}}"
+          - name: PROFILE
+            value: "{{workflow.parameters.profile}}"
+        resources:
+          requests: {cpu: 100m, memory: 128Mi}
+          limits: {cpu: "1", memory: 256Mi}
+        source: |
+          import asyncio
+          import base64
+          import os
+          import secrets
+
+          import httpx
+
+          KEYCLOAK = "http://messenger-idp-service.keycloak.svc.cluster.local:8080"
+          REALM = "messenger"
+          RUN_ID = os.environ["RUN_ID"]
+          USERS = int(os.environ["USERS"])
+          PROFILE = os.environ["PROFILE"]
+          EMAIL_VERIFIED = PROFILE != "identity"
+
+
+          def read_own_secret(namespace: str, name: str) -> dict[str, str]:
+              host = os.environ["KUBERNETES_SERVICE_HOST"]
+              port = os.environ["KUBERNETES_SERVICE_PORT"]
+              token = open(
+                  "/var/run/secrets/kubernetes.io/serviceaccount/token", encoding="utf-8"
+              ).read().strip()
+              ca = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+              url = f"https://{host}:{port}/api/v1/namespaces/{namespace}/secrets/{name}"
+              r = httpx.get(url, headers={"Authorization": f"Bearer {token}"}, verify=ca, timeout=10.0)
+              r.raise_for_status()
+              return {k: base64.b64decode(v).decode() for k, v in r.json()["data"].items()}
+
+
+          async def admin_token(http: httpx.AsyncClient, admin: dict[str, str]) -> str:
+              r = await http.post(
+                  f"{KEYCLOAK}/realms/master/protocol/openid-connect/token",
+                  data={
+                      "grant_type": "password",
+                      "client_id": "admin-cli",
+                      "username": admin["username"],
+                      "password": admin["password"],
+                  },
+              )
+              r.raise_for_status()
+              return r.json()["access_token"]
+
+
+          async def create_user(http: httpx.AsyncClient, token: str, login: str, password: str) -> None:
+              headers = {"Authorization": f"Bearer {token}"}
+              r = await http.post(
+                  f"{KEYCLOAK}/admin/realms/{REALM}/users",
+                  headers=headers,
+                  json={
+                      "username": login,
+                      "email": login,
+                      "emailVerified": EMAIL_VERIFIED,
+                      "enabled": True,
+                      "firstName": "LOCAL-CAPACITY-001",
+                      "lastName": RUN_ID,
+                      "requiredActions": [],
+                      "credentials": [{"type": "password", "value": password, "temporary": False}],
+                  },
+              )
+              if r.status_code == 409:
+                  return
+              r.raise_for_status()
+
+
+          async def main() -> None:
+              run_password = secrets.token_urlsafe(24)
+              with open("/tmp/run-password", "w", encoding="utf-8") as f:
+                  f.write(run_password)
+
+              admin = read_own_secret("keycloak", "messenger-idp-initial-admin")
+              async with httpx.AsyncClient(timeout=15.0) as http:
+                  token = await admin_token(http, admin)
+                  semaphore = asyncio.Semaphore(20)
+
+                  async def one(i: int) -> None:
+                      login = f"local-capacity-{RUN_ID}-{i:06d}@finops.local"
+                      async with semaphore:
+                          await create_user(http, token, login, run_password)
+
+                  await asyncio.gather(*(one(i) for i in range(1, USERS + 1)))
+
+              print(f"provisioned {USERS} synthetic users for run_id={RUN_ID} (emailVerified={EMAIL_VERIFIED})")
+
+
+          asyncio.run(main())
+      outputs:
+        parameters:
+          - name: run_password
+            valueFrom:
+              path: /tmp/run-password
+
+    # Раздел 26 — cleanup выполняется как `onExit`, независимо от исхода
+    # Workflow (в том числе после Failed/Error), и снимает только
+    # пользователей текущего `run_id` — по точному совпадению префикса
+    # логина, не widecard DELETE по шаблону письма. `cleanup=false`
+    # оставляет synthetic-аккаунты нетронутыми — сознательный выбор
+    # вызывающего (например, чтобы руками посмотреть на них после прогона),
+    # а не сбой уборки.
+    - name: cleanup
+      script:
+        image: ghcr.io/vigregus/messenger-api@sha256:36e63da2032997821e84f3993abd988ebf837d5f58c7d61f6e3a7351f0e3d8ce
+        command: ["python"]
+        env:
+          - name: RUN_ID
+            value: "{{workflow.parameters.run_id}}"
+          - name: CLEANUP
+            value: "{{workflow.parameters.cleanup}}"
+        resources:
+          requests: {cpu: 100m, memory: 128Mi}
+          limits: {cpu: "1", memory: 256Mi}
+        source: |
+          import asyncio
+          import base64
+          import os
+
+          import httpx
+
+          KEYCLOAK = "http://messenger-idp-service.keycloak.svc.cluster.local:8080"
+          REALM = "messenger"
+          RUN_ID = os.environ["RUN_ID"]
+          CLEANUP = os.environ.get("CLEANUP", "true")
+
+
+          def read_own_secret(namespace: str, name: str) -> dict[str, str]:
+              host = os.environ["KUBERNETES_SERVICE_HOST"]
+              port = os.environ["KUBERNETES_SERVICE_PORT"]
+              token = open(
+                  "/var/run/secrets/kubernetes.io/serviceaccount/token", encoding="utf-8"
+              ).read().strip()
+              ca = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+              url = f"https://{host}:{port}/api/v1/namespaces/{namespace}/secrets/{name}"
+              r = httpx.get(url, headers={"Authorization": f"Bearer {token}"}, verify=ca, timeout=10.0)
+              r.raise_for_status()
+              return {k: base64.b64decode(v).decode() for k, v in r.json()["data"].items()}
+
+
+          async def admin_token(http: httpx.AsyncClient, admin: dict[str, str]) -> str:
+              r = await http.post(
+                  f"{KEYCLOAK}/realms/master/protocol/openid-connect/token",
+                  data={
+                      "grant_type": "password",
+                      "client_id": "admin-cli",
+                      "username": admin["username"],
+                      "password": admin["password"],
+                  },
+              )
+              r.raise_for_status()
+              return r.json()["access_token"]
+
+
+          async def main() -> None:
+              if CLEANUP != "true":
+                  print(f"cleanup=false — synthetic users for run_id={RUN_ID} оставлены как есть")
+                  return
+
+              admin = read_own_secret("keycloak", "messenger-idp-initial-admin")
+              prefix = f"local-capacity-{RUN_ID}-"
+              removed = 0
+
+              async with httpx.AsyncClient(timeout=15.0) as http:
+                  token = await admin_token(http, admin)
+                  headers = {"Authorization": f"Bearer {token}"}
+                  first = 0
+                  while True:
+                      r = await http.get(
+                          f"{KEYCLOAK}/admin/realms/{REALM}/users",
+                          headers=headers,
+                          params={"username": prefix, "first": first, "max": 100},
+                      )
+                      r.raise_for_status()
+                      page = r.json()
+                      if not page:
+                          break
+                      for user in page:
+                          if not user["username"].startswith(prefix):
+                              continue
+                          d = await http.delete(
+                              f"{KEYCLOAK}/admin/realms/{REALM}/users/{user['id']}", headers=headers
+                          )
+                          if d.status_code not in (204, 404):
+                              d.raise_for_status()
+                          removed += 1
+                      first += len(page)
+
+              print(f"cleanup удалил {removed} synthetic-пользователей для run_id={RUN_ID}")
+
+
+          asyncio.run(main())
