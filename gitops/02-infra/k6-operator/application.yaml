@@ -1,0 +1,33 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: k6-operator
+  namespace: argocd
+  annotations:
+    # Та же волна, что у argo-workflows: оба — независимые друг от друга
+    # операторы, и workflow'ы LOCAL-CAPACITY-001 (волна 1+) ждут обоих сразу,
+    # не по очереди.
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  project: finops-platform
+  sources:
+    - repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
+      targetRevision: HEAD
+      ref: values
+    - repoURL: https://grafana.github.io/helm-charts
+      chart: k6-operator
+      targetRevision: 4.6.0
+      helm:
+        releaseName: k6-operator
+        valueFiles:
+          - $values/gitops/02-infra/k6-operator/values.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: k6-operator
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

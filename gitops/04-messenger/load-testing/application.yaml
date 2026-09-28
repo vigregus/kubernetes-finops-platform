@@ -1,0 +1,28 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: messenger-load-testing
+  namespace: argocd
+  annotations:
+    # Волна 1: после операторов (argo-workflows, k6-operator — волна 0),
+    # раньше самих workflow-шаблонов, которые сюда лягут следующими правками
+    # (docs/messenger/15-load-testing-platform.md, раздел 4).
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  project: finops-platform
+  source:
+    repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
+    targetRevision: HEAD
+    path: gitops/04-messenger/load-testing/manifests
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: load-testing
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

@@ -1,0 +1,51 @@
+# Argo Workflows — orchestration layer для LOCAL-CAPACITY-001
+# (docs/messenger/15-load-testing-platform.md, раздел 1-2). Сам он нагрузку
+# не создаёт — это работа k6 Operator (../k6-operator) — а ведёт lifecycle
+# прогона: preflight → provision → k6 TestRun → reconciliation → cleanup.
+
+# Кластерный оператор, а не namespace-scoped: workflow'ы LOCAL-CAPACITY-001
+# живут в отдельном `load-testing` (RBAC для service account — там же, не
+# здесь), а не в `argo`, и singleNamespace=true заставил бы либо ставить
+# контроллер в каждый namespace отдельно, либо держать workflow'ы там же,
+# где сам контроллер — а он инфраструктурный компонент, не messenger-specific.
+singleNamespace: false
+
+controller:
+  replicas: 1
+  resources:
+    # Ноутбук/minikube — один узел на весь стек (messenger + observability +
+    # теперь ещё и load-testing платформа), и контроллер Argo простаивает
+    # почти всё время между прогонами: щедрые лимиты здесь были бы платой за
+    # редкий пик, а не за обычную работу.
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+server:
+  enabled: true
+  replicas: 1
+  # `server` — без SSO и без клиентских сертификатов: единственный посетитель
+  # UI на этом стенде — сам разработчик через `kubectl port-forward`, и
+  # заводить SSO-провайдера ради локального просмотра прогонов значило бы
+  # решать проблему, которой здесь нет. На проде (`G6`) это придётся
+  # пересмотреть — `sso` или `client` режим, не `server`.
+  authModes:
+    - server
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+# Дефолтный executor (`emissary`) не переопределяется: альтернативы (`docker`,
+# `pns`) существуют ради специфичных ограничений рантайма контейнеров,
+# которых у containerd/minikube нет.
+
+workflow:
+  serviceAccount:
+    create: true
