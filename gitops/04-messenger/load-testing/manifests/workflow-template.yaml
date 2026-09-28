@@ -523,6 +523,8 @@ spec:
 
           import httpx
 
+          from messenger.repositories.postgres import PoolSettings, create_pool
+
           KEYCLOAK = "http://messenger-idp-service.keycloak.svc.cluster.local:8080"
           REALM = "messenger"
           RUN_ID = os.environ["RUN_ID"]
@@ -590,7 +592,106 @@ spec:
                           removed += 1
                       first += len(page)
 
-              print(f"cleanup удалил {removed} synthetic-пользователей для run_id={RUN_ID}")
+              print(f"cleanup удалил {removed} synthetic-пользователей Keycloak для run_id={RUN_ID}")
+
+              # Раздел 26 требует снимать не только Keycloak-аккаунт, но и то,
+              # что он успел оставить в messenger: строку в users (заводится
+              # на первый логин), diалоги/сообщения prepare-conversations и
+              # k6-load, сессии/устройства. Keycloak и messenger — разные
+              # системы с разным жизненным циклом: удаление в одной не
+              # каскадирует в другую, и без этого блока Postgres копил бы
+              # синтетические данные вечно (найдено живьём: 1325 строк
+              # users после серии прогонов при разработке этого шаблона).
+              db = read_own_secret("messenger", "messenger-db-app")
+              pool = await create_pool(
+                  PoolSettings(
+                      host="messenger-db-pool",
+                      port=5432,
+                      database=db.get("dbname", "messenger"),
+                      user=db["user"],
+                      password=db["password"],
+                      min_size=1,
+                      max_size=2,
+                  ),
+                  application_name="load-testing-cleanup",
+              )
+              try:
+                  # `email LIKE` здесь безопасен как run-scoped фильтр: адрес
+                  # уже содержит run_id целиком (та же схема именования, что
+                  # у Keycloak username выше), а не общий префикс вида
+                  # 'load-%', который раздел 26 явно запрещает — такой задел
+                  # бы чужие прогоны.
+                  pattern = f"local-capacity-{RUN_ID}-%"
+                  async with pool.acquire() as conn:
+                      async with conn.transaction():
+                          user_ids = [
+                              r["user_id"]
+                              for r in await conn.fetch(
+                                  "select user_id from users where email like $1", pattern
+                              )
+                          ]
+                          if not user_ids:
+                              removed_users = 0
+                          else:
+                              conv_ids = [
+                                  r["conversation_id"]
+                                  for r in await conn.fetch(
+                                      "select distinct conversation_id from conversation_members "
+                                      "where user_id = any($1::uuid[])",
+                                      user_ids,
+                                  )
+                              ]
+                              # Дети раньше родителей — сознательно последовательные
+                              # execute, а не один составной CTE-запрос: порядок
+                              # здесь важнее компактности, и явный порядок не зависит
+                              # от того, какие FK в этой схеме объявлены RESTRICT,
+                              # а какие CASCADE.
+                              await conn.execute(
+                                  "delete from unread_projection where conversation_id = any($1::uuid[])",
+                                  conv_ids,
+                              )
+                              await conn.execute(
+                                  "delete from unread_offsets where conversation_id = any($1::uuid[])",
+                                  conv_ids,
+                              )
+                              await conn.execute(
+                                  "delete from read_states where conversation_id = any($1::uuid[])",
+                                  conv_ids,
+                              )
+                              await conn.execute(
+                                  "delete from messages where conversation_id = any($1::uuid[])",
+                                  conv_ids,
+                              )
+                              await conn.execute(
+                                  "delete from conversation_members where conversation_id = any($1::uuid[])",
+                                  conv_ids,
+                              )
+                              await conn.execute(
+                                  "delete from conversations where conversation_id = any($1::uuid[])",
+                                  conv_ids,
+                              )
+                              await conn.execute(
+                                  "delete from realtime_connections where user_id = any($1::uuid[])",
+                                  user_ids,
+                              )
+                              await conn.execute(
+                                  "delete from sessions where user_id = any($1::uuid[])", user_ids
+                              )
+                              await conn.execute(
+                                  "delete from devices where user_id = any($1::uuid[])", user_ids
+                              )
+                              await conn.execute(
+                                  "delete from blocks where blocker_id = any($1::uuid[]) "
+                                  "or blocked_id = any($1::uuid[])",
+                                  user_ids,
+                              )
+                              await conn.execute(
+                                  "delete from users where user_id = any($1::uuid[])", user_ids
+                              )
+                              removed_users = len(user_ids)
+              finally:
+                  await pool.close()
+              print(f"cleanup удалил {removed_users} synthetic-пользователей messenger (Postgres) для run_id={RUN_ID}")
 
 
           asyncio.run(main())
