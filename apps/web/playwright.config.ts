@@ -90,5 +90,16 @@ export default defineConfig({
 			dependencies: ["fixture"],
 			timeout: 900_000,
 		},
+		{
+			// Раздел 16 плана load-testing — свой проект, без зависимости от
+			// `fixture`: canary не трогает G3-005/006/007 аккаунты (g3-web-e2e-a/b)
+			// и их идемпотентную беседу вовсе, а использует уже готовых
+			// synthetic-пользователей LOCAL-CAPACITY-001 (RUN_ID/RUN_PASSWORD из
+			// окружения, не STATE_FILE). Таймаут — длительность нагрузки плюс
+			// запас, а не фиксированное число: canary работает весь k6-прогон.
+			name: "canary",
+			testMatch: /canary\.spec\.ts$/,
+			timeout: 3_600_000,
+		},
 	],
 })
