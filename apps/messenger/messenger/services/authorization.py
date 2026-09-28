@@ -50,7 +50,12 @@ def _log_authorization_denied(
     logging-контекста запроса, а не решения авторизации, и formatter
     подставляет их сам из contextvar.
     """
-    assert decision.reason is not None
+    if decision.reason is None:
+        # Недостижимо по построению `Decision.deny(...)` — оно всегда
+        # передаёт причину, — но `assert` здесь был бы хуже: с `-O` он
+        # исчезает, и недостижимое становится падением по `None` именно
+        # в проде (см. тот же довод в `services/identity.py`).
+        return
     log.info(
         "access denied: %s",
         decision.reason.value,
