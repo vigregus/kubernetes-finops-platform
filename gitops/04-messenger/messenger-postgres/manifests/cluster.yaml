@@ -1,8 +1,10 @@
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
+
 metadata:
   name: messenger-db
   namespace: messenger
+
   labels:
     app.kubernetes.io/name: messenger-db
     app.kubernetes.io/component: database
@@ -10,6 +12,7 @@ metadata:
     finops.internal/team: platform-engineering
     finops.internal/environment: local
     finops.internal/component: database
+
 spec:
   # Локальное окружение не пытается быть HA - у него другая задача:
   # корректность потока сообщений. Кворумная синхронная репликация,
@@ -20,46 +23,58 @@ spec:
     initdb:
       database: messenger
       owner: messenger
-      # Сравнение строк по байтам, а не по локали. Сортировка сообщений
-      # в беседе идёт по conversation_seq, а не по тексту, зато поведение
-      # индексов перестаёт зависеть от того, с какой локалью собран образ.
+
+      # Сравнение строк по байтам, а не по локали.
+      # Сортировка сообщений в беседе идёт по conversation_seq,
+      # а не по тексту, зато поведение индексов перестаёт зависеть
+      # от того, с какой локалью собран образ.
       localeCollate: C
       localeCType: C
 
   postgresql:
-    # Источник данных для «медленных запросов» на дашбордах: без него видно
-    # только, что база загружена, но не чем именно. Отдельным полем, а не
-    # в parameters: shared_preload_libraries управляет сам CNPG, и попытка
-    # задать её как параметр отвергается вебхуком как fixed configuration.
+    # pg_stat_statements собирает агрегированную статистику всех
+    # нормализованных SQL statements.
+    #
+    # shared_preload_libraries управляется CNPG отдельным полем:
+    # попытка положить его в parameters отвергается webhook'ом
+    # как fixed configuration.
     shared_preload_libraries:
       - pg_stat_statements
+
     parameters:
       max_connections: "200"
-      # Без этого Postgres не пишет ни строки о конкретном медленном
-      # запросе - pg_stat_statements выше даёт только агрегат по
-      # нормализованному тексту, без привязки к моменту и без trace_id.
-      # 200мс - ниже целевой задержки коммита сообщения (99.95% ≤ 1с,
-      # messenger_message_commit_duration_seconds), чтобы ловить именно
-      # то, что реально угрожает этому SLO, а не весь трафик.
+
+      # Конкретные SQL executions медленнее 200 ms попадают
+      # в PostgreSQL log.
       #
-      # promtail уже разбирает такие строки (../../../02-infra/
-      # observability-objects/promtail/values.yaml, app="postgresql") -
-      # тот регэксп до сих пор был наполовину простаивающим именно
-      # потому, что этот параметр нигде не был включён.
+      # Дальше существующий Promtail pipeline извлекает:
+      #   duration_ms
+      #   trace_id
+      #   sql
+      #
+      # Поэтому:
+      #   pg_stat_statements -> агрегаты всех запросов
+      #   PostgreSQL logs    -> конкретные медленные запросы
       log_min_duration_statement: "200"
-      # Отдельно от log_min_duration_statement: `membership.check`
-      # (repositories/messages.py, lock_active_conversation) - это
-      # SELECT ... FOR UPDATE, блокировка строки беседы. Без
-      # log_lock_waits ожидание чужой блокировки неотличимо от медленного
-      # диска ни в логе, ни в спане (docs/messenger/06-observability.md,
-      # «Чего в этих спанах нет»).
+
+      # Позволяет отличать ожидание row/table lock от просто
+      # медленного CPU/storage execution.
       log_lock_waits: "on"
+
+  # User-defined metrics exported from pg_stat_statements.
+  #
+  # ConfigMap lives in the same namespace and is automatically
+  # reloaded because it carries cnpg.io/reload.
+  monitoring:
+    customQueriesConfigMap:
+      - name: messenger-db-query-stats
+        key: queries
 
   storage:
     size: 2Gi
 
-  # Метки CNPG сам на поды не переносит - без этого блока и поды, и сервисы
-  # выпадут из разбивки затрат по продукту, ради которой вся платформа и есть.
+  # Метки CNPG сам на поды не переносит - без этого блока
+  # workload выпадет из FinOps-разбивки по продукту.
   inheritedMetadata:
     labels:
       finops.internal/product: messenger
@@ -71,11 +86,19 @@ spec:
     requests:
       cpu: 100m
       memory: 256Mi
+
     limits:
       cpu: "1"
       memory: 1Gi
 
   # Секрет с паролем роли messenger оператор создаёт сам:
-  # messenger-db-app (host, port, dbname, user, password, uri).
+  # messenger-db-app:
+  #   host
+  #   port
+  #   dbname
+  #   user
+  #   password
+  #   uri
+  #
   # Приложение читает его, а не хранит пароль в values.
   enableSuperuserAccess: false
