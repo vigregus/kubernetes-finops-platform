@@ -46,7 +46,6 @@ FORBIDDEN = {
     "features/messages/components/TypingIndicator.tsx": "вне объёма G3-005 (B15)",
     "features/messages/components/SyncIndicator.tsx": "вне объёма G3-005 (B15)",
     "features/conversations/components/BlockedNotice.tsx": "вне объёма G3-005 (B15)",
-    "features/auth/components/EmailVerificationBanner.tsx": "вне объёма G3-005 (B15)",
     "features/auth/SettingsSessionsPage.tsx": "вне объёма G3-005 (B15)",
     "shared/ui/SearchField.tsx": "фильтр по первой странице пагинированного списка (B28)",
 }
@@ -87,6 +86,16 @@ REQUIRED = (
     # отвалился импорт» и «оформление никогда и не подключали» выглядели бы в
     # этом чеке одинаково зелёными.
     "features/messages/components/MessageBubble.tsx",
+    # `G3-007-1a` переводит `EmailVerificationBanner` из проектного запаса
+    # (был здесь под `B15`) в обязательный production-path: до этого гейта
+    # backend-flow (`/auth/verify-email/resend`, ре-синхронизация
+    # `email_verified` из Keycloak claims на каждый запрос) уже существовал,
+    # а браузерный UX не был доведён — ручная галочка в Keycloak Admin
+    # Console заменяла собой человека, читающего письмо. Строка в
+    # `REQUIRED`, тем же доводом, что у `MessageComposer`/`MessageBubble`
+    # выше: без неё «баннер объявлен рабочим, а не подключён» прошло бы
+    # молча.
+    "features/auth/components/EmailVerificationBanner.tsx",
 )
 
 

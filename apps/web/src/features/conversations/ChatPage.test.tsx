@@ -14,6 +14,7 @@ import type {
   ConversationListPage,
   Message,
 } from "../../api/generated";
+import { ApiProblem } from "../../api/problems";
 import { givenFakeCentrifuge, givenTicketIssuer } from "../../test-support/centrifuge";
 import { VIEWER, conversationOf } from "../../test-support/fixtures";
 import {
@@ -21,7 +22,7 @@ import {
   installObserverForJsdom,
   restoreIntersectionObserver,
 } from "../../test-support/intersectionObserver";
-import type { ChatMessage } from "../../shared/lib/types";
+import type { ChatMessage, CurrentUser } from "../../shared/lib/types";
 import type { Conversation } from "../../shared/lib/types";
 import { createOutboxStore } from "../messages/outbox/outboxStore";
 import type { SendMessage, SendMessageRequest } from "../messages/outbox/useOutbox";
@@ -30,6 +31,7 @@ import type { HistorySource, TailPage } from "../messages/history";
 import type { SyncPage, SyncPageResult } from "../messages/sync";
 import { ChatPage } from "./ChatPage";
 import type { CreateConversation, SearchUser } from "./components/NewConversationDialog";
+import type { ResendVerificationEmail } from "../auth/components/EmailVerificationBanner";
 
 /**
  * Главная панель: **одна** дорога данных для любой беседы.
@@ -182,6 +184,10 @@ interface SetupOptions {
   readonly searchUser?: SearchUser;
   /** Исход создания беседы. Не задан — отказ, ровно как у поиска. */
   readonly createConversation?: CreateConversation;
+  /** Исход повторной отправки письма. Не задан — отказ, ровно как у поиска. */
+  readonly resendVerificationEmail?: ResendVerificationEmail;
+  /** Зритель. Не задан — `VIEWER` (`emailVerified: true`, баннер скрыт). */
+  readonly currentUser?: CurrentUser;
 }
 
 function setup({
@@ -193,6 +199,8 @@ function setup({
   sendMessage,
   searchUser,
   createConversation,
+  resendVerificationEmail,
+  currentUser,
 }: SetupOptions) {
   const fake = givenFakeCentrifuge();
   const tickets = givenTicketIssuer();
@@ -225,6 +233,7 @@ function setup({
      */
     searches: [] as string[],
     created: [] as string[],
+    resends: 0,
   };
 
   const history: HistorySource = {
@@ -299,6 +308,14 @@ function setup({
       : Promise.reject(new Error("эти тесты не создают бесед"));
   };
 
+  const resend: ResendVerificationEmail = () => {
+    calls.resends += 1;
+
+    return resendVerificationEmail
+      ? resendVerificationEmail()
+      : Promise.reject(new Error("эти тесты не отправляют письмо подтверждения повторно"));
+  };
+
   // Собирается функцией, а не литералом на месте: повтор загрузки приносит
   // **тот же** компонент с другим списком, и собрать его вторым литералом
   // значило бы разойтись с первым на первой же правке пропсов.
@@ -306,7 +323,7 @@ function setup({
     <ChatPage
       conversations={list}
       refreshConversations={refreshConversations}
-      currentUser={VIEWER}
+      currentUser={currentUser ?? VIEWER}
       currentUserId={VIEWER_ID}
       history={history}
       centrifugoUrl={CENTRIFUGO_URL}
@@ -315,6 +332,7 @@ function setup({
       sendMessage={submit}
       searchUser={lookup}
       createConversation={startChat}
+      resendVerificationEmail={resend}
       outboxStore={outboxStore}
       createCentrifuge={fake.factory}
     />
@@ -912,6 +930,154 @@ describe("композер в дереве: человек производит 
 
     expect(calls.sent).toEqual([]);
     expect(container.querySelector("[data-pending-client-id]")).toBeNull();
+  });
+});
+
+/**
+ * `G3-007-1a`: до подтверждения почты отказано только в `START_CONVERSATION`
+ * (`_UNVERIFIED = {READ, SEND_MESSAGE}`, `domain/user.py`) — не в отправке.
+ *
+ * Баннер и композер проверяются в **одном** тесте намеренно: раздельные
+ * тесты доказали бы каждый факт по отдельности, но не то, что баннер
+ * появился **вместо** отключения композера, а не вместе с ним — а именно
+ * эта связка и есть предмет гейта («не гасить композер по одному лишь
+ * `emailVerified`»).
+ */
+describe("неподтверждённая почта не гасит композер в уже существующей беседе", () => {
+  it("баннер виден, а отправка в открытую беседу проходит как обычно", async () => {
+    const { container, calls } = setup({
+      conversations: [ANNA],
+      tail: () => Promise.resolve(tailOf([messageOf(1)])),
+      currentUser: { ...VIEWER, emailVerified: false },
+    });
+
+    await waitFor(() => expect(screen.getByText("message 1")).toBeTruthy());
+
+    expect(container.querySelector("[data-verification-banner-state]")).toBeTruthy();
+
+    const input = container.querySelector("[data-composer-input]");
+    const send = container.querySelector("[data-composer-send]");
+    expect(input).toBeTruthy();
+    expect(send).toBeTruthy();
+
+    fireEvent.change(input!, { target: { value: "Hello Anna" } });
+    fireEvent.click(send!);
+
+    await waitFor(() =>
+      expect(container.querySelector("[data-pending-client-id]")).toBeTruthy(),
+    );
+    expect(calls.sent).toHaveLength(1);
+    expect(calls.sent[0]?.text).toBe("Hello Anna");
+  });
+});
+
+/**
+ * Окончательный отказ (`403`/`404`/`400`/`422`) — не сетевой сбой, и очередь
+ * это уважает: `classify`/`nextAttempt` (`pendingMessages.ts`) относят такой
+ * код к `final`, а не к `retry`, и не ставят таймер вовсе. Здесь проверяется
+ * не сама классификация — она уже доказана без хранилища и без панели, — а
+ * то, что **до DOM** она доезжает ровно так же: одна попытка транспорта, а
+ * не первая из бесконечной серии.
+ */
+describe("окончательный отказ не крутит очередь вечно", () => {
+  it("403 — одна попытка транспорта, запись помечена failed, повтора нет", async () => {
+    const { container, calls } = setup({
+      conversations: [ANNA],
+      tail: () => Promise.resolve(tailOf([messageOf(1)])),
+      sendMessage: () =>
+        Promise.reject(new ApiProblem({ status: 403, code: "blocked" })),
+    });
+
+    await waitFor(() => expect(screen.getByText("message 1")).toBeTruthy());
+
+    fireEvent.change(container.querySelector("[data-composer-input]")!, {
+      target: { value: "Hello Anna" },
+    });
+    fireEvent.click(container.querySelector("[data-composer-send]")!);
+
+    await waitFor(() =>
+      expect(
+        container.querySelector("[data-pending-client-id]")?.getAttribute("data-message-state"),
+      ).toBe("failed"),
+    );
+    expect(calls.sent).toHaveLength(1);
+
+    // Секунда с четвертью — заведомо больше первой паузы `retry`-веток
+    // (`baseMs=1000`), но здесь таймера нет вовсе: `final` его не ставит.
+    // Если бы классификация где-то по пути потерялась, `send` позвали бы
+    // второй раз именно в этом окне.
+    await new Promise((resolve) => setTimeout(resolve, 1250));
+    expect(calls.sent).toHaveLength(1);
+    expect(
+      container.querySelector("[data-pending-client-id]")?.getAttribute("data-message-state"),
+    ).toBe("failed");
+  });
+});
+
+/**
+ * Очередь исходящих живёт **над** панелью беседы (`useOutbox` в `ChatPage`,
+ * не в `ConversationPane` — докстринг `MessageList.tsx`), и переключение
+ * беседы пересоздаёт только панель (`key={activeConversation.id}`). Предмет
+ * здесь — не то, что очередь **переживает** размонтирование (это следствие
+ * места в дереве), а то, что запись **не течёт** в чужую беседу и не
+ * теряется при уходе и возврате.
+ */
+describe("переключение беседы не роняет и не путает pending-запись", () => {
+  it("запись из Anna не видна у Marcus и остаётся на месте после возврата", async () => {
+    const pending = deferred<Message>();
+    const { container, calls } = setup({
+      conversations: [ANNA, MARCUS_NO_MESSAGES],
+      tail: (conversationId) =>
+        conversationId === "c1"
+          ? Promise.resolve(tailOf([messageOf(1)]))
+          : Promise.resolve(tailOf([])),
+      sendMessage: () => pending.promise,
+    });
+
+    await waitFor(() => expect(screen.getByText("message 1")).toBeTruthy());
+
+    fireEvent.change(container.querySelector("[data-composer-input]")!, {
+      target: { value: "Hello Anna" },
+    });
+    fireEvent.click(container.querySelector("[data-composer-send]")!);
+
+    await waitFor(() =>
+      expect(container.querySelector("[data-pending-client-id]")).toBeTruthy(),
+    );
+    const queuedId = container
+      .querySelector("[data-pending-client-id]")!
+      .getAttribute("data-pending-client-id");
+
+    fireEvent.click(screen.getByText("Marcus Chen").closest("button")!);
+
+    // Панель Marcus пуста и своего chat`а не видит: беседа фильтрует записи
+    // очереди по `conversationId` (`ChatPage.tsx::pendingForActive`), и утечка
+    // сюда была бы нарушением этого фильтра, а не просто лишней строкой.
+    await waitFor(() => expect(screen.queryByText("message 1")).toBeNull());
+    expect(container.querySelector("[data-pending-client-id]")).toBeNull();
+
+    fireEvent.click(screen.getByText("Anna Petrova").closest("button")!);
+
+    // Панель Anna ремонтируется целиком (`key`), но очередь — нет: та же
+    // запись, тот же идентификатор, то же состояние «идёт попытка», ни
+    // повторной отправки, ни дубля.
+    await waitFor(() => expect(screen.getByText("message 1")).toBeTruthy());
+    await waitFor(() =>
+      expect(container.querySelector("[data-pending-client-id]")).toBeTruthy(),
+    );
+    expect(
+      container.querySelector("[data-pending-client-id]")?.getAttribute("data-pending-client-id"),
+    ).toBe(queuedId);
+    expect(calls.sent).toHaveLength(1);
+
+    // Ответ приходит уже после возврата — панель Anna снова смонтирована, и
+    // снятие обязано дойти до неё, а не потеряться в размонтированной.
+    await act(async () => {
+      pending.resolve(replyOf(ANNA.id, 2, queuedId!, "Hello Anna"));
+    });
+    await waitFor(() =>
+      expect(container.querySelector("[data-pending-client-id]")).toBeNull(),
+    );
   });
 });
 

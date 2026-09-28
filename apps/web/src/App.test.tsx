@@ -146,6 +146,9 @@ function shell(state: BootState, api: HistoryApi = historyApi) {
     createConversation: async () => {
       throw new Error("эти тесты не создают бесед");
     },
+    resendVerificationEmail: async () => {
+      throw new Error("эти тесты не отправляют письмо подтверждения повторно");
+    },
     outboxStore: createOutboxStore(),
     readCentrifugoUrl: () => "wss://rt.example.test/connection/websocket",
     issueTicket: async () => "ticket-for-the-hunt",

@@ -147,6 +147,23 @@ export function useOutbox({
    */
   const attemptRef = useRef<(record: PendingMessage) => void>(() => {})
 
+  /**
+   * Часы — в ссылке, а не в зависимостях эффекта восстановления, той же
+   * причиной, что `handlersRef` в `useConversationHistory.ts`. Восстановление
+   * обязано остаться «один раз на монтирование» (докстринг ниже), а `now` —
+   * функция: нестабильная ссылка (например, инлайн-замыкание в тесте или в
+   * вызывающем, пересобранная на каждом рендере) заставила бы эффект
+   * перезапускаться на каждом рендере, а рендер вызывает как раз он сам —
+   * `setPending` внутри эффекта, приводящий к следующему рендеру с новой
+   * ссылкой `now`, снова к эффекту, и так по кругу. `Date.now` по умолчанию
+   * стабилен и бага не показывает, поэтому он и был обнаружен только приёмкой
+   * (`useOutbox.test.ts`), а не в проде.
+   */
+  const nowRef = useRef(now)
+  useEffect(() => {
+    nowRef.current = now
+  })
+
   const upsert = useCallback((record: PendingMessage) => {
     setPending((current) => {
       const rest = current.filter((item) => item.clientMessageId !== record.clientMessageId)
@@ -269,6 +286,19 @@ export function useOutbox({
    * Хранилище одно на все беседы, и запись помнит свою: читать его заново при
    * переключении беседы значило бы платить за то, что не менялось, а главное —
    * повторно запускать попытку для всех записей сразу.
+   *
+   * **Слияние, а не замена.** `store.list()` — единственный `await` в этой
+   * функции, и за время его ожидания человек успевает нажать Send: `enqueue`
+   * уже завёл запись в `pending` и уже сходил в `persist()`. Если restored-план
+   * при этом просто перезаписать через `setPending(plan)`, свежая запись
+   * исчезнет с экрана в тот самый момент, когда восстановление наконец
+   * ответит, — не потому что что-то отменило отправку, а потому что более
+   * старый список победил более новый. Обнаружено приёмкой
+   * (`useOutbox.test.ts`: две записи подряд без ожидания между ними), а не
+   * теоретически: гонка воспроизводится синхронным двойным `enqueue`.
+   * Известные по `clientMessageId` записи поэтому не трогаются вовсе, а
+   * попытка для восстановленной заводится только для того, чего в `pending`
+   * ещё не было, — свою `enqueue` уже завёл сам.
    */
   useEffect(() => {
     let cancelled = false
@@ -284,22 +314,29 @@ export function useOutbox({
       }
       if (cancelled) return
 
-      const plan = replayPlan(records, now())
+      const plan = replayPlan(records, nowRef.current())
+      let newlyRestored: PendingMessage[] = []
       // Показываются все три ведра: просроченное и отвергнутое — утверждения о
       // человеке («это не ушло»), и спрятать их значило бы оставить написанное
       // без следа.
-      setPending(
-        [...plan.send, ...plan.expired, ...plan.held].sort(
-          (left, right) => left.createdAt - right.createdAt,
-        ),
-      )
-      for (const item of plan.send) void attemptRef.current(item)
+      setPending((current) => {
+        const known = new Set(current.map((item) => item.clientMessageId))
+        const additions = [...plan.send, ...plan.expired, ...plan.held].filter(
+          (item) => !known.has(item.clientMessageId),
+        )
+        newlyRestored = plan.send.filter((item) => !known.has(item.clientMessageId))
+        if (additions.length === 0) return current
+        return [...current, ...additions].sort((left, right) => left.createdAt - right.createdAt)
+      })
+      for (const item of newlyRestored) void attemptRef.current(item)
     })()
 
     return () => {
       cancelled = true
     }
-  }, [store, now])
+    // `now` сознательно не в списке зависимостей — причина в докстринге
+    // `nowRef` выше.
+  }, [store])
 
   useEffect(() => {
     const scheduled = timers.current

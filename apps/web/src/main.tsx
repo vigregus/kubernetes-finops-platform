@@ -19,6 +19,7 @@ import type {
   CreateConversation,
   SearchUser,
 } from "./features/conversations/components/NewConversationDialog";
+import type { ResendVerificationEmail } from "./features/auth/components/EmailVerificationBanner";
 import type { HistoryApi } from "./features/messages/history";
 import { createOutboxStore, type OutboxStore } from "./features/messages/outbox/outboxStore";
 import type { SendMessage } from "./features/messages/outbox/useOutbox";
@@ -179,6 +180,17 @@ const createConversation: CreateConversation = (participantId) =>
   });
 
 /**
+ * Повторная отправка письма о подтверждении (`POST /auth/verify-email/resend`)
+ * — операция оттуда же, `G3-007-1a`.
+ *
+ * `authApi` уже обёрнут `withUnwrappedErrors` выше: `202` отдаёт `void`, отказ
+ * доходит до баннера как `ApiProblem`/`ServiceUnavailableError`, а не как
+ * `FetchError` — той же причиной, что и у остальных операций.
+ */
+const resendVerificationEmail: ResendVerificationEmail = () =>
+  authApi.resendVerificationEmail();
+
+/**
  * Хранилище очереди — одна константа на приложение, а не по объекту на панель.
  *
  * Открытие базы стоит денег, а читать её очередь обязана **один раз на
@@ -253,6 +265,7 @@ createRoot(document.getElementById("root")!).render(
       sendMessage={sendMessage}
       searchUser={searchUser}
       createConversation={createConversation}
+      resendVerificationEmail={resendVerificationEmail}
       outboxStore={outboxStore}
       readCentrifugoUrl={readCentrifugoUrl}
       issueTicket={issueTicket}
