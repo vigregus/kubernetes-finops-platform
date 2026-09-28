@@ -7,6 +7,7 @@ import { adaptConversation, adaptConversations, withSentPreview } from "./adapte
 import { adaptUnreadChanged, withUnreadOverlay } from "./unreadOverlay"
 import type { Conversation as ConversationDto, ConversationListPage, Message } from "../../api/generated"
 import { adaptMessage, adaptPublication, adaptReadReceipt } from "../messages/message-adapter"
+import { playIncomingMessageSound } from "../messages/notificationSound"
 import { confirmedClientIds } from "../messages/eventMerge"
 import { MessageComposer } from "../messages/components/MessageComposer"
 import { MessageList } from "../messages/components/MessageList"
@@ -629,6 +630,10 @@ function ConversationPane({
 
       if (message !== null) {
         historyRef.current?.acceptPublication(message)
+        // Звук — только чужому сообщению: своё уже названо отправкой (D13),
+        // и звонок по нему сообщил бы человеку о том, что он только что
+        // сделал сам.
+        if (message.authorId !== "me") playIncomingMessageSound()
         return
       }
 

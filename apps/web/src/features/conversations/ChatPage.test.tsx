@@ -1,5 +1,12 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+// Автомок: `playIncomingMessageSound` бьёт по `AudioContext`, которого в
+// jsdom нет, — сам модуль на это рассчитан (см. его докстринг, «молчание
+// честнее» уже встроено), но проверить **вызов** без подмены нечем: у
+// jsdom-стаба нет своей точки наблюдения, в отличие от `fake.clientHandlers`.
+vi.mock("../messages/notificationSound");
+import { playIncomingMessageSound } from "../messages/notificationSound";
 
 import { MessageFromJSON } from "../../api/generated";
 import type {
@@ -1502,5 +1509,33 @@ describe("сведение отправленного: ответ, событи�
     expect(container.querySelector("[data-pending-client-id]")).toBeTruthy();
     expect(container.querySelector('[data-message-seq="3"]')).toBeNull();
     expect(container.querySelectorAll("[data-message-seq]")).toHaveLength(1);
+  });
+});
+
+describe("звук нового сообщения", () => {
+  it("играет на чужую публикацию и молчит на своё же эхо", async () => {
+    installObserverForJsdom();
+    try {
+      vi.mocked(playIncomingMessageSound).mockClear();
+
+      const { fake } = setup({
+        conversations: [ANNA],
+        tail: () => Promise.resolve(tailOf([messageOf(1)])),
+      });
+
+      await waitFor(() => expect(screen.getByText("message 1")).toBeTruthy());
+      expect(playIncomingMessageSound).not.toHaveBeenCalled();
+
+      await publishMessage(fake, 2);
+      expect(playIncomingMessageSound).toHaveBeenCalledTimes(1);
+
+      // Своё эхо — то же самое сообщение, каким его увидело бы **другое**
+      // устройство того же человека: звук по нему не звонит, отправка уже
+      // названа собственным действием (D13).
+      await publishOwnMessage(fake, 3, "cm-echo", "own");
+      expect(playIncomingMessageSound).toHaveBeenCalledTimes(1);
+    } finally {
+      restoreIntersectionObserver();
+    }
   });
 });
