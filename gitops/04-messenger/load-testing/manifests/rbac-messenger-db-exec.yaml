@@ -24,6 +24,16 @@ rules:
     resources: ["pods/exec"]
     resourceNames: ["messenger-db-1"]
     verbs: ["create"]
+  # `kubectl exec` сам сначала читает под (проверяет, что он существует
+  # и в каком состоянии), и без `get` на `pods` падает раньше, чем
+  # доходит до `pods/exec` — обнаружено живым прогоном: "cannot get
+  # resource \"pods\"". Тот же единственный named под, тот же уже
+  # одобренный scope — недостающий verb для уже выданного разрешения,
+  # не новое расширение доступа.
+  - apiGroups: [""]
+    resources: ["pods"]
+    resourceNames: ["messenger-db-1"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
