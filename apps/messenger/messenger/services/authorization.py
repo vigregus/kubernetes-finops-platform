@@ -52,7 +52,8 @@ def _log_authorization_denied(
     """
     assert decision.reason is not None
     log.info(
-        "доступ отклонён",
+        "access denied: %s",
+        decision.reason.value,
         extra={
             "event": "authorization_denied",
             "log_stream": logging_envelope.STREAM_SECURITY,
