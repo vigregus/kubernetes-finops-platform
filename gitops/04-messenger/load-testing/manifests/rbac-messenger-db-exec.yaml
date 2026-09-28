@@ -1,0 +1,40 @@
+# docs/messenger/15-load-testing-platform.md, раздел 15 — playwright-smoke
+# переиспользует уже готовый и проверенный scripts/web-e2e-fixture.sh
+# без изменений его логики, а не пишет свою копию уборки sessions/
+# realtime_connections. Этот скрипт делает `kubectl exec` в под Postgres
+# (`messenger-db-1`, namespace messenger) для идемпотентной уборки
+# фикстуры между прогонами — то же самое действие, которое разработчик
+# выполняет с хоста своим kubectl при обычном запуске `make web-e2e`.
+#
+# Blast radius сознательно сужен до предела, какой вообще выразим RBAC:
+# `resourceNames: [messenger-db-1]` — не весь `pods/exec` в namespace, а
+# ровно один named под; `verbs: [create]` — это единственный verb,
+# которым Kubernetes API описывает exec. Полномочие даёт возможность
+# исполнить произвольную команду в этом поде — то есть оно шире, чем
+# точечное чтение секрета (rbac-keycloak-admin-secret.yaml,
+# rbac-messenger-db-secret.yaml), и было выдано явным подтверждением
+# пользователя, а не по умолчанию.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: load-testing-exec-messenger-db
+  namespace: messenger
+rules:
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    resourceNames: ["messenger-db-1"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: load-testing-workflow-exec-messenger-db
+  namespace: messenger
+subjects:
+  - kind: ServiceAccount
+    name: load-testing-workflow
+    namespace: load-testing
+roleRef:
+  kind: Role
+  name: load-testing-exec-messenger-db
+  apiGroup: rbac.authorization.k8s.io

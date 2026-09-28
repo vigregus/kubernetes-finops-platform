@@ -1,0 +1,38 @@
+# docs/messenger/15-load-testing-platform.md, раздел 15 — playwright-smoke
+# запускается внутри кластера и должен попасть на app.finops.local/
+# idp.finops.local теми же именами, какими туда ходит настоящий браузер
+# (тот же принцип, что уже соблюдён в scripts/web-e2e-fixture.sh: "ни
+# одного tunnel, ни одного .svc.cluster.local"). Публичные имена
+# резолвятся снаружи кластера на IP Cilium Gateway (namespace edge,
+# hostNetwork — см. docs/local-setup.md); изнутри кластера этот адрес
+# получаем через `hostAliases` в Pod, а сам IP читаем из
+# `Gateway.status.addresses` вместо того, чтобы зашивать
+# minikube-специфичный адрес в манифест.
+#
+# Только чтение (`get`) одного named Gateway — не Secret и не
+# исполнение команд, статус адреса не относится к чувствительным
+# данным.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: load-testing-read-edge-gateway
+  namespace: edge
+rules:
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gateways"]
+    resourceNames: ["edge"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: load-testing-workflow-read-edge-gateway
+  namespace: edge
+subjects:
+  - kind: ServiceAccount
+    name: load-testing-workflow
+    namespace: load-testing
+roleRef:
+  kind: Role
+  name: load-testing-read-edge-gateway
+  apiGroup: rbac.authorization.k8s.io
