@@ -1003,7 +1003,12 @@ spec:
     # одного named Gateway — см. rbac-edge-gateway.yaml.
     - name: resolve-gateway-address
       container:
-        image: rancher/kubectl:v1.31.0
+        # alpine/k8s, не rancher/kubectl: тому, что ниже, нужен `sh`, а
+        # rancher/kubectl — минимальный образ без shell вовсе (в
+        # preflight-k6-operator это не всплывало, потому что там `command`
+        # без shell вызывает kubectl напрямую). Обнаружено живым прогоном:
+        # "failed to find name in PATH: exec: sh: executable file not found".
+        image: alpine/k8s:1.31.0
         command: ["sh", "-c"]
         args:
           - |
@@ -1074,7 +1079,9 @@ spec:
             - name: repo
               mountPath: /repo
         - name: kubectl-bin
-          image: rancher/kubectl:v1.31.0
+          # alpine/k8s, не rancher/kubectl — тому нужен shell, см. тот же
+          # разбор в resolve-gateway-address выше.
+          image: alpine/k8s:1.31.0
           command: ["sh", "-c"]
           args:
             - "cp \"$(command -v kubectl)\" /kubectl-bin/kubectl"
