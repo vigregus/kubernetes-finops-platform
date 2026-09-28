@@ -10,6 +10,20 @@ name: Контракты и миграции
 # которая иногда не выполняется, не может быть условием слияния. Пути
 # перечислены в push, где они ничего не ломают, — но и там от них толку
 # мало: на push сравнивать не с чем, кроме предыдущего коммита.
+#
+# Тяжёлые джобы (contracts/code/image/web/migrations) при этом пропускают
+# свои шаги через `if:` на самой джобе, а не через фильтр на триггере —
+# это другой механизм и он не наступает на грабли из абзаца выше:
+# workflow всё равно запускается на каждый PR, обязательная проверка
+# всегда получает вердикт (`success`, если джоба пропущена условием) —
+# просто не тратит время на docker build/npm ci/pytest, когда PR трогает
+# только load-testing платформу (gitops/04-messenger/load-testing/** и
+# её единственный план docs/messenger/15-load-testing-platform.md), от
+# которой ни один из этих джобов не зависит: ни contracts, ни code, ни
+# сборки образов не читают файлы из load-testing. Метрики дашбордов
+# (`check-dashboards.py`) при этом не пропускаются — см. джобу
+# `gitops-checks` ниже: она задевает как раз то, что могло бы сломаться
+# в gitops-манифестах, включая load-testing.
 on:
   pull_request:
   push:
@@ -19,7 +33,77 @@ permissions:
   contents: read
 
 jobs:
+  # Классифицирует diff PR/push ровно на то, что нужно остальным джобам:
+  # "app" — трогает что-то, от чего contracts/code/image/web/migrations
+  # реально зависят (apps/**, packages/**, db/**, scripts/** и так далее);
+  # "gitops" — трогает что угодно под gitops/**, отдельно от load-testing
+  # (нужно джобе gitops-checks). load-testing-платформа исключена из
+  # обеих категорий, если это единственное, что изменилось, — именно
+  # тогда тяжёлые джобы ниже пропускают свои шаги.
+  changes:
+    name: Что изменилось
+    runs-on: ubuntu-latest
+    outputs:
+      app: ${{ steps.classify.outputs.app }}
+      gitops: ${{ steps.classify.outputs.gitops }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: classify
+        run: |
+          BASE="${{ github.event.pull_request.base.sha || 'HEAD~1' }}"
+          FILES="$(git diff --name-only "$BASE"...HEAD || true)"
+          echo "изменённые файлы:"
+          echo "$FILES"
+
+          app=false
+          gitops=false
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$f" in
+              gitops/04-messenger/load-testing/*|docs/messenger/15-load-testing-platform.md)
+                ;;
+              gitops/*)
+                gitops=true
+                ;;
+              *)
+                app=true
+                ;;
+            esac
+          done <<< "$FILES"
+
+          # Пустой diff (например push с искусственной базой) — безопасный
+          # дефолт: считать изменением "app", чтобы не потерять проверку
+          # по недосмотру, а не молча пропустить всё.
+          [ -z "$FILES" ] && app=true
+
+          echo "app=$app" >> "$GITHUB_OUTPUT"
+          echo "gitops=$gitops" >> "$GITHUB_OUTPUT"
+
+  # Лёгкая, всегда быстрая проверка происхождения метрик в дашбордах и
+  # того, что каждый манифест gitops/**/manifests/**/*.yaml кем-то
+  # применяется. Раньше жила шагом внутри джобы `web` (см. историю) —
+  # вынесена в свою джобу, чтобы не тащить за собой npm ci/playwright
+  # install/docker build ради одного python-скрипта, и чтобы load-testing
+  # PR (у которого нет причин запускать web) её всё равно не терял.
+  gitops-checks:
+    name: "GitOps: дашборды и применённые манифесты"
+    needs: changes
+    if: needs.changes.outputs.app == 'true' || needs.changes.outputs.gitops == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install --quiet pyyaml
+      - name: Метрики панелей и применённые манифесты
+        run: python3 scripts/check-dashboards.py
+
   contracts:
+    needs: changes
+    if: needs.changes.outputs.app == 'true'
     name: CTR-001..003
     runs-on: ubuntu-latest
     steps:
@@ -57,6 +141,8 @@ jobs:
 
   code:
     name: Слои и модульные тесты
+    needs: changes
+    if: needs.changes.outputs.app == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -127,9 +213,14 @@ jobs:
 
   web:
     name: CTR-004 — клиент из контракта, сборка и образ
-    # Фильтра по путям у этого джоба нет — и здесь это записано ещё раз,
-    # потому что соблазн велик: он самый долгий. Проверка, которая иногда не
-    # выполняется, не может быть условием слияния (см. шапку файла).
+    # `if: needs.changes.outputs.app` — не фильтр на триггере (см. шапку
+    # файла, почему это не одно и то же): джоба пропускает шаги, но сам
+    # workflow запускается всегда, и обязательная проверка получает
+    # вердикт `success`, а не зависает в «ожидании». Джоба самая долгая —
+    # соблазн вернуть фильтр на триггер велик, но это именно тот случай,
+    # который шапка файла запрещает.
+    needs: changes
+    if: needs.changes.outputs.app == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -248,12 +339,6 @@ jobs:
       - name: Окружение, скрейпы и образы шести нагрузок
         run: python3 scripts/check-chart-env.py
 
-      - name: Метрики панелей и применённые манифесты
-        # Джоба `web`, а не `code`: проверке нужен `pyyaml`, и он
-        # установлен только здесь. В `code` намеренно живут проверки на
-        # одном `ast`/stdlib, и переезд сюда сломал бы это разделение.
-        run: python3 scripts/check-dashboards.py
-
       - name: Общий шаблон не изменил вывод пяти работающих
         # База — неподвижный SHA базовой ветки PR, а не `origin/main`: он
         # движется, и сравнение с ним краснело бы от чужого слияния и зеленело
@@ -299,6 +384,8 @@ jobs:
 
   migrations:
     name: Миграции применяются с нуля
+    needs: changes
+    if: needs.changes.outputs.app == 'true'
     runs-on: ubuntu-latest
     services:
       postgres:

@@ -527,7 +527,12 @@ spec:
                   - name: K6_PROMETHEUS_RW_SERVER_URL
                     value: "http://vmsingle-vm-local-victoria-metrics-k8s-stack.observability.svc.cluster.local:8428/api/v1/write"
                   - name: K6_PROMETHEUS_RW_TREND_STATS
-                    value: "p95,p99,min,max,avg"
+                    # Формат k6 — `p(95)`, не `p95`: короткая форма
+                    # ("unknown format") валила runner ещё до первой
+                    # итерации, TestRun не доходил до stage=started, а
+                    # k6-load крутился до собственного таймаута. Найдено
+                    # живым прогоном сразу после мержа #65.
+                    value: "p(95),p(99),min,max,avg"
                   - name: RUN_ID
                     value: "{{workflow.parameters.run_id}}"
                   - name: USERS
