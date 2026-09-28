@@ -42,13 +42,6 @@ FORBIDDEN = {
     # забытый. Перевод поэтому двусторонний: из списка запретов имя ушло, в список
     # обязательных — пришло.
     "features/messages/components/MessageTimeline.tsx": "вне объёма G3-005 (B15)",
-    # Строка добавлена этим гейтом, и это **изменение списка**, а не сохранение.
-    # До неё `MessageBubble` был недостижим лишь транзитивно — через запрещённый
-    # `MessageTimeline.tsx:6`, — а прямое подключение не ловил никто: измерено
-    # подстановкой импорта в `ChatPage.tsx` (граф 75 модулей, чек зелёный).
-    # Решение «весь штатный messaging UI остаётся запасом» должно быть закреплено
-    # статически, а не следовать из одного лишь чужого импорта (B13, вариант A).
-    "features/messages/components/MessageBubble.tsx": "вне объёма G3-005/G3-006 (B13)",
     "features/messages/components/ConnectionStateBanner.tsx": "вне объёма G3-005 (B15)",
     "features/messages/components/TypingIndicator.tsx": "вне объёма G3-005 (B15)",
     "features/messages/components/SyncIndicator.tsx": "вне объёма G3-005 (B15)",
@@ -81,6 +74,19 @@ REQUIRED = (
     # «подключён, но отвалился» выглядят одинаково.
     "features/messages/components/MessageComposer.tsx",
     "features/realtime/components/ConnectionStatusLine.tsx",
+    # `G3-007-1` переводит `MessageBubble` из проектного запаса (был здесь под
+    # `B13`: «лента обязана остаться без оформления») в обязательный
+    # production-path. Отменяется только это ограничение B13, не сама
+    # наблюдаемость: `MessageList` по-прежнему единолично владеет порядком и
+    # DOM-маркерами приёмки (`data-message-id`, `data-message-seq`,
+    # `data-message-state`, `data-applied-through-seq`,
+    # `data-pending-client-id`) и наблюдением полной видимости строк для
+    # квитанций (D13) — `MessageBubble` их не трогает, только рисует
+    # содержимое существующего узла. Строка в `REQUIRED`, а не просто снята из
+    # `FORBIDDEN` (см. прецедент `MessageComposer` выше): без неё «оформлен, но
+    # отвалился импорт» и «оформление никогда и не подключали» выглядели бы в
+    # этом чеке одинаково зелёными.
+    "features/messages/components/MessageBubble.tsx",
 )
 
 
