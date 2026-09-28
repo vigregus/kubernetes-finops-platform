@@ -1,7 +1,7 @@
 apiVersion: grafana.integreatly.org/v1beta1
 kind: GrafanaDashboard
 metadata:
-  name: messenger-edge-api
+  name: messenger-api-red
   namespace: observability
 spec:
   instanceSelector:
@@ -9,9 +9,9 @@ spec:
       dashboards: "grafana-local"
   json: |
     {
-      "uid": "messenger-edge-api",
-      "title": "03 · Edge / API — RED",
-      "description": "docs/messenger/06-observability.md, часть 3.C: RED (Rate/Errors/Duration) для HTTP слоя API. Отвечает 'что происходит с HTTP', не 'где тормозит сообщение' — за этим на 02 · Message Journey.",
+      "uid": "messenger-api-red",
+      "title": "03 · API — RED",
+      "description": "docs/messenger/06-observability.md, часть 3.C: RED (Rate/Errors/Duration) для FastAPI-приложения (http_requests_total/http_request_duration_seconds). Только application layer — назывался '03 · Edge / API', хотя Edge (Envoy/Cilium) здесь никогда не было ни одной панелью; переименован в '03 · API — RED', чтобы название не обещало то, чего нет. Gateway-слой остаётся в hubble-l7-http.yaml как отдельный vendor-дашборд, не встроенный сюда.",
       "tags": ["messenger", "red", "api"],
       "schemaVersion": 39,
       "version": 1,

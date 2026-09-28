@@ -38,6 +38,22 @@ spec:
   redisConfig:
     additionalRedisConfig: messenger-redis-config
 
+  # До этого Redis не наблюдался вообще: ни memory/evictions/ops/clients,
+  # ни keyspace hit-rate — только слово "Redis" в карте дашбордов. Оператор
+  # заводит sidecar с oliver006/redis_exporter сам, порт 9121 — снимает его
+  # gitops/04-messenger/messenger-redis/manifests/pod-scrape.yaml.
+  redisExporter:
+    enabled: true
+    image: oliver006/redis_exporter:v1.62.0
+    imagePullPolicy: IfNotPresent
+    resources:
+      requests:
+        cpu: 25m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 64Mi
+
   storage:
     volumeClaimTemplate:
       spec:

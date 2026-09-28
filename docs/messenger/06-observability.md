@@ -1035,9 +1035,9 @@ dashboard structure).
              ┌──────────────────────┼──────────────────────┐
              ▼                      ▼                      ▼
  ┌────────────────────┐   ┌──────────────────┐   ┌────────────────────┐
- │ 02 · Message       │   │ 03 · Edge / API  │   │ 04 · Realtime      │
- │ Journey            │   │ RED              │   │ Centrifugo         │
- │ "Где тормозит?"    │   │ "HTTP где плох?" │   │ "WS где плох?"     │
+ │ 02 · Message       │   │ 03 · API — RED   │   │ 04 · Realtime      │
+ │ Journey            │   │ (application     │   │ Centrifugo         │
+ │ "Где тормозит?"    │   │  layer only)     │   │ "WS где плох?"     │
  └─────────┬──────────┘   └────────┬──────────┘   └──────────┬─────────┘
            │                       │                          │
            └───────────────────────┼──────────────────────────┘
@@ -1057,10 +1057,11 @@ dashboard structure).
 | --- | --- | --- | --- |
 | 01 | SLO Overview | пользователи сейчас получают сервис? | реализован, живо проверен |
 | 02 | Message Journey (Pipeline) | где именно тормозит путь сообщения? | реализован, живо проверен |
-| 03 | Edge / API — RED | что происходит с HTTP (Rate/Errors/Duration)? | реализован, живо проверен (0 нарушений check-dashboards.py); сравнение Gateway vs API latency отложено — Envoy/Hubble L7 метрики не внесены в EXTERNAL_METRICS |
-| 04 | Realtime — Centrifugo | что происходит с WebSocket/доставкой, по подам? | реализован, живо проверен; browser canary метрики (§16 load-testing) сюда ещё не пушатся |
-| 05 | Capacity — USE | какой ресурс приближается к пределу? | реализован в объёме того, что снимается: DB pool, Kafka lag, outbox backlog, Centrifugo per-pod, dependency up. CPU/RAM/disk по подам не построены — см. текстовую панель самого дашборда |
+| 03 | API — RED | что происходит с HTTP-слоем FastAPI (Rate/Errors/Duration)? | реализован, живо проверен (0 нарушений check-dashboards.py). Назывался "Edge / API" — переименован: Edge (Envoy/Cilium) здесь нет ни одной панели, только application layer. Сравнение Gateway vs API latency отложено — Hubble L7 HTTP метрики не внесены в EXTERNAL_METRICS |
+| 04 | Realtime — Centrifugo | что происходит с WebSocket/доставкой, по подам? | реализован, живо проверен. Realtime fan-out считается через `centrifugo_transport_messages_sent{frame_type="push_publication"}` (реальные push-фреймы клиенту) — первая версия делила `messenger_realtime_delivery_total` (одна публикация в канал, не по подписчикам) и была семантически неверна; browser canary метрики (§16 load-testing) сюда ещё не пушатся |
+| 05 | Capacity — USE | какой ресурс приближается к пределу? | реализован: CPU/RAM по контейнеру (через repo-local recording rule `container-resource-usage.yaml`), DB pool, Redis (memory/evictions/ops/clients/hit ratio/command latency — впервые наблюдается вообще, добавлен `redisExporter` в Redis CRD), Kafka (consumer lag + under-replicated partitions), outbox backlog, Centrifugo per-pod, dependency up. PgBouncer/postgres-exporter-уровня метрики и Kafka broker-level CPU/disk — не построены, см. текстовую панель самого дашборда |
 | 06+ | Component drill-down | почему конкретный компонент так себя ведёт? | уже есть как отдельные vendor-дашборды каталога (`postgres`, `cnpg-pgbouncer`, `kafka`, `cilium-agent`, `hubble-*`, `k8s-views-*`) — не перестраивались, остаются forensic-дашбордами, а не частью основной пятёрки |
+| — | Auth · Push · Attachments · Reconnect · Synthetic | вспомогательные критические пути с уже объявленными SLO (часть 1 этого документа: вход, переподключение, вложение, push, синтетика A→B) | не реализован. В прежней таблице существовал как "05 Auth · Push · Attachments"; при переходе на карту RED/USE (PR #73) этот дашборд по ошибке выпал из таблицы, а не был перенесён под другим номером — восстановлен здесь номером `—`, чтобы объявленные SLO не остались без дашборда даже на бумаге |
 | — | Release | что изменилось после выкатки | не реализован |
 
 Компонентные дашборды (`postgres.yaml`, `kafka.yaml`, `cnpg-pgbouncer.yaml`,

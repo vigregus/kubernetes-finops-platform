@@ -96,11 +96,11 @@ spec:
           "id": 7,
           "type": "stat",
           "title": "Realtime fan-out",
-          "description": "client deliveries / user messages accepted. Приближение: messenger_realtime_delivery_total считает попытки публикации в Centrifugo, не подтверждённые приёмы браузером (той телеметрии ещё нет, G3). Объясняет, почему одинаковый msg/s может по-разному грузить realtime CPU.",
+          "description": "client deliveries / user messages accepted. Числитель — centrifugo_transport_messages_sent{frame_type=\"push_publication\"}: реальные push-фреймы, отправленные КАЖДОМУ подключённому клиенту, а не число publish-вызовов. Прежняя версия панели делила messenger_realtime_delivery_total (одна публикация в канал = одно приращение независимо от числа подписчиков) на accepted — это давало ≈1 всегда и никогда не показывало настоящий fan-out группового чата. Найдено ревью PR #73, исправлено здесь.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "short" } },
           "gridPos": { "h": 5, "w": 4, "x": 20, "y": 1 },
-          "targets": [ { "expr": "sum(rate(messenger_realtime_delivery_total{namespace=~\"$namespace\",outcome=\"delivered\"}[5m])) / clamp_min(sum(rate(messenger_message_send_operations_total{namespace=~\"$namespace\",result=\"success\"}[5m])), 0.001)" } ]
+          "targets": [ { "expr": "sum(rate(centrifugo_transport_messages_sent{namespace=~\"$namespace\",frame_type=\"push_publication\"}[5m])) / clamp_min(sum(rate(messenger_message_send_operations_total{namespace=~\"$namespace\",result=\"success\"}[5m])), 0.001)" } ]
         },
         {
           "id": 8,

@@ -1,0 +1,28 @@
+# До этого коммита Redis не наблюдался вообще: ни memory/evictions/ops,
+# ни connected/blocked clients, ни keyspace hit-rate, ни command latency —
+# редактор карты дашбордов (docs/messenger/06-observability.md) писал
+# "Redis" в схеме, но живого источника метрик под этим словом не было.
+#
+# Скребём под, а не Service: у существующих Service messenger-redis/
+# messenger-redis-headless нет порта 9121 (оператор не добавляет свой
+# sidecar-порт в Service автоматически), и заводить отдельный Service
+# ради одного порта — лишняя сущность, когда прямой под-скрейп решает
+# то же самое (тот же паттерн, что cnpg-operator/manifests/pod-scrape.yaml).
+#
+# Порт "redis-exporter" — как оператор redis.redis.opstreelabs.in
+# называет контейнер и порт sidecar'а при redisExporter.enabled=true;
+# проверено на живом поде: `kubectl get pod messenger-redis-0 -o
+# jsonpath='{.spec.containers[*].ports}'` отдаёт redis-exporter=9121.
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMPodScrape
+metadata:
+  name: messenger-redis
+  namespace: messenger
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: messenger-redis
+  podMetricsEndpoints:
+    - port: redis-exporter
+      path: /metrics
+      interval: 30s
