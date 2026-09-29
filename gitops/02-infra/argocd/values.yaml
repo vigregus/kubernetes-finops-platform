@@ -1,0 +1,30 @@
+# ArgoCD не GitOps-managed этим репозиторием: установлен вручную через
+# `helm install argocd argo/argo-cd -n argocd` (chart argo-cd-10.4.0,
+# без values — helm get values argocd показывает "null"). Это классическая
+# курица-и-яйцо: сам себя через собственный Application он развернуть не
+# может, поэтому его bootstrap живёт вне gitops/ — см. Makefile, цель
+# bootstrap (хотя её текущая реализация ставит через голый install.yaml,
+# а не Helm — расхождение с тем, что реально стоит в кластере; не
+# исправлялось здесь намеренно, отдельная задача).
+#
+# Этот файл НЕ применяется автоматически ничем. Он существует, чтобы
+# `server.insecure` не потерялся при следующем `helm upgrade` — до этого
+# коммита флаг был выставлен только live-патчем ConfigMap
+# argocd-cmd-params-cm, а Helm при upgrade перезаписывает весь рендер
+# чарта (в отличие от аддитивного kubectl apply), то есть живой патч
+# пережил бы что угодно кроме именно helm upgrade — ровно того случая,
+# для которого этот файл и нужен.
+#
+# Зачем сам флаг: argocd-server без --insecure сам держит TLS на 8080
+# (Service-порты http:80 и https:443 оба ведут туда) и редиректит
+# обычный HTTP на https, не читая X-Forwarded-Proto без этого флага —
+# проверено живьём (307 что с заголовком, что без). Cilium Gateway
+# (gitops/02-infra/platform-access/manifests/httproute-argocd.yaml)
+# сам терминирует TLS и форвардит backend'ам обычным HTTP — без
+# --insecure это бесконечный редирект.
+#
+# Применить при следующем upgrade:
+#   helm upgrade argocd argo/argo-cd -n argocd -f gitops/02-infra/argocd/values.yaml
+configs:
+  params:
+    server.insecure: "true"
