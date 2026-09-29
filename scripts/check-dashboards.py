@@ -225,6 +225,39 @@ EXTERNAL_METRICS: dict[str, str] = {
     "load_run_max_kafka_lag": (
         "gitops/04-messenger/load-testing/manifests/workflow-template.yaml"
     ),
+    # cilium-envoy — сам Envoy, встроенный в Cilium Gateway, не приложение
+    # из apps/**. Снимается с admin-порта 9964, см. envoy-scrape.yaml
+    # (08 · Gateway — Envoy).
+    "envoy_http_downstream_rq_xx": (
+        "gitops/02-infra/cilium-observability/manifests/envoy-scrape.yaml"
+    ),
+    "envoy_http_downstream_rq_time": (
+        "gitops/02-infra/cilium-observability/manifests/envoy-scrape.yaml"
+    ),
+    "envoy_http_downstream_cx_active": (
+        "gitops/02-infra/cilium-observability/manifests/envoy-scrape.yaml"
+    ),
+    "envoy_cluster_upstream_cx_active": (
+        "gitops/02-infra/cilium-observability/manifests/envoy-scrape.yaml"
+    ),
+    "envoy_cluster_upstream_cx_connect_fail": (
+        "gitops/02-infra/cilium-observability/manifests/envoy-scrape.yaml"
+    ),
+    "envoy_cluster_upstream_cx_connect_timeout": (
+        "gitops/02-infra/cilium-observability/manifests/envoy-scrape.yaml"
+    ),
+    "envoy_cluster_upstream_rq_rx_reset": (
+        "gitops/02-infra/cilium-observability/manifests/envoy-scrape.yaml"
+    ),
+    "envoy_cluster_upstream_rq_tx_reset": (
+        "gitops/02-infra/cilium-observability/manifests/envoy-scrape.yaml"
+    ),
+    "envoy_cluster_upstream_rq_xx": (
+        "gitops/02-infra/cilium-observability/manifests/envoy-scrape.yaml"
+    ),
+    "envoy_cluster_upstream_rq_time": (
+        "gitops/02-infra/cilium-observability/manifests/envoy-scrape.yaml"
+    ),
 }
 
 # Ключевые слова PromQL, которые не сопровождаются скобкой и потому не
