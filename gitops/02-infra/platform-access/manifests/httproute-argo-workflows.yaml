@@ -1,0 +1,30 @@
+# argo-workflows-server уже запущен с --secure=false (см. деплоймент в
+# namespace argo) — обычный HTTP backend, без сюрпризов с редиректами,
+# в отличие от argocd-server рядом.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: argo-workflows
+  namespace: argo
+  labels:
+    app.kubernetes.io/name: argo-workflows-server
+spec:
+  hostnames:
+    - workflows.finops.local
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: edge
+      namespace: edge
+      sectionName: https
+  rules:
+    - backendRefs:
+        - group: ""
+          kind: Service
+          name: argo-workflows-server
+          port: 2746
+          weight: 1
+      matches:
+        - path:
+            type: PathPrefix
+            value: /

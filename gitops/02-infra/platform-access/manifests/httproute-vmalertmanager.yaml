@@ -1,0 +1,31 @@
+# vmalertmanager-vm-local-victoria-metrics-k8s-stack — headless Service
+# (ClusterIP: None), у StatefulSet-а одна реплика. Cilium Gateway резолвит
+# backendRef через EndpointSlice, а не ClusterIP, поэтому headless тут не
+# проблема — то же самое устройство, что у любого обычного backendRef.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: vmalertmanager
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: vmalertmanager
+spec:
+  hostnames:
+    - alertmanager.finops.local
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: edge
+      namespace: edge
+      sectionName: https
+  rules:
+    - backendRefs:
+        - group: ""
+          kind: Service
+          name: vmalertmanager-vm-local-victoria-metrics-k8s-stack
+          port: 9093
+          weight: 1
+      matches:
+        - path:
+            type: PathPrefix
+            value: /
