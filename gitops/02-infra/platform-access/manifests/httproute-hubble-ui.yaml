@@ -1,0 +1,32 @@
+# Найдено аудитом всех ArgoCD Applications на предмет непроброшенных
+# веб-UI (см. docs/messenger/06-observability.md). hubble-ui — родная
+# панель Cilium/Hubble для наблюдения за сетевым трафиком между подами,
+# была задеплоена (Application cilium-observability), но без единого
+# внешнего роута.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: hubble-ui
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: hubble-ui
+spec:
+  hostnames:
+    - hubble.finops.local
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: edge
+      namespace: edge
+      sectionName: https
+  rules:
+    - backendRefs:
+        - group: ""
+          kind: Service
+          name: hubble-ui
+          port: 80
+          weight: 1
+      matches:
+        - path:
+            type: PathPrefix
+            value: /

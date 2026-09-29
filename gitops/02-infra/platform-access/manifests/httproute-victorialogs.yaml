@@ -1,0 +1,31 @@
+# Найдено аудитом всех ArgoCD Applications (см. docs/messenger/06-observability.md).
+# У VictoriaLogs есть собственный встроенный UI для LogsQL-запросов
+# (тот же принцип, что vmui у VictoriaMetrics) — сервис был задеплоен
+# (Application victoria-logs), но без внешнего роута.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: victorialogs
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: victoria-logs
+spec:
+  hostnames:
+    - logs.finops.local
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: edge
+      namespace: edge
+      sectionName: https
+  rules:
+    - backendRefs:
+        - group: ""
+          kind: Service
+          name: vl-local-victoria-logs-single-server
+          port: 9428
+          weight: 1
+      matches:
+        - path:
+            type: PathPrefix
+            value: /
