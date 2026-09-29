@@ -11,7 +11,7 @@ spec:
     {
       "uid": "messenger-api-red",
       "title": "03 · API — RED",
-      "description": "docs/messenger/06-observability.md, часть 3.C: RED (Rate/Errors/Duration) для FastAPI-приложения (http_requests_total/http_request_duration_seconds). Application layer only — Gateway (Cilium Envoy) остаётся отдельным следующим deliverable, не покрыт hubble-l7-http.yaml (тот про L7 flow visibility, не про Envoy operational-метрики). Все запросы исключают route=/metrics,/livez,/readyz.",
+      "description": "docs/messenger/06-observability.md, часть 3.C: RED (Rate/Errors/Duration) для FastAPI-приложения (http_requests_total/http_request_duration_seconds). Application layer only — сам Gateway (Cilium Envoy), между клиентом и этим приложением, теперь на отдельном 08 · Gateway — Envoy (envoy_* метрики, не hubble-l7-http.yaml — тот про L7 flow visibility, не про Envoy operational-метрики). Все запросы исключают route=/metrics,/livez,/readyz.",
       "tags": ["messenger", "red", "api"],
       "schemaVersion": 39,
       "version": 3,
@@ -21,7 +21,8 @@ spec:
         { "title": "01 · SLO Overview", "type": "link", "url": "/d/messenger-slo-overview", "icon": "dashboard" },
         { "title": "02 · Message Journey", "type": "link", "url": "/d/messenger-messaging-pipeline", "icon": "dashboard" },
         { "title": "04 · Realtime — Centrifugo", "type": "link", "url": "/d/messenger-realtime", "icon": "dashboard" },
-        { "title": "05 · Capacity — USE", "type": "link", "url": "/d/messenger-capacity", "icon": "dashboard" }
+        { "title": "05 · Capacity — USE", "type": "link", "url": "/d/messenger-capacity", "icon": "dashboard" },
+        { "title": "08 · Gateway — Envoy", "type": "link", "url": "/d/messenger-gateway-envoy", "icon": "dashboard" }
       ],
       "templating": {
         "list": [

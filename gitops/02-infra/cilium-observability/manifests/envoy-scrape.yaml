@@ -1,0 +1,31 @@
+# cilium-envoy - отдельный DaemonSet от cilium-agent (тот же паттерн, что
+# у hubble-metrics: pod-level scrape, не Service, потому что счётчики
+# per-node и Service-скрейп схлопнул бы identity ноды). Это Envoy,
+# который реально терминирует TLS и проксирует внешний *.finops.local
+# трафик через Cilium Gateway (edge/edge) - без этого scrape не было
+# ни одной envoy_* метрики о самом шлюзе: 03 · API - RED видит только
+# FastAPI application layer, ничего между клиентом и приложением.
+#
+# Порт назван envoy-metrics (9964) - это admin/stats endpoint Envoy,
+# не хостовый Prometheus-порт агента cilium (9962, agent-scrape.yaml)
+# и не hubble-metrics (9965, pod-scrape.yaml).
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMPodScrape
+metadata:
+  name: cilium-envoy
+  namespace: kube-system
+  labels:
+    finops.internal/product: platform
+    finops.internal/team: platform-engineering
+    finops.internal/environment: prod
+    finops.internal/component: cni
+    finops.internal/cost-center: platform-infra
+    finops.internal/owner: platform-team
+spec:
+  selector:
+    matchLabels:
+      k8s-app: cilium-envoy
+  podMetricsEndpoints:
+    - port: envoy-metrics
+      path: /metrics
+      interval: 15s

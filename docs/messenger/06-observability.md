@@ -1049,18 +1049,29 @@ dashboard structure).
                                     │
          ┌──────────────┬───────────┼───────────┬─────────────┐
          ▼              ▼           ▼           ▼             ▼
-     PostgreSQL       Kafka       Redis       Cilium/       Kubernetes
-     PgBouncer                                Envoy/Hubble   workloads
+     PostgreSQL       Kafka       Redis    08 · Gateway   Kubernetes
+     PgBouncer                             Envoy          workloads
+                                            "между
+                                            клиентом и
+                                            приложением?"
 ```
+
+06 · Load Run и 07 · Load Compare в эту иерархию не входят — не вопрос о
+состоянии прод-стенда, а разбор конкретного запуска нагрузочного теста
+(§17-18 load-testing), открывается из Argo Workflows после прогона, а не
+через "проблема есть? → где?".
 
 | № | Дашборд | На какой вопрос отвечает | Состояние |
 | --- | --- | --- | --- |
 | 01 | SLO Overview | пользователи сейчас получают сервис? | реализован, живо проверен. Приведён к визуальному стандарту пакета (отдельный PR после #73): sparkline на верхней строке, bar gauge для WebSocket-соединений по подам, probe-трафик исключён из HTTP-панелей |
 | 02 | Message Journey | где именно тормозит путь сообщения? | реализован, живо проверен. Заголовок "Messaging Pipeline" → "Message Journey" (uid не менялся); добавлен pipeline bar gauge — p99 всех стадий одним взглядом; разделены панели со смешанными единицами (outbox pending vs oldest age) |
-| 03 | API — RED | что происходит с HTTP-слоем FastAPI (Rate/Errors/Duration)? | реализован, живо проверен (0 нарушений check-dashboards.py). Назывался "Edge / API" — переименован: Edge (Envoy/Cilium) здесь нет ни одной панели, только application layer. Сравнение Gateway vs API latency отложено — Hubble L7 HTTP метрики не внесены в EXTERNAL_METRICS |
+| 03 | API — RED | что происходит с HTTP-слоем FastAPI (Rate/Errors/Duration)? | реализован, живо проверен (0 нарушений check-dashboards.py). Назывался "Edge / API" — переименован: Edge (Envoy/Cilium) здесь нет ни одной панели, только application layer — сам Gateway теперь на 08 |
 | 04 | Realtime — Centrifugo | что происходит с WebSocket/доставкой, по подам? | реализован, живо проверен. Realtime fan-out считается через `centrifugo_transport_messages_sent{frame_type="push_publication"}` (реальные push-фреймы клиенту) — первая версия делила `messenger_realtime_delivery_total` (одна публикация в канал, не по подписчикам) и была семантически неверна; browser canary метрики (§16 load-testing) сюда ещё не пушатся |
 | 05 | Capacity — USE | какой ресурс приближается к пределу? | реализован: CPU/RAM по контейнеру (через repo-local recording rule `container-resource-usage.yaml`), DB pool, Redis (memory/evictions/ops/clients/hit ratio/command latency — впервые наблюдается вообще, добавлен `redisExporter` в Redis CRD), Kafka (consumer lag + under-replicated partitions), outbox backlog, Centrifugo per-pod, dependency up. PgBouncer/postgres-exporter-уровня метрики и Kafka broker-level CPU/disk — не построены, см. текстовую панель самого дашборда |
-| 06+ | Component drill-down | почему конкретный компонент так себя ведёт? | уже есть как отдельные vendor-дашборды каталога (`postgres`, `cnpg-pgbouncer`, `kafka`, `cilium-agent`, `hubble-*`, `k8s-views-*`) — не перестраивались, остаются forensic-дашбордами, а не частью основной пятёрки |
+| 06 | Load Run | как прошёл конкретный запуск нагрузочного теста? | реализован. Renumbered из более раннего "03 · Load Run" — коллизия номера с API RED, не новая работа (§17-18 load-testing) |
+| 07 | Load Compare | чем текущий load-run отличается от baseline? | реализован. Renumbered из "04 · Load Compare" вместе с 06, тот же коммит |
+| 08 | Gateway — Envoy | что происходит на самом Cilium Gateway (Envoy), между клиентом и приложением? | реализован, живо проверен. Источник — cilium-envoy:9964 (`envoy-scrape.yaml`, до этого PR ни одной envoy_\* метрики о самом шлюзе не снималось). RPS/Errors/Duration по слушателю, connections/resets/connect-failures по backend-у, Gateway p99 vs API p99 для messenger API конкретно (не общий Gateway p99 — тот мешает все backend-ы в одну цифру). По Host-заголовку разреза нет — Envoy не отдаёт per-vhost stats в этой конфигурации, `by backend` = по Envoy cluster (namespace_service_port), 1:1 с HTTPRoute в этом кластере |
+| 09+ | Component drill-down | почему конкретный компонент так себя ведёт? | уже есть как отдельные vendor-дашборды каталога (`postgres`, `cnpg-pgbouncer`, `kafka`, `cilium-agent`, `hubble-*`, `k8s-views-*`) — не перестраивались, остаются forensic-дашбордами, а не частью основной пятёрки |
 | — | Auth · Push · Attachments · Reconnect · Synthetic | вспомогательные критические пути с уже объявленными SLO (часть 1 этого документа: вход, переподключение, вложение, push, синтетика A→B) | не реализован. В прежней таблице существовал как "05 Auth · Push · Attachments"; при переходе на карту RED/USE (PR #73) этот дашборд по ошибке выпал из таблицы, а не был перенесён под другим номером — восстановлен здесь номером `—`, чтобы объявленные SLO не остались без дашборда даже на бумаге |
 | — | Release | что изменилось после выкатки | не реализован |
 
