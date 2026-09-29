@@ -83,6 +83,7 @@ async def send_message(
     # запись метрики здесь только шумела бы кардинальностью результата,
     # который не про приём сообщения, а про его законность.
     started = time.perf_counter()
+    created_message: Message | None = None
     with tracing.span("postgres.transaction"):
         try:
             async with conn.transaction():
@@ -197,15 +198,21 @@ async def send_message(
                             **origin,
                         },
                     )
-                # Метрика пишется до выхода из `async with conn.transaction()`,
-                # то есть до фактического COMMIT на проводе: буферизованные
-                # asyncpg-запросы этого блока летят одним пакетом на выходе
-                # из контекста, и ждать этого момента отдельно значило бы
-                # либо повторно оборачивать то же самое, либо дать функции
-                # незаметно вернуть результат до того, как её единственная
-                # метрика записана.
-                metrics.message_commit(time.perf_counter() - started, result="success")
-                return SendMessageResult(message=message, created=True)
+                # `created_message` присваивается и используется только после
+                # выхода из `async with`: асинхронный контекстный менеджер
+                # `conn.transaction()` шлёт COMMIT на проводе ровно в момент
+                # своего `__aexit__`, поэтому пока мы внутри блока, транзакция
+                # ещё не зафиксирована - записывать `result="success"` здесь
+                # значило бы засчитывать успех до того, как он случился.
+                created_message = message
+
+            # Сюда попадают только через штатный выход из `async with` без
+            # исключения - то есть COMMIT уже отправлен и подтверждён.
+            # Ранние `return` внутри блока (NOT_A_MEMBER, дубликат по
+            # client_message_id) сюда не доходят и метрику не пишут - так же,
+            # как и раньше: SLI «Запись сообщения» их не касается.
+            metrics.message_commit(time.perf_counter() - started, result="success")
+            return SendMessageResult(message=created_message, created=True)
         except Exception as exc:
             # Исключение здесь — это отказ базы, а не отклонённый домен:
             # доменные исходы (NOT_A_MEMBER, ValueError выше по стеку)

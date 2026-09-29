@@ -30,6 +30,7 @@ class Transaction:
     def __init__(self) -> None:
         self.entered = False
         self.exited_with: type[BaseException] | None = None
+        self.exited = False
 
     async def __aenter__(self):
         self.entered = True
@@ -37,11 +38,28 @@ class Transaction:
 
     async def __aexit__(self, exc_type, exc, traceback):
         self.exited_with = exc_type
+        self.exited = True
+
+
+class CommitFailsTransaction(Transaction):
+    """Тело блока успешно, но сам COMMIT на выходе из __aexit__ падает.
+
+    Так asyncpg ведёт себя, если запросы блока были только буферизованы
+    и реальный COMMIT на проводе отклонён сервером уже после того, как
+    тело успешно вернуло управление — именно тот сценарий, для которого
+    `messages.py` больше не пишет `result="success"` внутри блока.
+    """
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        self.exited = True
+        if exc_type is None:
+            raise RuntimeError("commit failed")
+        self.exited_with = exc_type
 
 
 class Connection:
-    def __init__(self) -> None:
-        self.tx = Transaction()
+    def __init__(self, tx: Transaction | None = None) -> None:
+        self.tx = tx if tx is not None else Transaction()
 
     def transaction(self) -> Transaction:
         return self.tx
@@ -213,3 +231,76 @@ def test_ошибка_второго_outbox_выходит_через_грани
     with pytest.raises(RuntimeError, match="outbox недоступен"):
         _send(conn)
     assert conn.tx.exited_with is RuntimeError
+
+
+def _happy_path_mocks(monkeypatch, expected: Message):
+    async def _lock(*args, **kwargs):
+        return ConversationSeq(6)
+
+    async def _missing(*args, **kwargs):
+        return None
+
+    async def _sequence(*args, **kwargs):
+        return ConversationSeq(7)
+
+    async def _insert(*args, **kwargs):
+        return expected
+
+    async def _members(*args, **kwargs):
+        return [_member(SENDER), _member(RECIPIENT)]
+
+    async def _event(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(service.messages, "lock_active_conversation", _lock)
+    monkeypatch.setattr(service.messages, "fetch_by_client_id", _missing)
+    monkeypatch.setattr(service.messages, "allocate_sequence", _sequence)
+    monkeypatch.setattr(service.messages, "insert_message", _insert)
+    monkeypatch.setattr(service.conversations, "list_active_members", _members)
+    monkeypatch.setattr(service.outbox, "insert_event", _event)
+
+
+def test_success_метрика_пишется_только_после_реального_commit(monkeypatch):
+    # Регрессия ровно на исправленный баг: раньше metrics.message_commit(
+    # result="success") вызывался ВНУТРИ `async with conn.transaction()`,
+    # то есть до того, как __aexit__ (реальный COMMIT) успел отработать.
+    # Если этот порядок снова сломают - переносом метрики на пару строк
+    # вверх, - тест это ловит: на момент вызова message_commit транзакция
+    # уже обязана быть закрыта (conn.tx.exited is True).
+    expected = _message()
+    _happy_path_mocks(monkeypatch, expected)
+
+    calls: list[tuple[float, str, bool]] = []
+    conn = Connection()
+
+    def _spy(duration_seconds, *, result):
+        calls.append((duration_seconds, result, conn.tx.exited))
+
+    monkeypatch.setattr(service.metrics, "message_commit", _spy)
+
+    result = _send(conn)
+    assert result.ok and result.created
+    assert calls == [(calls[0][0], "success", True)]
+
+
+def test_commit_не_прошедший_в_aexit_не_считается_success(monkeypatch):
+    # Тело транзакции целиком успешно (все repo-вызовы отработали без
+    # исключений), но сам COMMIT на выходе из `async with` отклонён -
+    # asyncpg именно так себя ведёт, если запросы блока были только
+    # буферизованы и реальный COMMIT на проводе не прошёл. До фикса
+    # metrics.message_commit(result="success") уже был бы записан к
+    # этому моменту (вызывался внутри блока, до __aexit__) - баг,
+    # который и исправляет вынос метрики за пределы `async with`.
+    expected = _message()
+    _happy_path_mocks(monkeypatch, expected)
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        service.metrics, "message_commit", lambda _d, *, result: calls.append(result)
+    )
+
+    conn = Connection(tx=CommitFailsTransaction())
+    with pytest.raises(RuntimeError, match="commit failed"):
+        _send(conn)
+
+    assert calls == ["failed"]

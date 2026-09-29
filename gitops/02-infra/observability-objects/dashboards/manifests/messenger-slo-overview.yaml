@@ -46,12 +46,12 @@ spec:
           "id": 2,
           "type": "stat",
           "title": "Send SLO (30d)",
-          "description": "SLO «Запись сообщения»: коммит состоялся, NOT_A_MEMBER исключён из счёта. Числитель/знаменатель — messenger_message_send_operations_total.",
+          "description": "SLI «Запись сообщения» из docs/messenger/06-observability.md: годным считается коммит, который И состоялся, И уложился в ≤1с — не просто отношение success/failed. NOT_A_MEMBER исключён из счёта (не является измеряемой попыткой). le=\"1.0\", не \"1\" - именно так prometheus_client экспортирует boundary у дефолтного бакета (проверено живьём по http_request_duration_seconds_bucket). Знаменатель ограничен result=~\"success|failed\", чтобы не подмешивать долитый в 30-дневное окно исторический unlabeled ряд той же гистограммы (до этого PR у неё не было метки result). При отсутствии трафика за 30д - N/A; при ненулевом трафике без единого успеха - честный 0% через `or vector(0)`, а не ложный N/A от пустого числителя.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "options": { "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
           "fieldConfig": {
             "defaults": {
-              "unit": "percentunit", "min": 0.995, "max": 1,
+              "unit": "percentunit", "min": 0.995, "max": 1, "noValue": "N/A",
               "thresholds": { "mode": "absolute", "steps": [
                 { "color": "red", "value": null },
                 { "color": "yellow", "value": 0.999 },
@@ -62,7 +62,7 @@ spec:
           "gridPos": { "h": 5, "w": 4, "x": 0, "y": 1 },
           "targets": [
             {
-              "expr": "sum(rate(messenger_message_send_operations_total{namespace=~\"$namespace\",result=\"success\"}[30d])) / clamp_min(sum(rate(messenger_message_send_operations_total{namespace=~\"$namespace\"}[30d])), 0.001)"
+              "expr": "(sum(rate(messenger_message_commit_duration_seconds_bucket{namespace=~\"$namespace\",result=\"success\",le=\"1.0\"}[30d])) or vector(0)) / sum(rate(messenger_message_commit_duration_seconds_count{namespace=~\"$namespace\",result=~\"success|failed\"}[30d]))"
             }
           ]
         },
@@ -135,12 +135,12 @@ spec:
           "id": 5,
           "type": "stat",
           "title": "Error budget remaining (30d)",
-          "description": "1 − (фактическая доля отказов / допустимая по SLO 99.95%). Ниже нуля — бюджет месяца уже исчерпан.",
+          "description": "1 − (фактическая доля отказов SLI / допустимая по SLO 99.95%). Тот же SLI, что и Send SLO — коммит И ≤1с. Ниже нуля — бюджет месяца уже исчерпан. N/A без трафика за 30д.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "options": { "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
           "fieldConfig": {
             "defaults": {
-              "unit": "percentunit",
+              "unit": "percentunit", "noValue": "N/A",
               "thresholds": { "mode": "absolute", "steps": [
                 { "color": "red", "value": null },
                 { "color": "yellow", "value": 0.2 },
@@ -151,7 +151,7 @@ spec:
           "gridPos": { "h": 5, "w": 4, "x": 20, "y": 1 },
           "targets": [
             {
-              "expr": "1 - ((1 - (sum(rate(messenger_message_send_operations_total{namespace=~\"$namespace\",result=\"success\"}[30d])) / clamp_min(sum(rate(messenger_message_send_operations_total{namespace=~\"$namespace\"}[30d])), 0.001))) / (1 - 0.9995))"
+              "expr": "1 - ((1 - ((sum(rate(messenger_message_commit_duration_seconds_bucket{namespace=~\"$namespace\",result=\"success\",le=\"1.0\"}[30d])) or vector(0)) / sum(rate(messenger_message_commit_duration_seconds_count{namespace=~\"$namespace\",result=~\"success|failed\"}[30d])))) / (1 - 0.9995))"
             }
           ]
         },

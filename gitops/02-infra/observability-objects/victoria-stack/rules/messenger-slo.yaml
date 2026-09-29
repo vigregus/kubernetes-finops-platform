@@ -55,24 +55,38 @@ spec:
 
     # Multi-window multi-burn-rate по SRE workbook - та же форма, что была
     # в application-slo.yaml (окна и множители совпадают с docs/messenger/
-    # 06-observability.md, часть 5: 5м+1ч / 30м+6ч / 6ч+3д), но числитель
-    # и знаменатель теперь messenger_message_send_operations_total, а не
-    # http_requests_total чужого приложения. SLO = 99.95%, как в каталоге
-    # SLI документа для "Запись сообщения".
+    # 06-observability.md, часть 5: 5м+1ч / 30м+6ч / 6ч+3д). SLO = 99.95%,
+    # как в каталоге SLI документа для "Запись сообщения".
+    #
+    # good/eligible здесь - тот же SLI, что считает messenger-slo-overview.yaml
+    # (панели Send SLO / Error budget), не messenger_message_send_operations_total
+    # напрямую: SLI "Запись сообщения" определён документом как "коммит
+    # состоялся И задержка ≤1с" - конъюнкция, а не голое success/failed.
+    # До этого коммита burn-rate и dashboard расходились: dashboard мог
+    # показать красный Send SLO при 100% success, но p99 4с, а эти алерты
+    # молчали бы, потому что считали только success/failed без latency.
+    # le="1.0", не "1" - так prometheus_client экспортирует boundary
+    # дефолтного бакета (проверено живьём по http_request_duration_seconds_bucket).
+    # count{result=~"success|failed"} - не голый count - чтобы не подмешивать
+    # исторический unlabeled ряд той же гистограммы (до этого PR у неё не
+    # было метки result, и он до сих пор живёт в 30-дневном окне SLO burn,
+    # хоть здесь окна и короче). `or vector(0)` в числителе - тот же смысл,
+    # что в dashboard: полный outage (0 успехов из ненулевого трафика)
+    # обязан гореть 100% burn rate, а не молчать из-за пустого числителя.
     - name: messenger-slo-burn
       interval: 30s
       rules:
         - alert: MessageCommitErrorBudgetBurnFast
           # 14.4x исчерпывает 30-дневный бюджет примерно за 50 часов.
           expr: |
-            ((1 - (sum by (service, namespace) (rate(messenger_message_send_operations_total{namespace=~"dev|stage|prod",result="success"}[1h])) / clamp_min(sum by (service, namespace) (rate(messenger_message_send_operations_total{namespace=~"dev|stage|prod"}[1h])), 0.001))) / (1 - 0.9995) > 14.4) and ((1 - (sum by (service, namespace) (rate(messenger_message_send_operations_total{namespace=~"dev|stage|prod",result="success"}[5m])) / clamp_min(sum by (service, namespace) (rate(messenger_message_send_operations_total{namespace=~"dev|stage|prod"}[5m])), 0.001))) / (1 - 0.9995) > 14.4)
+            ((1 - ((sum by (service, namespace) (rate(messenger_message_commit_duration_seconds_bucket{namespace=~"dev|stage|prod",result="success",le="1.0"}[1h])) or vector(0)) / sum by (service, namespace) (rate(messenger_message_commit_duration_seconds_count{namespace=~"dev|stage|prod",result=~"success|failed"}[1h])))) / (1 - 0.9995) > 14.4) and ((1 - ((sum by (service, namespace) (rate(messenger_message_commit_duration_seconds_bucket{namespace=~"dev|stage|prod",result="success",le="1.0"}[5m])) or vector(0)) / sum by (service, namespace) (rate(messenger_message_commit_duration_seconds_count{namespace=~"dev|stage|prod",result=~"success|failed"}[5m])))) / (1 - 0.9995) > 14.4)
           for: 2m
           labels:
             severity: critical
             finops.internal/component: messenger
           annotations:
             summary: '{{ $labels.service }}/{{ $labels.namespace }}: бюджет ошибок записи сообщения сгорает в 14.4x (будить)'
-            description: 'При таком темпе 30-дневный бюджет "Запись сообщения" (SLO 99.95%) кончится примерно за двое суток. messenger_message_commit_duration_seconds{result="failed"} рядом - отказ базы, а не отклонённый домен (NOT_A_MEMBER в счёт не идёт).'
+            description: 'При таком темпе 30-дневный бюджет "Запись сообщения" (SLO 99.95%, коммит И ≤1с) кончится примерно за двое суток. messenger_message_commit_duration_seconds{result="failed"} рядом - отказ базы, а не отклонённый домен (NOT_A_MEMBER в счёт не идёт); высокий p99 T_commit при result="success" тоже жжёт этот бюджет.'
             dashboard_url: 'http://grafana.finops.local/d/messenger-slo-overview/messenger-slo-overview?orgId=1&var-namespace={{ $labels.namespace }}&from={{ ($activeAt.Add (parseDurationTime "-15m")).UnixMilli }}&to={{ ($activeAt.Add (parseDurationTime "5m")).UnixMilli }}'
             logs_url: 'http://grafana.finops.local/explore?schemaVersion=1&panes=%7B%22e1w%22%3A%7B%22datasource%22%3A%22victorialogs%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22expr%22%3A%22%7Bnamespace%3D%5C%22{{ $labels.namespace }}%5C%22%7D%20app%3A~%5C%22{{ $labels.service }}%5C%22%20event%3A%22message_commit_failed%5C%22%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22{{ ($activeAt.Add (parseDurationTime "-15m")).UnixMilli }}%22%2C%22to%22%3A%22{{ ($activeAt.Add (parseDurationTime "5m")).UnixMilli }}%22%7D%7D%7D&orgId=1'
             traces_url: 'http://grafana.finops.local/explore?schemaVersion=1&panes=%7B%22e1w%22%3A%7B%22datasource%22%3A%22tempo%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22queryType%22%3A%22traceql%22%2C%22query%22%3A%22%7Bresource.service.name%3D%5C%22{{ $labels.service }}%5C%22%20%26%26%20status%3Derror%7D%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22{{ ($activeAt.Add (parseDurationTime "-15m")).UnixMilli }}%22%2C%22to%22%3A%22{{ ($activeAt.Add (parseDurationTime "5m")).UnixMilli }}%22%7D%7D%7D&orgId=1'
@@ -80,7 +94,7 @@ spec:
         - alert: MessageCommitErrorBudgetBurnModerate
           # 6x исчерпывает бюджет примерно за пять суток.
           expr: |
-            ((1 - (sum by (service, namespace) (rate(messenger_message_send_operations_total{namespace=~"dev|stage|prod",result="success"}[6h])) / clamp_min(sum by (service, namespace) (rate(messenger_message_send_operations_total{namespace=~"dev|stage|prod"}[6h])), 0.001))) / (1 - 0.9995) > 6) and ((1 - (sum by (service, namespace) (rate(messenger_message_send_operations_total{namespace=~"dev|stage|prod",result="success"}[30m])) / clamp_min(sum by (service, namespace) (rate(messenger_message_send_operations_total{namespace=~"dev|stage|prod"}[30m])), 0.001))) / (1 - 0.9995) > 6)
+            ((1 - ((sum by (service, namespace) (rate(messenger_message_commit_duration_seconds_bucket{namespace=~"dev|stage|prod",result="success",le="1.0"}[6h])) or vector(0)) / sum by (service, namespace) (rate(messenger_message_commit_duration_seconds_count{namespace=~"dev|stage|prod",result=~"success|failed"}[6h])))) / (1 - 0.9995) > 6) and ((1 - ((sum by (service, namespace) (rate(messenger_message_commit_duration_seconds_bucket{namespace=~"dev|stage|prod",result="success",le="1.0"}[30m])) or vector(0)) / sum by (service, namespace) (rate(messenger_message_commit_duration_seconds_count{namespace=~"dev|stage|prod",result=~"success|failed"}[30m])))) / (1 - 0.9995) > 6)
           for: 5m
           labels:
             severity: warning
@@ -92,7 +106,7 @@ spec:
         - alert: MessageCommitErrorBudgetBurnSlow
           # 1x означает, что бюджет кончится ровно к концу окна.
           expr: |
-            ((1 - (sum by (service, namespace) (rate(messenger_message_send_operations_total{namespace=~"dev|stage|prod",result="success"}[3d])) / clamp_min(sum by (service, namespace) (rate(messenger_message_send_operations_total{namespace=~"dev|stage|prod"}[3d])), 0.001))) / (1 - 0.9995) > 1) and ((1 - (sum by (service, namespace) (rate(messenger_message_send_operations_total{namespace=~"dev|stage|prod",result="success"}[6h])) / clamp_min(sum by (service, namespace) (rate(messenger_message_send_operations_total{namespace=~"dev|stage|prod"}[6h])), 0.001))) / (1 - 0.9995) > 1)
+            ((1 - ((sum by (service, namespace) (rate(messenger_message_commit_duration_seconds_bucket{namespace=~"dev|stage|prod",result="success",le="1.0"}[3d])) or vector(0)) / sum by (service, namespace) (rate(messenger_message_commit_duration_seconds_count{namespace=~"dev|stage|prod",result=~"success|failed"}[3d])))) / (1 - 0.9995) > 1) and ((1 - ((sum by (service, namespace) (rate(messenger_message_commit_duration_seconds_bucket{namespace=~"dev|stage|prod",result="success",le="1.0"}[6h])) or vector(0)) / sum by (service, namespace) (rate(messenger_message_commit_duration_seconds_count{namespace=~"dev|stage|prod",result=~"success|failed"}[6h])))) / (1 - 0.9995) > 1)
           for: 30m
           labels:
             severity: info
