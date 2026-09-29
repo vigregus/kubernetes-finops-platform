@@ -327,6 +327,16 @@ MESSAGE_COMMIT_DURATION = Histogram(
     ["service", "result"],
 )
 
+# Оба label child создаются на старте, а не лениво при первом наблюдении:
+# без этого первый редкий "failed" после деплоя приходит как первый sample
+# ряда, у которого нет предыдущей точки для rate() — и rate() не видит
+# инкремент вовсе, пока не накопится вторая точка. Для SLO именно редкие
+# ошибки нельзя терять. Явный .labels(...) без .inc()/.observe() публикует
+# нулевой ряд немедленно, до первого реального события.
+for _result in ("success", "failed"):
+    MESSAGE_SEND_OPERATIONS.labels(service=SERVICE, result=_result)
+    MESSAGE_COMMIT_DURATION.labels(service=SERVICE, result=_result)
+
 
 def message_commit(duration_seconds: float, *, result: str) -> None:
     MESSAGE_SEND_OPERATIONS.labels(service=SERVICE, result=result).inc()

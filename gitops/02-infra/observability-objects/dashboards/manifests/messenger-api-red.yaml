@@ -58,7 +58,7 @@ spec:
           "id": 13,
           "type": "stat",
           "title": "Success rate",
-          "description": "(2xx+3xx) / all application requests. Health probes and the metrics endpoint are excluded. Крупнее, чем 4xx/5xx по отдельности — единственное число, отвечающее «всё хорошо?» одним взглядом. N/A без трафика — ноль запросов не значит ноль успешных.",
+          "description": "(2xx+3xx) / all application requests. Health probes and the metrics endpoint are excluded. Крупнее, чем 4xx/5xx по отдельности — единственное число, отвечающее «всё хорошо?» одним взглядом. N/A без трафика (пустой знаменатель); при ненулевом трафике без единого 2xx/3xx — честный 0% через `or vector(0)` в числителе, не N/A.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "options": { "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
           "fieldConfig": {
@@ -73,7 +73,7 @@ spec:
           },
           "gridPos": { "h": 5, "w": 4, "x": 4, "y": 1 },
           "targets": [
-            { "expr": "sum(rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\",status_class=~\"2xx|3xx\"}[5m])) / sum(rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m]))" }
+            { "expr": "(sum(rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\",status_class=~\"2xx|3xx\"}[5m])) or vector(0)) / sum(rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m]))" }
           ]
         },
         {
@@ -86,7 +86,7 @@ spec:
           "fieldConfig": { "defaults": { "unit": "percentunit", "noValue": "N/A" } },
           "gridPos": { "h": 5, "w": 4, "x": 8, "y": 1 },
           "targets": [
-            { "expr": "sum(rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\",status_class=\"4xx\"}[5m])) / sum(rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m]))" }
+            { "expr": "(sum(rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\",status_class=\"4xx\"}[5m])) or vector(0)) / sum(rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m]))" }
           ]
         },
         {
@@ -108,7 +108,7 @@ spec:
           },
           "gridPos": { "h": 5, "w": 4, "x": 12, "y": 1 },
           "targets": [
-            { "expr": "sum(rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\",status_class=\"5xx\"}[5m])) / sum(rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m]))" }
+            { "expr": "(sum(rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\",status_class=\"5xx\"}[5m])) or vector(0)) / sum(rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m]))" }
           ]
         },
         {
@@ -243,9 +243,9 @@ spec:
           "gridPos": { "h": 10, "w": 24, "x": 0, "y": 15 },
           "targets": [
             { "refId": "A", "format": "table", "instant": true, "expr": "sum by (route) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m]))" },
-            { "refId": "B", "format": "table", "instant": true, "expr": "sum by (route) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\",status_class=~\"2xx|3xx\"}[5m])) / sum by (route) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m]))" },
-            { "refId": "C", "format": "table", "instant": true, "expr": "sum by (route) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\",status_class=\"4xx\"}[5m])) / sum by (route) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m]))" },
-            { "refId": "D", "format": "table", "instant": true, "expr": "sum by (route) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\",status_class=\"5xx\"}[5m])) / sum by (route) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m]))" },
+            { "refId": "B", "format": "table", "instant": true, "expr": "(sum by (route) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\",status_class=~\"2xx|3xx\"}[5m])) or (0 * sum by (route) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m])))) / sum by (route) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m]))" },
+            { "refId": "C", "format": "table", "instant": true, "expr": "(sum by (route) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\",status_class=\"4xx\"}[5m])) or (0 * sum by (route) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m])))) / sum by (route) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m]))" },
+            { "refId": "D", "format": "table", "instant": true, "expr": "(sum by (route) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\",status_class=\"5xx\"}[5m])) or (0 * sum by (route) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m])))) / sum by (route) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m]))" },
             { "refId": "E", "format": "table", "instant": true, "expr": "histogram_quantile(0.95, sum by (le, route) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m])))" },
             { "refId": "F", "format": "table", "instant": true, "expr": "histogram_quantile(0.99, sum by (le, route) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m])))" }
           ]

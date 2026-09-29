@@ -46,7 +46,7 @@ spec:
           "id": 28,
           "type": "stat",
           "title": "CPU max %",
-          "description": "topk(1, ...) вместо max(): max() отдаёт голое число и теряет labels, а «94%» без имени пода не отвечает на вопрос «что именно ближе всего к пределу?» — topk сохраняет pod/container в имени серии, показанном рядом со значением.",
+          "description": "topk(1, ...) вместо max(): max() отдаёт голое число и теряет labels, а «94%» без имени пода не отвечает на вопрос «что именно ближе всего к пределу?» — topk сохраняет pod/container в имени серии, показанном рядом со значением. instant: true — снимок сейчас; без него Grafana считает topk(1) на каждой точке диапазона, и смена лидера за 6ч даёт несколько отдельных серий вместо одной.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "options": { "graphMode": "area", "textMode": "value_and_name", "reduceOptions": { "calcs": ["lastNotNull"] } },
           "fieldConfig": {
@@ -62,6 +62,7 @@ spec:
           "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
           "targets": [
             {
+              "instant": true,
               "expr": "topk(1, sum by (pod, container) (node_namespace_pod_container:container_cpu_usage_seconds_total:sum_irate{namespace=~\"$namespace\"}) / sum by (pod, container) (namespace_pod_container:container_resource_limits_cpu_cores{namespace=~\"$namespace\"}))",
               "legendFormat": "{{pod}} / {{container}}"
             }
@@ -87,6 +88,7 @@ spec:
           "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
           "targets": [
             {
+              "instant": true,
               "expr": "topk(1, sum by (pod, container) (node_namespace_pod_container:container_memory_working_set_bytes{namespace=~\"$namespace\"}) / sum by (pod, container) (namespace_pod_container:container_resource_limits_memory_bytes{namespace=~\"$namespace\"}))",
               "legendFormat": "{{pod}} / {{container}}"
             }
@@ -138,7 +140,7 @@ spec:
           "id": 32,
           "type": "stat",
           "title": "Kafka consumer lag (worst group)",
-          "description": "topk(1, ...) по всем consumer group (messenger-realtime, messenger-unread), не только messenger-realtime — вторая группа может отставать отдельно, и раньше эта панель её не видела вовсе. Обе группы по отдельности — в свёрнутой секции Kafka ниже.",
+          "description": "topk(1, ...) по всем consumer group (messenger-realtime, messenger-unread), не только messenger-realtime — вторая группа может отставать отдельно, и раньше эта панель её не видела вовсе. Без фильтра $namespace — как и в свёрнутой Kafka-секции ниже: kafka-exporter скрейпится в namespace kafka, не messenger, и namespace=~\"$namespace\" (по умолчанию messenger) сделал бы эту панель пустой. Обе группы по отдельности — в свёрнутой секции Kafka ниже. instant: true — снимок сейчас, не победитель на каждой точке диапазона (иначе смена лидера за 6ч дала бы несколько отдельных серий вместо одной).",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "options": { "graphMode": "area", "textMode": "value_and_name", "reduceOptions": { "calcs": ["lastNotNull"] } },
           "fieldConfig": {
@@ -154,7 +156,8 @@ spec:
           "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 },
           "targets": [
             {
-              "expr": "topk(1, sum by (consumergroup) (kafka_consumergroup_lag{namespace=~\"$namespace\",consumergroup=~\"messenger-(realtime|unread)\"}))",
+              "instant": true,
+              "expr": "topk(1, sum by (consumergroup) (kafka_consumergroup_lag{consumergroup=~\"messenger-(realtime|unread)\"}))",
               "legendFormat": "{{consumergroup}}"
             }
           ]
@@ -458,7 +461,7 @@ spec:
               "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1, "min": 0, "noValue": "N/A", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } } },
               "gridPos": { "h": 7, "w": 8, "x": 16, "y": 48 },
               "targets": [
-                { "expr": "sum(rate(redis_keyspace_hits_total{namespace=~\"$namespace\"}[5m])) / (sum(rate(redis_keyspace_hits_total{namespace=~\"$namespace\"}[5m])) + sum(rate(redis_keyspace_misses_total{namespace=~\"$namespace\"}[5m])))" }
+                { "expr": "(sum(rate(redis_keyspace_hits_total{namespace=~\"$namespace\"}[5m])) or vector(0)) / ((sum(rate(redis_keyspace_hits_total{namespace=~\"$namespace\"}[5m])) or vector(0)) + (sum(rate(redis_keyspace_misses_total{namespace=~\"$namespace\"}[5m])) or vector(0)))" }
               ]
             },
             {

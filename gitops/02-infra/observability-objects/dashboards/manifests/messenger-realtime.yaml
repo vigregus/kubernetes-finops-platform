@@ -133,7 +133,7 @@ spec:
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "short", "noValue": "N/A" } },
           "gridPos": { "h": 5, "w": 6, "x": 18, "y": 6 },
-          "targets": [ { "expr": "sum(rate(centrifugo_transport_messages_sent{namespace=~\"$namespace\",frame_type=\"push_publication\"}[5m])) / sum(rate(messenger_message_send_operations_total{namespace=~\"$namespace\",result=\"success\"}[5m]))" } ]
+          "targets": [ { "expr": "(sum(rate(centrifugo_transport_messages_sent{namespace=~\"$namespace\",frame_type=\"push_publication\"}[5m])) or vector(0)) / sum(rate(messenger_message_send_operations_total{namespace=~\"$namespace\",result=\"success\"}[5m]))" } ]
         },
         {
           "id": 8,
@@ -258,7 +258,7 @@ spec:
           "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1, "min": 0, "noValue": "N/A" } },
           "gridPos": { "h": 8, "w": 12, "x": 12, "y": 30 },
           "targets": [
-            { "expr": "sum(rate(centrifugo_client_recover{namespace=~\"$namespace\",recovered=\"yes\"}[15m])) / sum(rate(centrifugo_client_recover{namespace=~\"$namespace\"}[15m]))" }
+            { "expr": "(sum(rate(centrifugo_client_recover{namespace=~\"$namespace\",recovered=\"yes\"}[15m])) or vector(0)) / sum(rate(centrifugo_client_recover{namespace=~\"$namespace\"}[15m]))" }
           ]
         },
         {
