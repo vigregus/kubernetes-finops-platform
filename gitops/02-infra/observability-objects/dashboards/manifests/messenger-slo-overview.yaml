@@ -11,10 +11,10 @@ spec:
     {
       "uid": "messenger-slo-overview",
       "title": "01 · Messenger SLO Overview",
-      "description": "docs/messenger/06-observability.md, часть 5 - главный дашборд, читается за десять секунд: строка 1 отвечает \"проблема есть?\", остальное - \"где она?\". Ссылка из victoria-stack/rules/messenger-slo.yaml (dashboard_url) ведёт сюда по этому uid — uid НЕ менять при редактировании. Приведён к общему визуальному стандарту пакета 01-05 вслед за PR #73: sparkline на stat-картах, bar gauge для ranking, единая цветовая конвенция p50/p95/p99, probe-трафик исключён из HTTP-панелей.",
+      "description": "docs/messenger/06-observability.md, часть 5 - главный дашборд, читается за десять секунд: строка 1 отвечает \"проблема есть?\", остальное - \"где она?\". Ссылка из victoria-stack/rules/messenger-slo.yaml (dashboard_url) ведёт сюда по этому uid — uid НЕ менять при редактировании.",
       "tags": ["messenger", "slo"],
       "schemaVersion": 39,
-      "version": 2,
+      "version": 3,
       "editable": true,
       "time": { "from": "now-6h", "to": "now" },
       "links": [
@@ -39,14 +39,14 @@ spec:
         {
           "id": 1,
           "type": "row",
-          "title": "Строка 1 — проблема есть?",
+          "title": "Row 1 — is there a problem?",
           "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
         },
         {
           "id": 2,
           "type": "stat",
-          "title": "Send SLO (30д)",
-          "description": "SLO \"Запись сообщения\": коммит состоялся, NOT_A_MEMBER исключён из счёта (докc, часть 1, каталог SLI). Числитель/знаменатель - messenger_message_send_operations_total.",
+          "title": "Send SLO (30d)",
+          "description": "SLO «Запись сообщения»: коммит состоялся, NOT_A_MEMBER исключён из счёта. Числитель/знаменатель — messenger_message_send_operations_total.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "options": { "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
           "fieldConfig": {
@@ -70,7 +70,7 @@ spec:
           "id": 3,
           "type": "stat",
           "title": "p99 T_commit",
-          "description": "Цель ≤ 1с (SLO \"Запись сообщения\").",
+          "description": "Цель ≤ 1с (SLO «Запись сообщения»).",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "options": { "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
           "fieldConfig": {
@@ -93,8 +93,8 @@ spec:
         {
           "id": 4,
           "type": "stat",
-          "title": "p99 T_delivery (приближение)",
-          "description": "occurred_at -> публикация в Centrifugo, не ack браузера получателя (телеметрии браузера ещё нет, G3). Диагностика, не полноценный SLI - см. messenger-slo.yaml, MessageDeliveryHighLatencyP99Approx.",
+          "title": "p99 T_delivery (approx)",
+          "description": "occurred_at → публикация в Centrifugo, не ack браузера получателя (телеметрии браузера ещё нет, G3). Диагностика, не полноценный SLI — см. messenger-slo.yaml, MessageDeliveryHighLatencyP99Approx.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "options": { "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
           "fieldConfig": { "defaults": { "unit": "s" } },
@@ -109,7 +109,7 @@ spec:
           "id": 13,
           "type": "stat",
           "title": "Msg/sec (accepted)",
-          "description": "Текущая полезная нагрузка — новая панель верхней строки (визуальный стандарт пакета 01-05): 'проблема есть?' неполно без 'сколько вообще сейчас происходит'.",
+          "description": "Текущая полезная нагрузка: «проблема есть?» неполно без «сколько вообще сейчас происходит».",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "options": { "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
           "fieldConfig": { "defaults": { "unit": "reqps" } },
@@ -122,7 +122,7 @@ spec:
           "id": 14,
           "type": "stat",
           "title": "Online users",
-          "description": "messenger_presence_online_users — та же метрика, что на 04 · Realtime. Контекст аудитории прямо на первом экране, не только на отдельном дашборде.",
+          "description": "messenger_presence_online_users — та же метрика, что на 04 · Realtime. Контекст аудитории прямо на первом экране.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "options": { "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
           "fieldConfig": { "defaults": { "unit": "short" } },
@@ -134,8 +134,8 @@ spec:
         {
           "id": 5,
           "type": "stat",
-          "title": "Остаток бюджета ошибок (30д)",
-          "description": "1 - (фактическая доля отказов / допустимая по SLO 99.95%). Ниже нуля - бюджет месяца уже исчерпан.",
+          "title": "Error budget remaining (30d)",
+          "description": "1 − (фактическая доля отказов / допустимая по SLO 99.95%). Ниже нуля — бюджет месяца уже исчерпан.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "options": { "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
           "fieldConfig": {
@@ -158,14 +158,18 @@ spec:
         {
           "id": 6,
           "type": "row",
-          "title": "Строка 2 — где именно?",
+          "title": "Row 2 — where exactly?",
           "gridPos": { "h": 1, "w": 24, "x": 0, "y": 6 }
         },
         {
           "id": 7,
           "type": "timeseries",
-          "title": "Темп записи: success vs failed",
+          "title": "Write rate: success vs failed",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "options": {
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max", "mean"] },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          },
           "fieldConfig": {
             "defaults": { "unit": "reqps", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } },
             "overrides": [
@@ -185,8 +189,12 @@ spec:
           "id": 8,
           "type": "timeseries",
           "title": "T_commit: p50 / p95 / p99",
-          "description": "Цветовая конвенция пакета: p50 приглушённый, p95 сильнее, p99 самый насыщенный (та же семантика на 02/03).",
+          "description": "Цветовая конвенция пакета: p50 приглушённый, p95 сильнее, p99 самый насыщенный — та же семантика на 02/03.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "options": {
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max", "mean"] },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          },
           "fieldConfig": {
             "defaults": { "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } },
             "overrides": [
@@ -215,8 +223,12 @@ spec:
           "id": 9,
           "type": "timeseries",
           "title": "HTTP 5xx / 4xx rate (API)",
-          "description": "route!~\"/metrics|/livez|/readyz\" исключает scrape и kubelet-пробы (тот же фикс, что на 03 · API RED, найден там ревью PR #73: /readyz отдаёт 503 при недоступном Postgres и без фильтра искажал бы этот график).",
+          "description": "route!~\"/metrics|/livez|/readyz\" исключает scrape и kubelet-пробы: /readyz отдаёт 503 при недоступном Postgres и без фильтра искажал бы этот график.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "options": {
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max", "mean"] },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          },
           "fieldConfig": {
             "defaults": { "unit": "reqps", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } },
             "overrides": [
@@ -235,8 +247,8 @@ spec:
         {
           "id": 10,
           "type": "timeseries",
-          "title": "Возраст самой старой записи outbox",
-          "description": "Возраст важнее длины очереди (докc, часть 3.B): порог по возрасту не меняется при росте нагрузки.",
+          "title": "Outbox oldest record age",
+          "description": "Возраст важнее длины очереди: порог по возрасту не меняется при росте нагрузки.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } } },
           "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
@@ -249,9 +261,13 @@ spec:
         {
           "id": 11,
           "type": "timeseries",
-          "title": "HTTP запросов в секунду (API)",
-          "description": "Панель 9 отвечает, какая доля запросов — ошибки; эта — сколько всего приходит. Тот же probe-фильтр, что и там.",
+          "title": "HTTP requests/sec (API)",
+          "description": "Панель выше отвечает, какая доля запросов — ошибки; эта — сколько всего приходит. Тот же probe-фильтр.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "options": {
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max", "mean"] },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          },
           "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } } },
           "gridPos": { "h": 8, "w": 12, "x": 0, "y": 23 },
           "targets": [
@@ -264,8 +280,8 @@ spec:
         {
           "id": 12,
           "type": "bargauge",
-          "title": "WebSocket-соединения по подам",
-          "description": "Bar gauge, не timeseries (визуальный стандарт пакета, см. 04/05): разрез по подам обязателен (докс, часть 4 «Centrifugo — отдельный случай») — десять подов и триста тысяч соединений в среднем выглядят благополучно, даже если один под держит сто тысяч. Ranking читается быстрее line chart с десятью накладывающимися сериями.",
+          "title": "WebSocket connections by pod",
+          "description": "Разрез по подам обязателен: десять подов и триста тысяч соединений в среднем выглядят благополучно, даже если один под держит сто тысяч. Ranking читается быстрее line chart с десятью накладывающимися сериями.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "options": {
             "orientation": "horizontal",
