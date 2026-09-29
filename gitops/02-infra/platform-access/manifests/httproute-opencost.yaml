@@ -1,0 +1,38 @@
+# Тот же мёртвый паттерн, что был у grafana (fix/grafana-gateway-httproute,
+# PR #78): opencost-ingress.yaml (gitops/03-finops/opencost/values.yaml,
+# ingressClassName: nginx) — а namespace ingress-nginx и его контроллер
+# в этом кластере не существуют вовсе. Заменяется отдельным HTTPRoute
+# здесь, а не правкой values.yaml на месте: opencost ставится Helm-чартом
+# (Application opencost), и его values описывают желаемое состояние
+# чарта, а не маршрутизацию поверх Gateway — тот же принцип разделения,
+# что и у остальных файлов в этом каталоге.
+#
+# Порт http-ui (9090) — панель opencost, не http (9003, свой prometheus-
+# формат метрик) и не mcp-server (8081).
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: opencost
+  namespace: finops-system
+  labels:
+    app.kubernetes.io/name: opencost
+spec:
+  hostnames:
+    - opencost.finops.local
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: edge
+      namespace: edge
+      sectionName: https
+  rules:
+    - backendRefs:
+        - group: ""
+          kind: Service
+          name: opencost
+          port: 9090
+          weight: 1
+      matches:
+        - path:
+            type: PathPrefix
+            value: /

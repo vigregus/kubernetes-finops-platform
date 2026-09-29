@@ -1,14 +1,13 @@
 opencost:
   ui:
-    # Chart-native ingress for the opencost-ui sidecar (port 9090) -
-    # the container runs by default but nothing routed to it otherwise.
+    # Chart-native ingress выключен: ingressClassName nginx ссылался на
+    # контроллер, которого в этом кластере не существует вовсе (не
+    # пропадал, не было изначально) - ресурс был мёртв с создания.
+    # Реальный путь - HTTPRoute через Cilium Gateway, тот же паттерн,
+    # что и у остальных *.finops.local
+    # (gitops/02-infra/platform-access/manifests/httproute-opencost.yaml).
     ingress:
-      enabled: true
-      ingressClassName: nginx
-      hosts:
-        - host: opencost.finops.local
-          paths:
-            - /
+      enabled: false
   prometheus:
     internal:
       enabled: true

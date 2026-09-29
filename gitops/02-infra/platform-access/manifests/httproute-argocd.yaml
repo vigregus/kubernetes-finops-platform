@@ -1,0 +1,37 @@
+# argocd-server без --insecure отдаёт свой собственный TLS на порту 8080
+# (то же самое под именами Service-портов "http":80 и "https":443 — оба
+# смотрят в контейнер 8080) и при обычном HTTP-запросе шлёт 307 на https,
+# не читая X-Forwarded-Proto (тот заголовок он доверяет только вместе с
+# --insecure). Gateway уже терминирует TLS сам и форвардит backend'ам
+# обычным HTTP (тот же паттерн, что у остальных *.finops.local) — без
+# --insecure здесь был бы бесконечный редирект. Флаг ставится live-патчем
+# ConfigMap argocd-cmd-params-cm (сам ArgoCD в этом репозитории не
+# GitOps-managed — ставится напрямую из upstream install.yaml через
+# `make bootstrap`, поэтому этот файл не может выставить его сам).
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: argocd
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-server
+spec:
+  hostnames:
+    - argocd.finops.local
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: edge
+      namespace: edge
+      sectionName: https
+  rules:
+    - backendRefs:
+        - group: ""
+          kind: Service
+          name: argocd-server
+          port: 80
+          weight: 1
+      matches:
+        - path:
+            type: PathPrefix
+            value: /
