@@ -11,10 +11,10 @@ spec:
     {
       "uid": "messenger-api-red",
       "title": "03 · API — RED",
-      "description": "docs/messenger/06-observability.md, часть 3.C: RED (Rate/Errors/Duration) для FastAPI-приложения (http_requests_total/http_request_duration_seconds). Только application layer — назывался '03 · Edge / API', хотя Edge (Envoy/Cilium) здесь никогда не было ни одной панелью; переименован в '03 · API — RED'. Gateway-слой остаётся отдельным будущим deliverable (Cilium Envoy :9964 — RPS/latency/connections/resets), а не считается покрытым Hubble L7: тот отвечает за flow visibility, не за operational-метрики самого Envoy proxy. Все запросы исключают route=/metrics,/livez,/readyz — иначе scrape и kubelet probes считались бы пользовательским трафиком, и /readyz (503 при недоступном Postgres) искажал бы 5xx %.",
+      "description": "docs/messenger/06-observability.md, часть 3.C: RED (Rate/Errors/Duration) для FastAPI-приложения (http_requests_total/http_request_duration_seconds). Application layer only — Gateway (Cilium Envoy) остаётся отдельным следующим deliverable, не покрыт hubble-l7-http.yaml (тот про L7 flow visibility, не про Envoy operational-метрики). Все запросы исключают route=/metrics,/livez,/readyz.",
       "tags": ["messenger", "red", "api"],
       "schemaVersion": 39,
-      "version": 2,
+      "version": 3,
       "editable": true,
       "time": { "from": "now-6h", "to": "now" },
       "links": [
@@ -58,7 +58,7 @@ spec:
           "id": 13,
           "type": "stat",
           "title": "Success rate",
-          "description": "(2xx+3xx) / total. Крупнее, чем 4xx/5xx по отдельности (визуальный проход ревью PR #73): это единственное число, отвечающее 'всё хорошо?' одним взглядом — диагностика по классам статуса рядом, но вторична.",
+          "description": "(2xx+3xx) / all application requests. Health probes and the metrics endpoint are excluded. Крупнее, чем 4xx/5xx по отдельности — единственное число, отвечающее «всё хорошо?» одним взглядом.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "options": { "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
           "fieldConfig": {
@@ -155,8 +155,12 @@ spec:
         {
           "id": 6,
           "type": "timeseries",
-          "title": "RPS по классу статуса",
+          "title": "RPS by status class",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "options": {
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max", "mean"] },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          },
           "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } } },
           "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
           "targets": [
@@ -169,9 +173,13 @@ spec:
         {
           "id": 7,
           "type": "timeseries",
-          "title": "p50 / p95 / p99 (все маршруты)",
-          "description": "Цветовая конвенция (визуальный проход ревью PR #73): p50 приглушённый синий, p95 сильнее, p99 самый насыщенный — та же семантика на 02 · Journey/01 · SLO, легенду не приходится читать заново на каждом дашборде.",
+          "title": "p50 / p95 / p99 (all routes)",
+          "description": "Цветовая конвенция пакета: p50 приглушённый синий, p95 сильнее, p99 самый насыщенный — та же семантика на 01/02.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "options": {
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max", "mean"] },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          },
           "fieldConfig": {
             "defaults": { "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } },
             "overrides": [
@@ -190,59 +198,62 @@ spec:
         {
           "id": 8,
           "type": "row",
-          "title": "По маршруту",
+          "title": "By route",
           "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 }
         },
         {
           "id": 9,
-          "type": "timeseries",
-          "title": "RPS по маршруту",
+          "type": "table",
+          "title": "Top routes",
+          "description": "RPS/Success/4xx/5xx/p95/p99 в одной строке на маршрут — сортируется кликом по заголовку колонки (p99, 5xx, RPS). Заменяет три отдельных line chart (RPS/p99/4xx-5xx by route): ranking по нескольким метрикам одновременно таблица показывает лучше, чем сравнение трёх графиков.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } } },
-          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
-          "targets": [
+          "transformations": [
+            { "id": "merge", "options": {} },
             {
-              "expr": "sum by (route) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m]))",
-              "legendFormat": "{{route}}"
+              "id": "organize",
+              "options": {
+                "excludeByName": { "Time": true },
+                "indexByName": {},
+                "renameByName": {
+                  "Value #A": "RPS",
+                  "Value #B": "Success",
+                  "Value #C": "4xx",
+                  "Value #D": "5xx",
+                  "Value #E": "p95",
+                  "Value #F": "p99"
+                }
+              }
             }
-          ]
-        },
-        {
-          "id": 10,
-          "type": "timeseries",
-          "title": "p99 по маршруту",
-          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } } },
-          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
+          ],
+          "fieldConfig": {
+            "defaults": { "custom": { "align": "auto", "filterable": true } },
+            "overrides": [
+              { "matcher": { "id": "byName", "options": "RPS" }, "properties": [ { "id": "unit", "value": "reqps" }, { "id": "custom.width", "value": 100 } ] },
+              { "matcher": { "id": "byName", "options": "Success" }, "properties": [ { "id": "unit", "value": "percentunit" }, { "id": "custom.width", "value": 100 }, { "id": "thresholds", "value": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "yellow", "value": 0.95 }, { "color": "green", "value": 0.99 } ] } }, { "id": "custom.cellOptions", "value": { "type": "color-background" } } ] },
+              { "matcher": { "id": "byName", "options": "4xx" }, "properties": [ { "id": "unit", "value": "percentunit" }, { "id": "custom.width", "value": 90 } ] },
+              { "matcher": { "id": "byName", "options": "5xx" }, "properties": [ { "id": "unit", "value": "percentunit" }, { "id": "custom.width", "value": 90 }, { "id": "thresholds", "value": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 0.01 }, { "color": "red", "value": 0.05 } ] } }, { "id": "custom.cellOptions", "value": { "type": "color-background" } } ] },
+              { "matcher": { "id": "byName", "options": "p95" }, "properties": [ { "id": "unit", "value": "s" }, { "id": "custom.width", "value": 100 } ] },
+              { "matcher": { "id": "byName", "options": "p99" }, "properties": [ { "id": "unit", "value": "s" }, { "id": "custom.width", "value": 100 }, { "id": "thresholds", "value": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 0.5 }, { "color": "red", "value": 1 } ] } }, { "id": "custom.cellOptions", "value": { "type": "color-background" } } ] }
+            ]
+          },
+          "gridPos": { "h": 10, "w": 24, "x": 0, "y": 15 },
           "targets": [
-            {
-              "expr": "histogram_quantile(0.99, sum by (le, route) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m])))",
-              "legendFormat": "{{route}}"
-            }
-          ]
-        },
-        {
-          "id": 11,
-          "type": "timeseries",
-          "title": "4xx/5xx по маршруту",
-          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } } },
-          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 23 },
-          "targets": [
-            {
-              "expr": "sum by (route, status_class) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\",status_class=~\"4xx|5xx\"}[5m]))",
-              "legendFormat": "{{route}} {{status_class}}"
-            }
+            { "refId": "A", "format": "table", "instant": true, "expr": "sum by (route) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m]))" },
+            { "refId": "B", "format": "table", "instant": true, "expr": "sum by (route) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\",status_class=~\"2xx|3xx\"}[5m])) / clamp_min(sum by (route) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m])), 0.001)" },
+            { "refId": "C", "format": "table", "instant": true, "expr": "sum by (route) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\",status_class=\"4xx\"}[5m])) / clamp_min(sum by (route) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m])), 0.001)" },
+            { "refId": "D", "format": "table", "instant": true, "expr": "sum by (route) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\",status_class=\"5xx\"}[5m])) / clamp_min(sum by (route) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m])), 0.001)" },
+            { "refId": "E", "format": "table", "instant": true, "expr": "histogram_quantile(0.95, sum by (le, route) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m])))" },
+            { "refId": "F", "format": "table", "instant": true, "expr": "histogram_quantile(0.99, sum by (le, route) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m])))" }
           ]
         },
         {
           "id": 12,
           "type": "text",
           "title": "ℹ Scope",
-          "gridPos": { "h": 2, "w": 24, "x": 0, "y": 31 },
+          "gridPos": { "h": 2, "w": 24, "x": 0, "y": 25 },
           "options": {
             "mode": "markdown",
-            "content": "Application layer только. Gateway (Cilium Envoy :9964) — отдельный следующий deliverable, не покрыт `hubble-l7-http.yaml` (тот про flow visibility, не про Envoy operational-метрики)."
+            "content": "Application layer only. Gateway (Cilium Envoy :9964) — отдельный следующий deliverable, не покрыт `hubble-l7-http.yaml` (тот про flow visibility, не про Envoy operational-метрики). Latency heatmap и data links в Tempo/логи — отдельная задача (interaction layer)."
           }
         }
       ]
