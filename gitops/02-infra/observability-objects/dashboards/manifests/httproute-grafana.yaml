@@ -1,0 +1,41 @@
+# Gives Grafana a real, stable hostname - same *.finops.local convention as
+# app/idp/rt/mail/s3 - so alert annotations and dashboard data links (see
+# victoria-stack/rules/messenger-slo.yaml) can carry an absolute URL that
+# works from outside a browser session already pointed at a kubectl
+# port-forward.
+#
+# Было Ingress (networking.k8s.io/v1, ingressClassName: nginx) — в этом
+# кластере нет ни namespace ingress-nginx, ни его контроллера вообще (не
+# было и раньше, не только сейчас), поэтому ресурс был мёртв с самого
+# создания: DNS-запись есть, а обслуживать её некому. Реальный путь
+# пользователя в кластер — Cilium Gateway (namespace edge, gateway edge,
+# слушатели http/https на NodePort 32224/30473, `*.finops.local`), через
+# который уже подключены app/idp/rt/mail/s3 — тот же HTTPRoute, что и у
+# них (пример: messenger/mailpit), а не отдельный ingress-класс.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: grafana
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: grafana
+spec:
+  hostnames:
+    - grafana.finops.local
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: edge
+      namespace: edge
+      sectionName: https
+  rules:
+    - backendRefs:
+        - group: ""
+          kind: Service
+          name: grafana-local-service
+          port: 3000
+          weight: 1
+      matches:
+        - path:
+            type: PathPrefix
+            value: /

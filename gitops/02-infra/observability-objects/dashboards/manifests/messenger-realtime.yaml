@@ -11,10 +11,10 @@ spec:
     {
       "uid": "messenger-realtime",
       "title": "04 · Realtime — Centrifugo",
-      "description": "docs/messenger/06-observability.md, часть 3 'Centrifugo — отдельный случай': WebSocket не ведёт себя как обычный API (RPS почти всегда мал, всё живёт в открытых соединениях), поэтому connections/subscriptions/fan-out и разрез по подам — отдельный дашборд, а не строка на 03 · Edge/API.",
+      "description": "docs/messenger/06-observability.md, часть 3 «Centrifugo — отдельный случай»: WebSocket не ведёт себя как обычный API (RPS почти всегда мал, всё живёт в открытых соединениях), поэтому connections/subscriptions/amplification и разрез по подам — отдельный дашборд, а не строка на 03 · API RED.",
       "tags": ["messenger", "realtime", "centrifugo"],
       "schemaVersion": 39,
-      "version": 2,
+      "version": 3,
       "editable": true,
       "time": { "from": "now-6h", "to": "now" },
       "links": [
@@ -39,14 +39,14 @@ spec:
         {
           "id": 1,
           "type": "row",
-          "title": "Аудитория",
+          "title": "Audience",
           "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
         },
         {
           "id": 20,
           "type": "stat",
           "title": "Registered users",
-          "description": "messenger_registered_users — то же значение, что уже вычислял presence_sweeper на каждом такте (SweepResult.registered_users, для доли online), но раньше не покидало процесс отдельной метрикой. Capacity/business-контекст, не alert-метрика. Живо проверено: реальное значение 192.",
+          "description": "Total registered Messenger users (not deleted). Updated by the presence sweeper каждый такт — тот же счёт, что участвует в Online %.",
           "options": { "graphMode": "area" },
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "short" } },
@@ -128,7 +128,7 @@ spec:
           "id": 7,
           "type": "stat",
           "title": "Realtime amplification",
-          "description": "Переименовано из 'Realtime fan-out' (ревью PR #73, второй проход): centrifugo_transport_messages_sent{frame_type=\"push_publication\"} считает ВСЕ publication push-фреймы клиентам — не только message.created, но и unread.changed/read receipts/session.revoked и другие realtime-публикации (см. вызовы realtime.publish() в коде). Знаменатель — только accepted messages. Значение больше единицы поэтому не всегда значит 'сообщение доставлено N получателям' — оно может значить 'одно сообщение породило N разных realtime-событий'. Точный message-only fan-out потребовал бы отдельного label на transport layer, которого сейчас нет. Как capacity-сигнал (сколько push-нагрузки Centrifugo несёт на одно принятое сообщение) величина остаётся полезной — отсюда новое название.",
+          "description": "Client publication pushes / accepted messages. Числитель — centrifugo_transport_messages_sent{frame_type=\"push_publication\"}: реальные push-фреймы клиентам, но считает ВСЕ realtime-публикации (message.created, unread.changed, read receipts, session.revoked — см. вызовы realtime.publish() в коде), не только message.created. Значение >1 не всегда значит «сообщение доставлено N получателям» — может значить «одно сообщение породило N разных realtime-событий». Как capacity-сигнал (сколько push-нагрузки Centrifugo несёт на одно принятое сообщение) величина полезна.",
           "options": { "graphMode": "area" },
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "short" } },
@@ -138,14 +138,14 @@ spec:
         {
           "id": 8,
           "type": "row",
-          "title": "По подам",
+          "title": "By pod",
           "gridPos": { "h": 1, "w": 24, "x": 0, "y": 11 }
         },
         {
           "id": 9,
           "type": "bargauge",
-          "title": "Connections по подам",
-          "description": "Bar gauge, не timeseries (ревью PR #73, визуальный проход): 10 подов и 300k соединений в среднем выглядят благополучно, даже если один под держит 100k, а остальные по 22k (docs 06-observability.md, часть 3) — ranking читается быстрее line chart с 10 накладывающимися сериями. Тренд общего числа во времени — панель 'Connections' в верхней строке.",
+          "title": "Connections by pod",
+          "description": "10 подов и 300k соединений в среднем выглядят благополучно, даже если один под держит 100k, а остальные по 22k (docs 06-observability.md, часть 3) — ranking читается быстрее line chart с 10 накладывающимися сериями. Тренд общего числа во времени — панель «Connections» в верхней строке.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "options": {
             "orientation": "horizontal",
@@ -160,7 +160,7 @@ spec:
         {
           "id": 10,
           "type": "bargauge",
-          "title": "Subscriptions по подам",
+          "title": "Subscriptions by pod",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "options": {
             "orientation": "horizontal",
@@ -175,14 +175,18 @@ spec:
         {
           "id": 11,
           "type": "row",
-          "title": "Пропускная способность и Redis pub/sub",
+          "title": "Throughput & Redis pub/sub",
           "gridPos": { "h": 1, "w": 24, "x": 0, "y": 20 }
         },
         {
           "id": 12,
           "type": "timeseries",
-          "title": "Сообщения узла: отправлено в broker / получено из broker",
-          "description": "centrifugo_node_messages_sent_count = отдано в Redis pub/sub этим узлом, received_count = получено из шины (включая от других узлов) — это не 'messages/sec' пользователя, это внутренняя шина Centrifugo.",
+          "title": "Node messages: sent to broker / received from broker",
+          "description": "centrifugo_node_messages_sent_count = отдано в Redis pub/sub этим узлом, received_count = получено из шины (включая от других узлов) — это не «messages/sec» пользователя, это внутренняя шина Centrifugo.",
+          "options": {
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max", "mean"] },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          },
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "cps" } },
           "gridPos": { "h": 8, "w": 12, "x": 0, "y": 21 },
@@ -195,6 +199,10 @@ spec:
           "id": 13,
           "type": "timeseries",
           "title": "Redis pub/sub lag p99 + dropped",
+          "options": {
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max", "mean"] },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          },
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": {} },
           "gridPos": { "h": 8, "w": 12, "x": 12, "y": 21 },
@@ -206,14 +214,18 @@ spec:
         {
           "id": 14,
           "type": "row",
-          "title": "Подключение и восстановление",
+          "title": "Connections & recovery",
           "gridPos": { "h": 1, "w": 24, "x": 0, "y": 29 }
         },
         {
           "id": 15,
           "type": "timeseries",
-          "title": "Подключения приняты vs disconnect, инициированный сервером",
+          "title": "Connections accepted vs server-initiated disconnects",
           "description": "connections_accepted не отличает первое подключение от переподключения — таких данных Centrifugo не отдаёт. Резкий рост при стабильной аудитории — подозрение на reconnect-петлю.",
+          "options": {
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max", "mean"] },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          },
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "cps" } },
           "gridPos": { "h": 8, "w": 12, "x": 0, "y": 30 },
@@ -241,7 +253,7 @@ spec:
           "gridPos": { "h": 2, "w": 24, "x": 0, "y": 38 },
           "options": {
             "mode": "markdown",
-            "content": "Browser canary (§16 load-testing) метрики пока не пушатся в VictoriaMetrics. CPU/RAM Centrifugo по подам — на 05 · Capacity (recording rule, не отсутствует, как считалось до второго прохода ревью)."
+            "content": "Browser canary (§16 load-testing) метрики пока не пушатся в VictoriaMetrics. CPU/RAM Centrifugo по подам — на 05 · Capacity."
           }
         }
       ]
