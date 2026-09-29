@@ -314,16 +314,23 @@ MESSAGE_SEND_OPERATIONS = Counter(
     "Исходы приёма сообщения (коммит в Postgres)",
     ["service", "result"],
 )
+# `result` — тоже метка гистограммы, а не только счётчика: SLI «Запись
+# сообщения» в docs/messenger/06-observability.md определён как «коммит
+# состоялся И задержка ≤ 1с» — конъюнкция, а не только success/failed сам
+# по себе. Без метки result на бакетах гистограмма не даёт объединить
+# «успешно» и «уложился в срок» в одном PromQL-запросе: пришлось бы
+# join'ить два разных ряда по времени, чего Prometheus не умеет.
+# Дефолтные бакеты prometheus_client включают ровно 1.0, что и нужно.
 MESSAGE_COMMIT_DURATION = Histogram(
     "messenger_message_commit_duration_seconds",
     "T_commit: длительность транзакции, вставившей сообщение и обе записи outbox",
-    ["service"],
+    ["service", "result"],
 )
 
 
 def message_commit(duration_seconds: float, *, result: str) -> None:
     MESSAGE_SEND_OPERATIONS.labels(service=SERVICE, result=result).inc()
-    MESSAGE_COMMIT_DURATION.labels(service=SERVICE).observe(
+    MESSAGE_COMMIT_DURATION.labels(service=SERVICE, result=result).observe(
         duration_seconds, exemplar=_exemplar()
     )
 

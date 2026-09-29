@@ -128,12 +128,12 @@ spec:
           "id": 7,
           "type": "stat",
           "title": "Realtime amplification",
-          "description": "Client publication pushes / accepted messages. Числитель — centrifugo_transport_messages_sent{frame_type=\"push_publication\"}: реальные push-фреймы клиентам, но считает ВСЕ realtime-публикации (message.created, unread.changed, read receipts, session.revoked — см. вызовы realtime.publish() в коде), не только message.created. Значение >1 не всегда значит «сообщение доставлено N получателям» — может значить «одно сообщение породило N разных realtime-событий». Как capacity-сигнал (сколько push-нагрузки Centrifugo несёт на одно принятое сообщение) величина полезна.",
+          "description": "Client publication pushes / accepted messages. Числитель — centrifugo_transport_messages_sent{frame_type=\"push_publication\"}: реальные push-фреймы клиентам, но считает ВСЕ realtime-публикации (message.created, unread.changed, read receipts, session.revoked — см. вызовы realtime.publish() в коде), не только message.created. Значение >1 не всегда значит «сообщение доставлено N получателям» — может значить «одно сообщение породило N разных realtime-событий». Как capacity-сигнал (сколько push-нагрузки Centrifugo несёт на одно принятое сообщение) величина полезна. N/A без принятых сообщений — не 0.",
           "options": { "graphMode": "area" },
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "short" } },
+          "fieldConfig": { "defaults": { "unit": "short", "noValue": "N/A" } },
           "gridPos": { "h": 5, "w": 6, "x": 18, "y": 6 },
-          "targets": [ { "expr": "sum(rate(centrifugo_transport_messages_sent{namespace=~\"$namespace\",frame_type=\"push_publication\"}[5m])) / clamp_min(sum(rate(messenger_message_send_operations_total{namespace=~\"$namespace\",result=\"success\"}[5m])), 0.001)" } ]
+          "targets": [ { "expr": "sum(rate(centrifugo_transport_messages_sent{namespace=~\"$namespace\",frame_type=\"push_publication\"}[5m])) / sum(rate(messenger_message_send_operations_total{namespace=~\"$namespace\",result=\"success\"}[5m]))" } ]
         },
         {
           "id": 8,
@@ -198,16 +198,31 @@ spec:
         {
           "id": 13,
           "type": "timeseries",
-          "title": "Redis pub/sub lag p99 + dropped",
+          "title": "Redis pub/sub lag p99",
+          "description": "Секунды — отдельная ось от dropped/s ниже: одна timeseries с двумя разными единицами (seconds и messages/sec) на общей Y-оси искажала масштаб обоих рядов.",
           "options": {
             "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max", "mean"] },
             "tooltip": { "mode": "multi", "sort": "desc" }
           },
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": {} },
-          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 21 },
+          "fieldConfig": { "defaults": { "unit": "s" } },
+          "gridPos": { "h": 4, "w": 12, "x": 12, "y": 21 },
           "targets": [
-            { "expr": "histogram_quantile(0.99, sum by (le) (rate(centrifugo_node_pub_sub_lag_seconds_bucket{namespace=~\"$namespace\"}[5m])))", "legendFormat": "lag p99 (с)" },
+            { "expr": "histogram_quantile(0.99, sum by (le) (rate(centrifugo_node_pub_sub_lag_seconds_bucket{namespace=~\"$namespace\"}[5m])))", "legendFormat": "lag p99" }
+          ]
+        },
+        {
+          "id": 22,
+          "type": "timeseries",
+          "title": "Redis pub/sub dropped",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "options": {
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max", "mean"] },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          },
+          "fieldConfig": { "defaults": { "unit": "cps" } },
+          "gridPos": { "h": 4, "w": 12, "x": 12, "y": 25 },
+          "targets": [
             { "expr": "sum(rate(centrifugo_broker_redis_pub_sub_dropped_messages{namespace=~\"$namespace\"}[5m]))", "legendFormat": "dropped/s" }
           ]
         },
@@ -238,12 +253,12 @@ spec:
           "id": 16,
           "type": "timeseries",
           "title": "Recovery success ratio",
-          "description": "centrifugo_client_recover{recovered=\"yes\"} / всего. Успешное восстановление после разрыва без полной resync.",
+          "description": "centrifugo_client_recover{recovered=\"yes\"} / всего. Успешное восстановление после разрыва без полной resync. N/A без recovery-попыток за окно — не 0%.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1, "min": 0 } },
+          "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1, "min": 0, "noValue": "N/A" } },
           "gridPos": { "h": 8, "w": 12, "x": 12, "y": 30 },
           "targets": [
-            { "expr": "sum(rate(centrifugo_client_recover{namespace=~\"$namespace\",recovered=\"yes\"}[15m])) / clamp_min(sum(rate(centrifugo_client_recover{namespace=~\"$namespace\"}[15m])), 0.001)" }
+            { "expr": "sum(rate(centrifugo_client_recover{namespace=~\"$namespace\",recovered=\"yes\"}[15m])) / sum(rate(centrifugo_client_recover{namespace=~\"$namespace\"}[15m]))" }
           ]
         },
         {

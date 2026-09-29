@@ -49,7 +49,7 @@ spec:
           "gridPos": { "h": 2, "w": 24, "x": 0, "y": 1 },
           "options": {
             "mode": "markdown",
-            "content": "t1 T_commit → t2 T_outbox → t3 T_kafka → t4 T_consumer → t5 T_realtime. T_delivery — приближение occurred_at → Centrifugo, не ack браузера Б (телеметрии браузера ещё нет, G3)."
+            "content": "t1 T_commit → t2 T_outbox → t3 T_kafka → t4 T_consumer → t5 T_realtime. T_delivery — приближение occurred_at → Centrifugo, не ack браузера Б (телеметрии браузера ещё нет, G3). T_outbox и T_consumer — длительность обработки на своей стадии (SQL claim_batch / обработка пачки), а не время ожидания между стадиями — застревание в очереди outbox ловит отдельная метрика Outbox oldest age."
           }
         },
         {
@@ -116,8 +116,8 @@ spec:
         {
           "id": 13,
           "type": "bargauge",
-          "title": "Where seconds are lost right now — p99 by stage",
-          "description": "Bar gauge вместо пяти отдельных графиков: глазами сразу видно, какая стадия — bottleneck, не сравнивая пять line chart с разным масштабом Y. Детальные тренды во времени — панели ниже, для каждой стадии отдельно.",
+          "title": "Component processing p99 by stage",
+          "description": "Bar gauge вместо пяти отдельных графиков: глазами сразу видно, какой компонент дольше всего обрабатывает свою часть работы. Это НЕ сквозные interval'ы «сообщение ждало N секунд между стадией A и B» — T_outbox измеряет длительность одного SQL claim_batch() (латентность аренды пачки, обычно единицы мс), а T_consumer — длительность обработки уже полученной из Kafka пачки, а не время ожидания consumer'а. Настоящий сигнал застревания в outbox — Outbox oldest age ниже (возраст самой старой непрочитанной записи), не эта панель. Детальные тренды во времени — панели ниже, для каждой стадии отдельно.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "options": {
             "orientation": "horizontal",
@@ -158,7 +158,7 @@ spec:
         {
           "id": 4,
           "type": "timeseries",
-          "title": "T_outbox p99 (аренда пачки)",
+          "title": "T_outbox p99 (batch claim)",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } } },
           "gridPos": { "h": 7, "w": 8, "x": 8, "y": 13 },
@@ -169,7 +169,7 @@ spec:
         {
           "id": 5,
           "type": "timeseries",
-          "title": "T_kafka p99 (публикация брокеру)",
+          "title": "T_kafka p99 (publish to broker)",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } } },
           "gridPos": { "h": 7, "w": 8, "x": 16, "y": 13 },
@@ -180,7 +180,7 @@ spec:
         {
           "id": 6,
           "type": "timeseries",
-          "title": "T_consumer p99 (обработка пачки)",
+          "title": "T_consumer p99 (batch processing)",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "options": {
             "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max", "mean"] },
@@ -198,7 +198,7 @@ spec:
         {
           "id": 7,
           "type": "timeseries",
-          "title": "T_realtime p99 (публикация в Centrifugo)",
+          "title": "T_realtime p99 (publish to Centrifugo)",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } } },
           "gridPos": { "h": 7, "w": 8, "x": 8, "y": 20 },
@@ -209,7 +209,7 @@ spec:
         {
           "id": 8,
           "type": "timeseries",
-          "title": "T_delivery p99 (приближение, occurred_at → Centrifugo)",
+          "title": "T_delivery p99 (approx, occurred_at → Centrifugo)",
           "description": "Не t7 из документа — подтверждение браузера Б. См. текстовую панель выше.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } } },
@@ -227,7 +227,7 @@ spec:
         {
           "id": 10,
           "type": "timeseries",
-          "title": "outbox: события по исходу",
+          "title": "Outbox events by outcome",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "options": {
             "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max", "mean"] },
@@ -245,7 +245,7 @@ spec:
         {
           "id": 11,
           "type": "timeseries",
-          "title": "realtime: доставка по исходу",
+          "title": "Realtime delivery by outcome",
           "description": "duplicate — не отказ, а доказательство того, что дедупликация работает (at-least-once транспорт).",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "options": {
@@ -264,7 +264,7 @@ spec:
         {
           "id": 12,
           "type": "timeseries",
-          "title": "Outbox pending (шт.)",
+          "title": "Outbox pending",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "short", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } } },
           "gridPos": { "h": 7, "w": 12, "x": 0, "y": 35 },
@@ -277,7 +277,7 @@ spec:
         {
           "id": 14,
           "type": "timeseries",
-          "title": "Outbox oldest age (с)",
+          "title": "Outbox oldest age",
           "description": "Разнесено с pending count: штуки и секунды на одной оси взаимно маскировали друг друга.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } } },

@@ -58,12 +58,12 @@ spec:
           "id": 13,
           "type": "stat",
           "title": "Success rate",
-          "description": "(2xx+3xx) / all application requests. Health probes and the metrics endpoint are excluded. Крупнее, чем 4xx/5xx по отдельности — единственное число, отвечающее «всё хорошо?» одним взглядом.",
+          "description": "(2xx+3xx) / all application requests. Health probes and the metrics endpoint are excluded. Крупнее, чем 4xx/5xx по отдельности — единственное число, отвечающее «всё хорошо?» одним взглядом. N/A без трафика — ноль запросов не значит ноль успешных.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "options": { "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
           "fieldConfig": {
             "defaults": {
-              "unit": "percentunit",
+              "unit": "percentunit", "noValue": "N/A",
               "thresholds": { "mode": "absolute", "steps": [
                 { "color": "red", "value": null },
                 { "color": "yellow", "value": 0.95 },
@@ -73,31 +73,32 @@ spec:
           },
           "gridPos": { "h": 5, "w": 4, "x": 4, "y": 1 },
           "targets": [
-            { "expr": "sum(rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\",status_class=~\"2xx|3xx\"}[5m])) / clamp_min(sum(rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m])), 0.001)" }
+            { "expr": "sum(rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\",status_class=~\"2xx|3xx\"}[5m])) / sum(rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m]))" }
           ]
         },
         {
           "id": 4,
           "type": "stat",
           "title": "4xx %",
-          "description": "4xx не обязательно отказ сервиса — часть этого потока штатные rejected (валидация, авторизация, лимитер). См. docs/messenger/06-observability.md, часть 4, поле result.",
+          "description": "4xx не обязательно отказ сервиса — часть этого потока штатные rejected (валидация, авторизация, лимитер). См. docs/messenger/06-observability.md, часть 4, поле result. N/A без трафика.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "options": { "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
-          "fieldConfig": { "defaults": { "unit": "percentunit" } },
+          "fieldConfig": { "defaults": { "unit": "percentunit", "noValue": "N/A" } },
           "gridPos": { "h": 5, "w": 4, "x": 8, "y": 1 },
           "targets": [
-            { "expr": "sum(rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\",status_class=\"4xx\"}[5m])) / clamp_min(sum(rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m])), 0.001)" }
+            { "expr": "sum(rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\",status_class=\"4xx\"}[5m])) / sum(rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m]))" }
           ]
         },
         {
           "id": 3,
           "type": "stat",
           "title": "5xx %",
+          "description": "N/A без трафика — не путать с 0%.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "options": { "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
           "fieldConfig": {
             "defaults": {
-              "unit": "percentunit",
+              "unit": "percentunit", "noValue": "N/A",
               "thresholds": { "mode": "absolute", "steps": [
                 { "color": "green", "value": null },
                 { "color": "yellow", "value": 0.01 },
@@ -107,7 +108,7 @@ spec:
           },
           "gridPos": { "h": 5, "w": 4, "x": 12, "y": 1 },
           "targets": [
-            { "expr": "sum(rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\",status_class=\"5xx\"}[5m])) / clamp_min(sum(rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m])), 0.001)" }
+            { "expr": "sum(rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\",status_class=\"5xx\"}[5m])) / sum(rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m]))" }
           ]
         },
         {
@@ -204,9 +205,12 @@ spec:
         {
           "id": 9,
           "type": "table",
-          "title": "Top routes",
-          "description": "RPS/Success/4xx/5xx/p95/p99 в одной строке на маршрут — сортируется кликом по заголовку колонки (p99, 5xx, RPS). Заменяет три отдельных line chart (RPS/p99/4xx-5xx by route): ranking по нескольким метрикам одновременно таблица показывает лучше, чем сравнение трёх графиков.",
+          "title": "Routes",
+          "description": "RPS/Success/4xx/5xx/p95/p99 в одной строке на маршрут, по умолчанию отсортировано по p99 — кликом по заголовку колонки можно пересортировать (5xx, RPS...). Не top-N: показаны все маршруты, а не топ по какому-то одному измерению — отсюда название без «Top». Заменяет три отдельных line chart (RPS/p99/4xx-5xx by route).",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "options": {
+            "sortBy": [ { "displayName": "p99", "desc": true } ]
+          },
           "transformations": [
             { "id": "merge", "options": {} },
             {
@@ -239,9 +243,9 @@ spec:
           "gridPos": { "h": 10, "w": 24, "x": 0, "y": 15 },
           "targets": [
             { "refId": "A", "format": "table", "instant": true, "expr": "sum by (route) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m]))" },
-            { "refId": "B", "format": "table", "instant": true, "expr": "sum by (route) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\",status_class=~\"2xx|3xx\"}[5m])) / clamp_min(sum by (route) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m])), 0.001)" },
-            { "refId": "C", "format": "table", "instant": true, "expr": "sum by (route) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\",status_class=\"4xx\"}[5m])) / clamp_min(sum by (route) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m])), 0.001)" },
-            { "refId": "D", "format": "table", "instant": true, "expr": "sum by (route) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\",status_class=\"5xx\"}[5m])) / clamp_min(sum by (route) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m])), 0.001)" },
+            { "refId": "B", "format": "table", "instant": true, "expr": "sum by (route) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\",status_class=~\"2xx|3xx\"}[5m])) / sum by (route) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m]))" },
+            { "refId": "C", "format": "table", "instant": true, "expr": "sum by (route) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\",status_class=\"4xx\"}[5m])) / sum by (route) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m]))" },
+            { "refId": "D", "format": "table", "instant": true, "expr": "sum by (route) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\",status_class=\"5xx\"}[5m])) / sum by (route) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m]))" },
             { "refId": "E", "format": "table", "instant": true, "expr": "histogram_quantile(0.95, sum by (le, route) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m])))" },
             { "refId": "F", "format": "table", "instant": true, "expr": "histogram_quantile(0.99, sum by (le, route) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[5m])))" }
           ]
