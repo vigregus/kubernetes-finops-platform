@@ -10,13 +10,19 @@ spec:
   json: |
     {
       "uid": "messenger-load-compare",
-      "title": "04 · Load Compare",
-      "description": "docs/messenger/15-load-testing-platform.md, раздел 22 (Messenger / Load Compare) и раздел 28 (сравнение прогонов) — выбор двух конкретных прогонов по run_id, а не offset-приближение. Раздел 20 разметил k6-метрики и summary (раздел 21, load_run_*) лейблами run_id/git_sha/profile — этого хватает, чтобы сравнивать конкретный commit A с конкретным commit B по имени, как и требует раздел 28, а не по времени. Живо проверено: два прогона подряд с разными run_id, оба выбираются в переменных ниже.",
+      "title": "07 · Load Compare",
+      "description": "docs/messenger/15-load-testing-platform.md, раздел 22 (Messenger / Load Compare) и раздел 28 (сравнение прогонов) — выбор двух конкретных прогонов по run_id. Раздел 20 разметил k6-метрики и summary (раздел 21, load_run_*) лейблами run_id/git_sha/profile — этого хватает, чтобы сравнивать конкретный commit A с конкретным commit B по имени, а не по времени. Renamed 04 → 07: номер 04 занят 04 · Realtime — Centrifugo с 2026-09.",
       "tags": ["messenger", "load-testing"],
       "schemaVersion": 39,
-      "version": 1,
+      "version": 2,
       "editable": true,
       "time": { "from": "now-6h", "to": "now" },
+      "links": [
+        { "title": "01 · SLO Overview", "type": "link", "url": "/d/messenger-slo-overview", "icon": "dashboard" },
+        { "title": "02 · Message Journey", "type": "link", "url": "/d/messenger-messaging-pipeline", "icon": "dashboard" },
+        { "title": "05 · Capacity — USE", "type": "link", "url": "/d/messenger-capacity", "icon": "dashboard" },
+        { "title": "06 · Load Run", "type": "link", "url": "/d/messenger-load-run", "icon": "dashboard" }
+      ],
       "templating": {
         "list": [
           {
@@ -41,23 +47,24 @@ spec:
         {
           "id": 1,
           "type": "text",
-          "title": "Как читать",
+          "title": "How to read",
           "gridPos": { "h": 3, "w": 24, "x": 0, "y": 0 },
           "options": {
             "mode": "markdown",
-            "content": "Выберите `run_id_current` и `run_id_baseline` в переменных сверху — оба списка приходят из `label_values(load_run_accepted_messages, run_id)`, то есть из прогонов, у которых шаг `reconciliation` (раздел 21) успел отправить сводку в VictoriaMetrics. Временной диапазон дашборда влияет только на то, какие `run_id` видны в списке (данные читаются `label_values` за это окно) — сами метрики ниже не зависят от диапазона, они читаются как последнее значение по `run_id`, а не агрегатом за период. **Чего здесь нет**: `duplicate_messages` (нужна per-message correlation из раздела 13, не реализована целиком), `recovery` (раздел 19 не реализован), автоматический вердикт «лучше/хуже» — числа рядом, сравнение на глаз, как и просит раздел 22 (никакого единственного числа вместо трёх режимов — раздел 18)."
+            "content": "Выберите `run_id_current` и `run_id_baseline` в переменных сверху — оба списка приходят из `label_values(load_run_accepted_messages, run_id)`, то есть из прогонов, у которых шаг `reconciliation` успел отправить сводку в VictoriaMetrics. Метрики читаются как последнее значение по `run_id`, не агрегатом за период дашборда. Not here: duplicate_messages (нужна per-message correlation, не реализована), recovery (раздел 19 не реализован), автоматический вердикт «лучше/хуже» — числа рядом, сравнение на глаз (раздел 18 запрещает сворачивать в одно число)."
           }
         },
         {
           "id": 2,
           "type": "row",
-          "title": "Throughput и корректность",
+          "title": "Throughput & correctness",
           "gridPos": { "h": 1, "w": 24, "x": 0, "y": 3 }
         },
         {
           "id": 3,
           "type": "stat",
           "title": "Accepted — current",
+          "options": { "graphMode": "area" },
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "short" } },
           "gridPos": { "h": 5, "w": 4, "x": 0, "y": 4 },
@@ -67,6 +74,7 @@ spec:
           "id": 4,
           "type": "stat",
           "title": "Accepted — baseline",
+          "options": { "graphMode": "area" },
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "short" } },
           "gridPos": { "h": 5, "w": 4, "x": 4, "y": 4 },
@@ -76,6 +84,7 @@ spec:
           "id": 5,
           "type": "stat",
           "title": "Persisted — current",
+          "options": { "graphMode": "area" },
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "short" } },
           "gridPos": { "h": 5, "w": 4, "x": 8, "y": 4 },
@@ -85,6 +94,7 @@ spec:
           "id": 6,
           "type": "stat",
           "title": "Persisted — baseline",
+          "options": { "graphMode": "area" },
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "short" } },
           "gridPos": { "h": 5, "w": 4, "x": 12, "y": 4 },
@@ -94,6 +104,7 @@ spec:
           "id": 7,
           "type": "stat",
           "title": "Missing — current",
+          "options": { "graphMode": "area" },
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": {
             "defaults": {
@@ -111,6 +122,7 @@ spec:
           "id": 8,
           "type": "stat",
           "title": "Missing — baseline",
+          "options": { "graphMode": "area" },
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": {
             "defaults": {
@@ -134,6 +146,7 @@ spec:
           "id": 10,
           "type": "stat",
           "title": "HTTP p95 — current",
+          "options": { "graphMode": "area" },
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "s" } },
           "gridPos": { "h": 5, "w": 4, "x": 0, "y": 10 },
@@ -143,6 +156,7 @@ spec:
           "id": 11,
           "type": "stat",
           "title": "HTTP p95 — baseline",
+          "options": { "graphMode": "area" },
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "s" } },
           "gridPos": { "h": 5, "w": 4, "x": 4, "y": 10 },
@@ -152,6 +166,7 @@ spec:
           "id": 12,
           "type": "stat",
           "title": "HTTP p99 — current",
+          "options": { "graphMode": "area" },
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "s" } },
           "gridPos": { "h": 5, "w": 4, "x": 8, "y": 10 },
@@ -161,6 +176,7 @@ spec:
           "id": 13,
           "type": "stat",
           "title": "HTTP p99 — baseline",
+          "options": { "graphMode": "area" },
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "s" } },
           "gridPos": { "h": 5, "w": 4, "x": 12, "y": 10 },
@@ -170,6 +186,7 @@ spec:
           "id": 14,
           "type": "stat",
           "title": "WS delivery p95 — current",
+          "options": { "graphMode": "area" },
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "s" } },
           "gridPos": { "h": 5, "w": 4, "x": 16, "y": 10 },
@@ -179,6 +196,7 @@ spec:
           "id": 15,
           "type": "stat",
           "title": "WS delivery p95 — baseline",
+          "options": { "graphMode": "area" },
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "s" } },
           "gridPos": { "h": 5, "w": 4, "x": 20, "y": 10 },
@@ -194,6 +212,7 @@ spec:
           "id": 17,
           "type": "stat",
           "title": "Max outbox age — current",
+          "options": { "graphMode": "area" },
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "s" } },
           "gridPos": { "h": 5, "w": 6, "x": 0, "y": 16 },
@@ -203,6 +222,7 @@ spec:
           "id": 18,
           "type": "stat",
           "title": "Max outbox age — baseline",
+          "options": { "graphMode": "area" },
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "s" } },
           "gridPos": { "h": 5, "w": 6, "x": 6, "y": 16 },
@@ -212,6 +232,7 @@ spec:
           "id": 19,
           "type": "stat",
           "title": "Max Kafka lag — current",
+          "options": { "graphMode": "area" },
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "short" } },
           "gridPos": { "h": 5, "w": 6, "x": 12, "y": 16 },
@@ -221,6 +242,7 @@ spec:
           "id": 20,
           "type": "stat",
           "title": "Max Kafka lag — baseline",
+          "options": { "graphMode": "area" },
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "short" } },
           "gridPos": { "h": 5, "w": 6, "x": 18, "y": 16 },

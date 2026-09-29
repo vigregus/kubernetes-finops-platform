@@ -10,13 +10,19 @@ spec:
   json: |
     {
       "uid": "messenger-load-run",
-      "title": "03 · Load Run",
-      "description": "docs/messenger/15-load-testing-platform.md, раздел 22 (Messenger / Load Run) — один прогон LOCAL-CAPACITY-001, выбранный временным диапазоном дашборда (значит окном прогона, которое Argo Workflow печатает как startedAt/finishedAt), а не готовым фильтром по run_id: ни одна метрика здесь пока не несёт label run_id/git_sha/profile — раздел 20 явно требует такую разметку, а k6 сейчас вообще не пишет метрики в VictoriaMetrics (ServiceMonitor у k6-operator выключен). Все панели ниже — метрики самого приложения (messenger-api/outbox/Kafka/Centrifugo), которые уже существуют и уже используются в 01·SLO/02·Pipeline; этот дашборд не изобретает новых метрик, а собирает уже готовые в разрезе одного прогона.",
+      "title": "06 · Load Run",
+      "description": "docs/messenger/15-load-testing-platform.md, раздел 22 (Messenger / Load Run) — один прогон LOCAL-CAPACITY-001, выбранный временным диапазоном дашборда (startedAt/finishedAt из `kubectl get wf -n load-testing`), а не фильтром по run_id: ни одна метрика здесь не несёт label run_id/git_sha/profile (раздел 20 требует такую разметку только для k6-side/summary-метрик — раздел 21). Панели ниже — метрики самого приложения, уже используемые на 01·SLO/02·Journey, собранные в разрезе одного прогона. Renamed 03 → 06: номер 03 занят 03 · API — RED с 2026-09.",
       "tags": ["messenger", "load-testing"],
       "schemaVersion": 39,
-      "version": 1,
+      "version": 2,
       "editable": true,
       "time": { "from": "now-15m", "to": "now" },
+      "links": [
+        { "title": "01 · SLO Overview", "type": "link", "url": "/d/messenger-slo-overview", "icon": "dashboard" },
+        { "title": "02 · Message Journey", "type": "link", "url": "/d/messenger-messaging-pipeline", "icon": "dashboard" },
+        { "title": "05 · Capacity — USE", "type": "link", "url": "/d/messenger-capacity", "icon": "dashboard" },
+        { "title": "07 · Load Compare", "type": "link", "url": "/d/messenger-load-compare", "icon": "dashboard" }
+      ],
       "templating": {
         "list": [
           {
@@ -33,11 +39,11 @@ spec:
         {
           "id": 1,
           "type": "text",
-          "title": "Как читать",
+          "title": "How to read",
           "gridPos": { "h": 3, "w": 24, "x": 0, "y": 0 },
           "options": {
             "mode": "markdown",
-            "content": "Временной диапазон дашборда = окно прогона: возьмите `startedAt`/`finishedAt` из `kubectl get wf -n load-testing <имя>` или из вывода `scripts/load-testing-run.sh` и выставьте его сверху. **Чего здесь нет и почему**: offered/accepted/dropped_iterations из k6 — k6 не пишет метрики в VictoriaMetrics (раздел 20, не реализовано); Playwright canary — раздел 16 не реализован; разбивка по `run_id`/`git_sha`/`profile` — ни одна метрика ниже не несёт этих label, раздел 20 требует отдельной разметки; CPU/RAM/рестарты подов — `scripts/check-dashboards.py` не может подтвердить в этом репозитории применённый манифест, который снимает `container_cpu_usage_seconds_total`/`container_memory_working_set_bytes`/`kube_pod_container_status_restarts_total` (это скрейпы по умолчанию самого чарта vm-k8s-stack, а не отдельный манифест) — добавлять панель на метрике без такого подтверждения означало бы обойти собственную проверку репозитория на опечатки/несуществующие метрики. `accepted`/`persisted` из reconciliation смотрите в логе шага `reconciliation` того же Workflow (`kubectl logs`) — раздел 14."
+            "content": "Временной диапазон дашборда = окно прогона: возьмите `startedAt`/`finishedAt` из `kubectl get wf -n load-testing <имя>` и выставьте его сверху. `accepted`/`persisted` из reconciliation — в логе шага `reconciliation` того же Workflow (`kubectl logs`). Not here: k6 offered/accepted/dropped_iterations (k6 не пишет в VictoriaMetrics), Playwright canary метрики (не пушатся), разбивка по run_id/git_sha/profile (эти метрики её не несут — см. 07 · Load Compare, где несёт)."
           }
         },
         {
@@ -49,9 +55,19 @@ spec:
         {
           "id": 3,
           "type": "timeseries",
-          "title": "Отправка сообщений: success vs failure",
+          "title": "Message send rate: success vs failure",
+          "options": {
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max", "mean"] },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          },
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "reqps" } },
+          "fieldConfig": {
+            "defaults": { "unit": "reqps", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } },
+            "overrides": [
+              { "matcher": { "id": "byName", "options": "success" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } } ] },
+              { "matcher": { "id": "byName", "options": "failed" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } } ] }
+            ]
+          },
           "gridPos": { "h": 7, "w": 12, "x": 0, "y": 4 },
           "targets": [
             {
@@ -63,13 +79,18 @@ spec:
         {
           "id": 4,
           "type": "timeseries",
-          "title": "HTTP запросов в секунду (API), по route",
+          "title": "HTTP requests/sec (API), by route",
+          "description": "route!~\"/metrics|/livez|/readyz\" исключает scrape и kubelet-пробы.",
+          "options": {
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max", "mean"] },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          },
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "reqps" } },
+          "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } } },
           "gridPos": { "h": 7, "w": 12, "x": 12, "y": 4 },
           "targets": [
             {
-              "expr": "sum by (route) (rate(http_requests_total{namespace=~\"$namespace\"}[1m]))",
+              "expr": "sum by (route) (rate(http_requests_total{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[1m]))",
               "legendFormat": "{{route}}"
             }
           ]
@@ -84,13 +105,25 @@ spec:
           "id": 6,
           "type": "timeseries",
           "title": "HTTP request duration: p50 / p95 / p99",
+          "description": "Цветовая конвенция пакета: p50 приглушённый, p95 сильнее, p99 самый насыщенный — та же семантика на 01/02/03.",
+          "options": {
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max", "mean"] },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          },
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "s" } },
+          "fieldConfig": {
+            "defaults": { "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } },
+            "overrides": [
+              { "matcher": { "id": "byName", "options": "p50" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "light-blue" } } ] },
+              { "matcher": { "id": "byName", "options": "p95" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } } ] },
+              { "matcher": { "id": "byName", "options": "p99" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "dark-blue" } } ] }
+            ]
+          },
           "gridPos": { "h": 7, "w": 8, "x": 0, "y": 12 },
           "targets": [
-            { "expr": "histogram_quantile(0.50, sum by (le) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\"}[1m])))", "legendFormat": "p50" },
-            { "expr": "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\"}[1m])))", "legendFormat": "p95" },
-            { "expr": "histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\"}[1m])))", "legendFormat": "p99" }
+            { "expr": "histogram_quantile(0.50, sum by (le) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[1m])))", "legendFormat": "p50" },
+            { "expr": "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[1m])))", "legendFormat": "p95" },
+            { "expr": "histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{namespace=~\"$namespace\",route!~\"/metrics|/livez|/readyz\"}[1m])))", "legendFormat": "p99" }
           ]
         },
         {
@@ -98,7 +131,7 @@ spec:
           "type": "timeseries",
           "title": "T_commit p99 (API → Postgres)",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "s" } },
+          "fieldConfig": { "defaults": { "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } } },
           "gridPos": { "h": 7, "w": 8, "x": 8, "y": 12 },
           "targets": [
             { "expr": "histogram_quantile(0.99, sum by (le) (rate(messenger_message_commit_duration_seconds_bucket{namespace=~\"$namespace\"}[1m])))" }
@@ -107,10 +140,10 @@ spec:
         {
           "id": 8,
           "type": "timeseries",
-          "title": "T_delivery p99 (WS, приближение occurred_at → Centrifugo)",
-          "description": "Не ack браузера получателя — телеметрии браузера ещё нет (см. также messenger-messaging-pipeline).",
+          "title": "T_delivery p99 (WS, occurred_at → Centrifugo approx)",
+          "description": "Не ack браузера получателя — телеметрии браузера ещё нет (см. также 02 · Message Journey).",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "s" } },
+          "fieldConfig": { "defaults": { "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } } },
           "gridPos": { "h": 7, "w": 8, "x": 16, "y": 12 },
           "targets": [
             { "expr": "histogram_quantile(0.99, sum by (le) (rate(messenger_message_delivery_duration_seconds_bucket{namespace=~\"$namespace\"}[1m])))" }
@@ -119,34 +152,60 @@ spec:
         {
           "id": 9,
           "type": "row",
-          "title": "Backlog: outbox и Kafka",
+          "title": "Backlog: outbox & Kafka",
           "gridPos": { "h": 1, "w": 24, "x": 0, "y": 19 }
         },
         {
           "id": 10,
           "type": "timeseries",
-          "title": "Outbox: pending и возраст самой старой записи",
+          "title": "Outbox pending (count)",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": {} },
-          "gridPos": { "h": 7, "w": 12, "x": 0, "y": 20 },
+          "fieldConfig": { "defaults": { "unit": "short", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } } },
+          "gridPos": { "h": 7, "w": 8, "x": 0, "y": 20 },
           "targets": [
-            { "expr": "sum(messenger_outbox_pending{namespace=~\"$namespace\"})", "legendFormat": "pending (шт.)" },
-            { "expr": "max(messenger_outbox_oldest_age_seconds{namespace=~\"$namespace\"})", "legendFormat": "oldest age (с)" }
+            { "expr": "sum(messenger_outbox_pending{namespace=~\"$namespace\"})" }
+          ]
+        },
+        {
+          "id": 12,
+          "type": "timeseries",
+          "title": "Outbox oldest age (s)",
+          "description": "Разнесено с pending count: штуки и секунды на одной оси взаимно маскировали друг друга — тот же фикс, что и на остальных дашбордах пакета.",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } } },
+          "gridPos": { "h": 7, "w": 8, "x": 8, "y": 20 },
+          "targets": [
+            { "expr": "max(messenger_outbox_oldest_age_seconds{namespace=~\"$namespace\"})" }
           ]
         },
         {
           "id": 11,
           "type": "timeseries",
-          "title": "Kafka consumer lag (messenger-realtime, по топику)",
+          "title": "Kafka consumer lag (messenger-realtime, by topic)",
+          "description": "kafka_consumergroup_lag скрейпится в namespace kafka, не messenger — без фильтра по $namespace, фильтруется по consumergroup (тот же паттерн, что на 05 · Capacity).",
+          "options": {
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          },
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "short" } },
-          "gridPos": { "h": 7, "w": 12, "x": 12, "y": 20 },
+          "fieldConfig": { "defaults": { "unit": "short", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } } },
+          "gridPos": { "h": 7, "w": 8, "x": 16, "y": 20 },
           "targets": [
             {
               "expr": "sum by (topic) (kafka_consumergroup_lag{consumergroup=\"messenger-realtime\"})",
               "legendFormat": "{{topic}}"
             }
           ]
+        },
+        {
+          "id": 13,
+          "type": "text",
+          "title": "ℹ Scope",
+          "gridPos": { "h": 2, "w": 24, "x": 0, "y": 27 },
+          "options": {
+            "mode": "markdown",
+            "content": "CPU/RAM/restarts подов во время прогона — см. 05 · Capacity (не дублируется здесь). Playwright canary и k6 native-метрики — не пушатся в VictoriaMetrics."
+          }
         }
       ]
     }

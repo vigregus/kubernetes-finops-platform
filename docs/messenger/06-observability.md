@@ -1020,7 +1020,7 @@ outbox — **якорь** корневого span запроса, а не «те
 Приоритеты уже заданы в каталоге тестов: возраст outbox и Postgres будят,
 недоступность индикатора «печатает» не будит вообще.
 
-### Пять рабочих дашбордов + component drill-down, а не сорок
+### Пять рабочих дашбордов + load-testing + component drill-down, а не сорок
 
 Иерархия, а не россыпь: каждый следующий уровень детализирует предыдущий,
 а не дублирует его под другим углом (Grafana, hierarchical/drill-down
@@ -1060,7 +1060,9 @@ dashboard structure).
 | 03 | API — RED | что происходит с HTTP-слоем FastAPI (Rate/Errors/Duration)? | реализован, живо проверен (0 нарушений check-dashboards.py). Назывался "Edge / API" — переименован: Edge (Envoy/Cilium) здесь нет ни одной панели, только application layer. Сравнение Gateway vs API latency отложено — Hubble L7 HTTP метрики не внесены в EXTERNAL_METRICS |
 | 04 | Realtime — Centrifugo | что происходит с WebSocket/доставкой, по подам? | реализован, живо проверен. Realtime fan-out считается через `centrifugo_transport_messages_sent{frame_type="push_publication"}` (реальные push-фреймы клиенту) — первая версия делила `messenger_realtime_delivery_total` (одна публикация в канал, не по подписчикам) и была семантически неверна; browser canary метрики (§16 load-testing) сюда ещё не пушатся |
 | 05 | Capacity — USE | какой ресурс приближается к пределу? | реализован: CPU/RAM по контейнеру (через repo-local recording rule `container-resource-usage.yaml`), DB pool, Redis (memory/evictions/ops/clients/hit ratio/command latency — впервые наблюдается вообще, добавлен `redisExporter` в Redis CRD), Kafka (consumer lag + under-replicated partitions), outbox backlog, Centrifugo per-pod, dependency up. PgBouncer/postgres-exporter-уровня метрики и Kafka broker-level CPU/disk — не построены, см. текстовую панель самого дашборда |
-| 06+ | Component drill-down | почему конкретный компонент так себя ведёт? | уже есть как отдельные vendor-дашборды каталога (`postgres`, `cnpg-pgbouncer`, `kafka`, `cilium-agent`, `hubble-*`, `k8s-views-*`) — не перестраивались, остаются forensic-дашбордами, а не частью основной пятёрки |
+| 06 | Load Run | что происходило во время одного прогона LOCAL-CAPACITY-001? | реализован, живо проверен, приведён к визуальному стандарту пакета. Был "03 · Load Run" — переименован в "06": номер 03 занят с 2026-09 дашбордом 03 · API — RED (коллизия обнаружена постфактум, оба файла продолжали существовать и применяться независимо, но не были видны друг другу в навигации и в этой таблице) |
+| 07 | Load Compare | чем прогон A отличается от прогона B (по run_id)? | реализован, живо проверен, приведён к визуальному стандарту пакета. Был "04 · Load Compare" — переименован в "07": номер 04 занят дашбордом 04 · Realtime — Centrifugo, та же коллизия, что и у 06 |
+| 08+ | Component drill-down | почему конкретный компонент так себя ведёт? | уже есть как отдельные vendor-дашборды каталога (`postgres`, `cnpg-pgbouncer`, `kafka`, `cilium-agent`, `hubble-*`, `k8s-views-*`) — не перестраивались, остаются forensic-дашбордами, а не частью основной пятёрки |
 | — | Auth · Push · Attachments · Reconnect · Synthetic | вспомогательные критические пути с уже объявленными SLO (часть 1 этого документа: вход, переподключение, вложение, push, синтетика A→B) | не реализован. В прежней таблице существовал как "05 Auth · Push · Attachments"; при переходе на карту RED/USE (PR #73) этот дашборд по ошибке выпал из таблицы, а не был перенесён под другим номером — восстановлен здесь номером `—`, чтобы объявленные SLO не остались без дашборда даже на бумаге |
 | — | Release | что изменилось после выкатки | не реализован |
 
