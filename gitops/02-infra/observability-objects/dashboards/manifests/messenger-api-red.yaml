@@ -21,7 +21,8 @@ spec:
         { "title": "01 · SLO Overview", "type": "link", "url": "/d/messenger-slo-overview", "icon": "dashboard" },
         { "title": "02 · Message Journey", "type": "link", "url": "/d/messenger-messaging-pipeline", "icon": "dashboard" },
         { "title": "04 · Realtime — Centrifugo", "type": "link", "url": "/d/messenger-realtime", "icon": "dashboard" },
-        { "title": "05 · Capacity — USE", "type": "link", "url": "/d/messenger-capacity", "icon": "dashboard" }
+        { "title": "05 · Capacity — USE", "type": "link", "url": "/d/messenger-capacity", "icon": "dashboard" },
+        { "title": "06 · Load Run", "type": "link", "url": "/d/messenger-load-run", "icon": "dashboard" }
       ],
       "templating": {
         "list": [
