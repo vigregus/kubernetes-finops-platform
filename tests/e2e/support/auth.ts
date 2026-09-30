@@ -187,10 +187,24 @@ async function signInOnce(browser: Browser, fixture: Fixture): Promise<SignedIn>
 		// константы и то же деление рисков, что уже применялось в signInTab
 		// ниже: форма/кнопка — наш собственный рендер, короткий бюджет;
 		// редирект и обмен кода на токен — чужой процесс (Keycloak), полный.
+		//
+		// `click()` здесь — не тот случай короткого бюджета. По умолчанию он
+		// сам ждёт навигацию, начатую кликом, прежде чем вернуться — то есть
+		// раньше делил с `toKeycloak` один и тот же переход, но под своим,
+		// более коротким `FORM_TIMEOUT`. Живой дефект (верификация §17,
+		// прогон `local-capacity-mixed-6xjc5`, уже после фикса гонки с
+		// холодным стартом k6): клик прошёл, а сама навигация в Keycloak под
+		// нагрузкой не уложилась в 5с — `click()` упал таймаутом раньше, чем
+		// успел отработать `toKeycloak` с его полным бюджетом. Кнопка здесь
+		// не может отсутствовать (в отличие от `signInTab`, где это
+		// ожидаемый исход) — значит короткий бюджет ей не нужен, и клик
+		// обязан делить с `toKeycloak` один и тот же бюджет чужого процесса.
 		const toKeycloak = page.waitForURL((url) => url.href.startsWith(IDP_ORIGIN), {
 			timeout: CALLBACK_TIMEOUT,
 		})
-		await page.getByRole("button", { name: "Continue with Vector ID" }).click({ timeout: FORM_TIMEOUT })
+		await page
+			.getByRole("button", { name: "Continue with Vector ID" })
+			.click({ timeout: CALLBACK_TIMEOUT })
 		await toKeycloak
 
 		await page.fill("#username", fixture.email)
