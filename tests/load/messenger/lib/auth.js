@@ -42,7 +42,12 @@ function pathAndQuery(url) {
  * решает, ловить его или дать k6 засчитать это как ошибку итерации.
  */
 export function login(email, password) {
-  const state = `${__VU}-${__ITER}-${Date.now()}`;
+  // Не __VU/__ITER: `login()` теперь зовётся и из setup() (stress.js) —
+  // контекста без VU, где __ITER вообще не определена (ReferenceError,
+  // не undefined; живой дефект верификации §18, прогон stress-probe3).
+  // `state` — непрозрачная anti-replay строка, ей не нужен VU-контекст,
+  // только уникальность в пределах прогона.
+  const state = `${encodeURIComponent(email)}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const { verifier, challenge } = pkce();
 
   const authUrl =

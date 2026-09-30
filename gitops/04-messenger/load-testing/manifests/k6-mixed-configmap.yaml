@@ -207,7 +207,10 @@ data:
      * решает, ловить его или дать k6 засчитать это как ошибку итерации.
      */
     export function login(email, password) {
-      const state = `${__VU}-${__ITER}-${Date.now()}`;
+      // Не __VU/__ITER: login() зовётся и из setup() (stress.js) — контекста
+      // без VU, где __ITER не определена (ReferenceError). state — непрозрачная
+      // anti-replay строка, ей нужна только уникальность в пределах прогона.
+      const state = `${encodeURIComponent(email)}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const { verifier, challenge } = pkce();
 
       const authUrl =
