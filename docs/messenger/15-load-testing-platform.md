@@ -805,7 +805,7 @@ normal sampling vs 100%
 
 может измерить tracing overhead.
 
-## 24. Argo artifacts — `[ ]`
+## 24. Argo artifacts — `[~]` (`reconciliation` пишет `summary.json` до корректностного гейта — тем же доводом, что и push summary-метрик в разделе 21, — и публикует его как Argo output artifact; `browser-canary` отдаёт `canary_failures` output-параметром, а не только в stdout. Схема провалидирована `kubectl apply --dry-run=server`; живая проверка, что артефакт реально скачивается из Argo после прогона, — нет)
 
 Каждый workflow должен сохранять summary artifact, например:
 
