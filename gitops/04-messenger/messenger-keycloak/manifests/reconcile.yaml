@@ -146,13 +146,38 @@ spec:
               # письма недостижимым. Берём полное представление, меняем одно
               # поле и возвращаем целиком: частичный PUT у Keycloak способен
               # сбросить неуказанные булевы настройки.
+              #
+              # events* — включены тем же PUT. Без них отказ /auth/refresh
+              # («сессии больше нет» — токен просрочен, отозван повторным
+              # использованием при revokeRefreshToken=true, или что-то ещё)
+              # не оставляет следа нигде: eventsEnabled=false по умолчанию, и
+              # разбор живого инцидента упирается в «данных нет» вместо
+              # ответа. enabledEventTypes — только вход/выход/обмен токена,
+              # не всё подряд: этого достаточно, чтобы увидеть REFRESH_TOKEN_
+              # ERROR с его конкретной причиной (error-полем события), не
+              # заводя лишний шум. eventsListeners уже несёт jboss-logging
+              # (импорт, раздел не трогаем) — значит события идут и в лог
+              # самого Keycloak, `kubectl logs` без отдельного похода в
+              # Events Admin API. eventsExpiration — семь дней, тот же срок,
+              # что и у ssoSessionIdleTimeout: без него таблица событий в
+              # Postgres росла бы неограниченно.
               curl -sf -H "$AUTH" \
                 "$KEYCLOAK/admin/realms/$REALM" > /tmp/realm.json
-              jq '.verifyEmail = false' /tmp/realm.json > /tmp/realm-patched.json
+              jq '.verifyEmail = false
+                  | .eventsEnabled = true
+                  | .enabledEventTypes = [
+                      "LOGIN", "LOGIN_ERROR",
+                      "LOGOUT", "LOGOUT_ERROR",
+                      "CODE_TO_TOKEN", "CODE_TO_TOKEN_ERROR",
+                      "REFRESH_TOKEN", "REFRESH_TOKEN_ERROR"
+                    ]
+                  | .eventsExpiration = 604800' \
+                /tmp/realm.json > /tmp/realm-patched.json
               curl -sf -X PUT -H "$AUTH" -H 'Content-Type: application/json' \
                 --data-binary @/tmp/realm-patched.json \
                 "$KEYCLOAK/admin/realms/$REALM"
               rm -f /tmp/realm.json /tmp/realm-patched.json
+              echo "messenger: события Keycloak включены (REFRESH_TOKEN_ERROR и другие, TTL 7 дней)"
 
               # Браузерная сессия принадлежит messenger-web, поэтому именно
               # этот клиент получает Back-Channel Logout. Без повторяемой
