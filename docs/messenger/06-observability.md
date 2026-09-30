@@ -1071,15 +1071,26 @@ dashboard structure).
 | 06 | Load Run | как прошёл конкретный запуск нагрузочного теста? | реализован. Renumbered из более раннего "03 · Load Run" — коллизия номера с API RED, не новая работа (§17-18 load-testing) |
 | 07 | Load Compare | чем текущий load-run отличается от baseline? | реализован. Renumbered из "04 · Load Compare" вместе с 06, тот же коммит |
 | 08 | Gateway — Envoy | что происходит на самом Cilium Gateway (Envoy), между клиентом и приложением? | реализован, живо проверен. Источник — cilium-envoy:9964 (`envoy-scrape.yaml`, до этого PR ни одной envoy_\* метрики о самом шлюзе не снималось). RPS/Errors/Duration по слушателю, connections/resets/connect-failures по backend-у, Gateway p99 vs API p99 для messenger API конкретно (не общий Gateway p99 — тот мешает все backend-ы в одну цифру). По Host-заголовку разреза нет — Envoy не отдаёт per-vhost stats в этой конфигурации, `by backend` = по Envoy cluster (namespace_service_port), 1:1 с HTTPRoute в этом кластере |
-| 09+ | Component drill-down | почему конкретный компонент так себя ведёт? | уже есть как отдельные vendor-дашборды каталога (`postgres`, `cnpg-pgbouncer`, `kafka`, `cilium-agent`, `hubble-*`, `k8s-views-*`) — не перестраивались, остаются forensic-дашбордами, а не частью основной пятёрки |
+| 09+ | Component drill-down | почему конкретный компонент так себя ведёт? | уже есть как отдельные vendor-дашборды каталога (`postgres`, `cnpg-pgbouncer`, `kafka`, `cilium-agent`, `hubble-*`, `k8s-views-*`, `envoy-overview`, `envoy-upstream`) — не перестраивались, остаются forensic-дашбордами, а не частью основной пятёрки |
 | — | Auth · Push · Attachments · Reconnect · Synthetic | вспомогательные критические пути с уже объявленными SLO (часть 1 этого документа: вход, переподключение, вложение, push, синтетика A→B) | не реализован. В прежней таблице существовал как "05 Auth · Push · Attachments"; при переходе на карту RED/USE (PR #73) этот дашборд по ошибке выпал из таблицы, а не был перенесён под другим номером — восстановлен здесь номером `—`, чтобы объявленные SLO не остались без дашборда даже на бумаге |
 | — | Release | что изменилось после выкатки | не реализован |
 
 Компонентные дашборды (`postgres.yaml`, `kafka.yaml`, `cnpg-pgbouncer.yaml`,
-`cilium-agent.yaml`, `hubble-*.yaml`, `k8s-views-*.yaml`) намеренно не входят
-в основную пятёрку: путь расследования — `01 SLO → 02/03/04 → 05 Capacity →
-component drill-down`, а не открыть сразу дашборд Kafka, не зная, при чём
-здесь Kafka вообще.
+`cilium-agent.yaml`, `hubble-*.yaml`, `k8s-views-*.yaml`, `envoy-overview.yaml`,
+`envoy-upstream.yaml`) намеренно не входят в основную пятёрку: путь
+расследования — `01 SLO → 02/03/04 → 05 Capacity → component drill-down`, а
+не открыть сразу дашборд Kafka, не зная, при чём здесь Kafka вообще.
+
+`envoy-overview`/`envoy-upstream` — импортированный без изменений
+[envoy-mixin](https://github.com/adinhodovic/envoy-mixin) (Grafana.com
+24459/24457), не написан под этот кластер специально, в отличие от 08.
+Написан под ванильные admin-stats Envoy — проверен вручную перед импортом
+по совпадению меток (job/cluster/namespace/pod/envoy_cluster_name) с тем,
+что реально отдаёт `envoy-scrape.yaml`; два HTTP/2 flood-панели в Overview
+останутся "No data" (мiксин ждёт `envoy_http2_inbound_*` per-listener
+codec stats, этот Envoy отдаёт их только как `envoy_cluster_http2_*`
+per-upstream) — известный, не блокирующий пробел, остальные ~26 из 28
+панелей Overview и все 20 панелей Upstream совместимы напрямую.
 
 Сорок дашбордов означают, что в момент аварии никто не знает, какой открыть.
 
