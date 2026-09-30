@@ -448,14 +448,41 @@ spec:
                   r.raise_for_status()
 
 
+          def is_transient(exc: Exception) -> bool:
+              """Стоит ли повторить пару целиком, а не считать её отказавшей.
+
+              Живой замер (два прогона мerged mixed-профиля подряд): при
+              concurrency=10 и ~8 HTTP-вызовах на пару единичный `503` (Keycloak
+              под бурстом логинов) или сетевой timeout — не редкость, и раньше
+              любой такой сбой валил весь шаг целиком, хотя оставшиеся 96-100
+              пар готовились штатно. `401`/`400` сюда не входят: это genuine
+              отказ (неверный пароль, не тот код), retry его не почини­т, а
+              только удвоит нагрузку без шанса на успех.
+              """
+              if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError)):
+                  return True
+              if isinstance(exc, httpx.HTTPStatusError):
+                  return exc.response.status_code >= 500
+              return False
+
+
           async def one_pair(http: httpx.AsyncClient, i: int, semaphore: asyncio.Semaphore) -> None:
               login_a = f"local-capacity-{RUN_ID}-{i:06d}@finops.local"
               login_b = f"local-capacity-{RUN_ID}-{i + 1:06d}@finops.local"
+              attempts = 3
               async with semaphore:
-                  token_a = await login(http, login_a)
-                  token_b = await login(http, login_b)
-                  user_id_b = await user_id_of(http, token_b)
-                  await ensure_conversation(http, token_a, user_id_b)
+                  for attempt in range(1, attempts + 1):
+                      try:
+                          token_a = await login(http, login_a)
+                          token_b = await login(http, login_b)
+                          user_id_b = await user_id_of(http, token_b)
+                          await ensure_conversation(http, token_a, user_id_b)
+                          return
+                      except Exception as exc:
+                          if attempt == attempts or not is_transient(exc):
+                              raise
+                          print(f"pair {i}/{i + 1}: transient {exc!r}, retry {attempt}/{attempts}")
+                          await asyncio.sleep(0.5 * attempt)
 
 
           async def main() -> None:
