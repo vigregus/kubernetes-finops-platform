@@ -90,6 +90,20 @@ export function headers(fixture: Fixture, token: string): Record<string, string>
 	return { Authorization: `Bearer ${token}`, "X-Device-Id": fixture.deviceId }
 }
 
+/** Сколько ждём обмен кода на токен: это чужой процесс (Keycloak), не наш. */
+const CALLBACK_TIMEOUT = 30_000
+
+/**
+ * Сколько ждём кнопку входа, прежде чем решить, что её нет.
+ *
+ * Короткое намеренно и по несимметричной причине: у вкладки того же контекста
+ * кнопки — **отсутствие**, то есть ожидаемый исход, и ждать на нём полный
+ * бюджет обмена значило бы платить полминуты за каждый второй вход. Полный
+ * бюджет нужен ровно там, где кнопка есть и мы ждём ответа на неё, — то есть у
+ * самого обмена.
+ */
+const FORM_TIMEOUT = 5_000
+
 /** Вход настоящим authorization-code: `directAccessGrantsEnabled: false`, парольным грантом токен не взять. */
 export async function signIn(browser: Browser, fixture: Fixture): Promise<SignedIn> {
 	const context = await browser.newContext({
@@ -115,8 +129,21 @@ export async function signIn(browser: Browser, fixture: Fixture): Promise<Signed
 		const page = await context.newPage()
 		await page.goto("/")
 
-		const toKeycloak = page.waitForURL((url) => url.href.startsWith(IDP_ORIGIN))
-		await page.getByRole("button", { name: "Continue with Vector ID" }).click()
+		// Раньше эти три ожидания были без явного timeout и наследовали общий
+		// бюджет Playwright-теста (в load-testing он растянут на часы под
+		// длительность прогона) — если редирект/кнопка/callback не случались
+		// как ожидается, вместо быстрого понятного отказа шло часовое
+		// зависание с непонятным `Test timeout exceeded` в самом конце (живо
+		// поймано дважды на browser-canary при верификации §17: k6-load
+		// укладывался в свою duration, а canary молча висел до часового лимита
+		// теста независимо от неё). CALLBACK_TIMEOUT/FORM_TIMEOUT — те же
+		// константы и то же деление рисков, что уже применялось в signInTab
+		// ниже: форма/кнопка — наш собственный рендер, короткий бюджет;
+		// редирект и обмен кода на токен — чужой процесс (Keycloak), полный.
+		const toKeycloak = page.waitForURL((url) => url.href.startsWith(IDP_ORIGIN), {
+			timeout: CALLBACK_TIMEOUT,
+		})
+		await page.getByRole("button", { name: "Continue with Vector ID" }).click({ timeout: FORM_TIMEOUT })
 		await toKeycloak
 
 		await page.fill("#username", fixture.email)
@@ -126,7 +153,7 @@ export async function signIn(browser: Browser, fixture: Fixture): Promise<Signed
 		// отдаёт и не должен. Одновременно это доказательство, что обмен
 		// действительно произошёл, а не что страница просто открылась.
 		const [callback] = await Promise.all([
-			page.waitForResponse(isCallback),
+			page.waitForResponse(isCallback, { timeout: CALLBACK_TIMEOUT }),
 			page.click("#kc-login"),
 		])
 		expect(callback.status(), `обмен кода на токен для ${fixture.email}`).toBe(200)
@@ -140,20 +167,6 @@ export async function signIn(browser: Browser, fixture: Fixture): Promise<Signed
 		throw error
 	}
 }
-
-/** Сколько ждём обмен кода на токен: это чужой процесс (Keycloak), не наш. */
-const CALLBACK_TIMEOUT = 30_000
-
-/**
- * Сколько ждём кнопку входа, прежде чем решить, что её нет.
- *
- * Короткое намеренно и по несимметричной причине: у вкладки того же контекста
- * кнопки — **отсутствие**, то есть ожидаемый исход, и ждать на нём полный
- * бюджет обмена значило бы платить полминуты за каждый второй вход. Полный
- * бюджет нужен ровно там, где кнопка есть и мы ждём ответа на неё, — то есть у
- * самого обмена.
- */
-const FORM_TIMEOUT = 5_000
 
 /**
  * Обмен, дающий токен доступа: **два** настоящих входа, и оба наши.
