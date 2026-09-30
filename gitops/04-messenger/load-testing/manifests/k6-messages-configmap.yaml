@@ -148,13 +148,21 @@ data:
       const state = `${encodeURIComponent(email)}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const { verifier, challenge } = pkce();
 
+      // Свой cookie jar на каждый вызов — не общий VU-jar по умолчанию.
+      // Живой дефект (верификация §18, прогон stress-probe4): setup()
+      // логинит нескольких пользователей последовательно в одном VU-
+      // контексте, и без изолированного jar кука второго логина утекла
+      // бы из первого — Keycloak узнал бы уже вошедшего и увёл сразу в
+      // callback чужим кодом, минуя форму.
+      const jar = new http.CookieJar();
+
       const authUrl =
         `${KEYCLOAK}/realms/${REALM}/protocol/openid-connect/auth?` +
         `client_id=${CLIENT_ID}&response_type=code&scope=openid&` +
         `redirect_uri=${encodeURIComponent(REDIRECT)}&state=${state}&` +
         `code_challenge=${challenge}&code_challenge_method=S256`;
 
-      const page = http.get(authUrl);
+      const page = http.get(authUrl, { jar });
       if (page.status !== 200) {
         throw new Error(`страница входа вернула ${page.status} для ${email}`);
       }
@@ -167,7 +175,7 @@ data:
       const submitted = http.post(
         action,
         { username: email, password: password },
-        { redirects: 0 },
+        { redirects: 0, jar },
       );
       const location = submitted.headers['Location'] || submitted.headers['location'];
       if (!location) {
