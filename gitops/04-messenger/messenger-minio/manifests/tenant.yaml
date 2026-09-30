@@ -59,3 +59,10 @@ spec:
     # на два бакета сейчас стоит одну строку, а потом сэкономит миграцию.
     - name: messenger-attachments
     - name: messenger-voice
+    # Раздел 24 плана load-testing (docs/messenger/15-load-testing-platform.md)
+    # - Argo Workflows artifact repository (summary.json прогонов). Отдельный
+    # бакет в уже работающем тенанте, не отдельный MinIO Tenant/pool: та же
+    # экономия, что у messenger-api как Python+httpx рантайма для Argo-шагов
+    # в другом месте этого GitOps-репозитория - заводить второй под ради
+    # эфемерных CI-артефактов не оправдано на однонодовом стенде.
+    - name: load-testing-artifacts
