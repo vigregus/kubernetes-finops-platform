@@ -30,6 +30,7 @@ const ALL_EVENTS: readonly ConnectionEvent[] = [
   { type: "browser-online" },
   { type: "sdk-connecting" },
   { type: "sdk-connected" },
+  { type: "sdk-disconnected", code: 1 },
   { type: "sdk-disconnected", code: 2 },
   { type: "sdk-disconnected", code: 3001 },
   { type: "sdk-disconnected", code: 3500 },
@@ -147,6 +148,17 @@ describe("причин синхронизации ровно две, и они �
 describe("терминальный разрыв и признак reconnectAllowed", () => {
   it("4501 снимает признак: попытки прекращены", () => {
     expect(afterDisconnect(4501).reconnectAllowed).toBe(false);
+  });
+
+  it("1 (SDK unauthorized из getData) тоже снимает признак", () => {
+    // Живой дефект: getData, отклонённый Centrifuge.UnauthorizedError
+    // (realtimeClient.ts, потерянная сессия), доходит сюда SDK-кодом 1
+    // (disconnectedCodes.unauthorized) — в диапазоны [3500,4000)/[4500,5000)
+    // не попадает, но SDK останавливается тем же reconnect=false, что и у
+    // 4501 (_failUnauthorized → _disconnect). Без этой ветки reconnectAllowed
+    // остался бы true, и первый же browser-online заново запустил бы getData
+    // на мёртвой сессии.
+    expect(afterDisconnect(1).reconnectAllowed).toBe(false);
   });
 
   it("3001 признак не снимает: это не терминальный разрыв", () => {

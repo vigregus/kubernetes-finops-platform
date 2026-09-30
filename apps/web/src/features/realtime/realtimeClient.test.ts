@@ -8,8 +8,10 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join, relative } from "node:path";
 
+import { UnauthorizedError as CentrifugeUnauthorizedError } from "centrifuge";
 import { describe, expect, it } from "vitest";
 
+import { SessionExpiredError, UnauthenticatedError } from "../../api/problems";
 import { givenFakeCentrifuge, givenTicketIssuer } from "../../test-support/centrifuge";
 import type { ConnectionEvent } from "./connectionMachine";
 import { createRealtimeClient } from "./realtimeClient";
@@ -59,6 +61,62 @@ describe("свежий тикет на каждую попытку соедин�
 
     expect(await fake.getData!()).toEqual({ ticket: "ticket-1" });
     expect(await fake.getData!()).toEqual({ ticket: "ticket-2" });
+  });
+});
+
+describe("потерянная сессия останавливает переподключение, а не зацикливает его", () => {
+  // Регрессия на живой дефект: `getData`, отклонённый обычной `Error`, SDK не
+  // узнаёт как терминальный отказ (`_handleGetDataError`,
+  // `centrifuge/build/index.js:4647`, распознаёт только собственный
+  // `UnauthorizedError`) и планирует следующую попытку по backoff — та снова
+  // зовёт `getData`, и так бесконечно, пока вкладка открыта: реальный
+  // `/auth/refresh` `401` на каждой попытке, не одна ошибка и остановка.
+  // Каждый из двух отказов `fetchApi` — `SessionExpiredError` (сессия была и
+  // кончилась) и `UnauthenticatedError` (её не было вовсе) — обязан
+  // превращаться в `UnauthorizedError` SDK, иначе именно тот случай, что
+  // произошёл на стенде, снова не поймать этим тестом.
+  it.each([
+    ["SessionExpiredError", new SessionExpiredError()],
+    ["UnauthenticatedError", new UnauthenticatedError()],
+  ])("%s из issueTicket оборачивается в Centrifuge.UnauthorizedError", async (_name, thrown) => {
+    const fake = givenFakeCentrifuge();
+    createRealtimeClient({
+      centrifugoUrl: CENTRIFUGO,
+      channel: CHANNEL,
+      userChannel: OTHER_CHANNEL,
+      issueTicket: async () => {
+        throw thrown;
+      },
+      onEvent: () => {},
+      onPublication: () => {},
+      onUserPublication: () => {},
+      createCentrifuge: fake.factory,
+    });
+
+    await expect(fake.getData!()).rejects.toBeInstanceOf(CentrifugeUnauthorizedError);
+  });
+
+  // Отрицательный контроль: отказ, не связанный с сессией, обязан долетать
+  // до SDK как есть — иначе `getData` маскировал бы реальные сбои (например
+  // `ServiceUnavailableError` при недоступном Keycloak, для которого повтор
+  // — штатное поведение, не потеря сессии) под несуществующий `401`.
+  it("прочий отказ issueTicket не оборачивается", async () => {
+    const fake = givenFakeCentrifuge();
+    const other = new Error("сеть недоступна");
+    createRealtimeClient({
+      centrifugoUrl: CENTRIFUGO,
+      channel: CHANNEL,
+      userChannel: OTHER_CHANNEL,
+      issueTicket: async () => {
+        throw other;
+      },
+      onEvent: () => {},
+      onPublication: () => {},
+      onUserPublication: () => {},
+      createCentrifuge: fake.factory,
+    });
+
+    await expect(fake.getData!()).rejects.toBe(other);
   });
 });
 

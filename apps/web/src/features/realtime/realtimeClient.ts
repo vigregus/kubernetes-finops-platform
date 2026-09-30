@@ -12,9 +12,10 @@
  * `5.7.4`, а не взятые из документации более новой версии (таблица в
  * `README.md` этого каталога).
  */
-import { Centrifuge } from "centrifuge";
+import { Centrifuge, UnauthorizedError as CentrifugeUnauthorizedError } from "centrifuge";
 import type { Options } from "centrifuge";
 
+import { SessionExpiredError, UnauthenticatedError } from "../../api/problems";
 import type { RealtimeTicketIssuer } from "../../api/realtimeToken";
 import type { ConnectionEvent } from "./connectionMachine";
 
@@ -116,7 +117,29 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
     //
     // `setData` не используется: он выражает то же самое слабее и, по
     // измеренному комментарию SDK, **перекрывается** `getData`.
-    getData: async () => ({ ticket: await options.issueTicket() }),
+    //
+    // Потерянную сессию `issueTicket()` (через `fetchApi`, `api/client.ts`)
+    // отклоняет `SessionExpiredError`/`UnauthenticatedError` — обычными
+    // `Error`, о которых SDK ничего не знает. `_handleGetDataError`
+    // (`build/index.js:4647`) узнаёт только собственный `UnauthorizedError`
+    // и лишь тогда зовёт `_failUnauthorized()` (`reconnect = false`) —
+    // любой другой отказ уходит в общую ветку ниже, где SDK планирует
+    // следующую попытку по backoff и зовёт `getData` заново. Без этого
+    // оборачивания истёкшая сессия не останавливала SDK вовсе: `getData`
+    // отказывал на каждой попытке переподключения бесконечно, а каждая
+    // попытка — это свежий `POST /realtime/token` (и, если он `401`, ещё
+    // `POST /auth/refresh` изнутри `fetchApi`) на сервер, для открытой
+    // вкладки с истёкшей сессией — навсегда, а не до следующей перезагрузки.
+    getData: async () => {
+      try {
+        return { ticket: await options.issueTicket() };
+      } catch (error) {
+        if (error instanceof SessionExpiredError || error instanceof UnauthenticatedError) {
+          throw new CentrifugeUnauthorizedError(error.message);
+        }
+        throw error;
+      }
+    },
 
     // Холодное рукопожатие не укладывается в дефолтный таймаут SDK, и это
     // измерено на стенде, а не выведено из общего соображения.
