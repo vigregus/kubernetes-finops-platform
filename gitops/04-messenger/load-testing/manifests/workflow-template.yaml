@@ -147,6 +147,8 @@ spec:
               parameters:
                 - name: accepted_count
                   value: "{{tasks.k6-load.outputs.parameters.accepted_count}}"
+                - name: canary_failures
+                  value: "{{tasks.browser-canary.outputs.parameters.canary_failures}}"
           - name: identity-load
             template: identity-load
             dependencies: [preflight-connectivity, preflight-k6-operator]
@@ -665,6 +667,7 @@ spec:
       inputs:
         parameters:
           - name: accepted_count
+          - name: canary_failures
       script:
         image: ghcr.io/vigregus/messenger-api@sha256:36e63da2032997821e84f3993abd988ebf837d5f58c7d61f6e3a7351f0e3d8ce
         command: ["python"]
@@ -675,16 +678,25 @@ spec:
             value: "{{workflow.parameters.git_sha}}"
           - name: PROFILE
             value: "{{workflow.parameters.profile}}"
+          - name: USERS
+            value: "{{workflow.parameters.users}}"
+          - name: ONLINE_USERS
+            value: "{{workflow.parameters.online_users}}"
+          - name: TARGET_RATE
+            value: "{{workflow.parameters.target_rate}}"
           - name: DURATION
             value: "{{workflow.parameters.duration}}"
           - name: ACCEPTED_COUNT
             value: "{{inputs.parameters.accepted_count}}"
+          - name: CANARY_FAILURES
+            value: "{{inputs.parameters.canary_failures}}"
         resources:
           requests: {cpu: 100m, memory: 128Mi}
           limits: {cpu: "1", memory: 256Mi}
         source: |
           import asyncio
           import base64
+          import json
           import os
 
           import httpx
@@ -818,6 +830,45 @@ spec:
                   push.raise_for_status()
                   print(f"summary-метрики раздела 21 отправлены в VictoriaMetrics (load_run_* × 8, run_id={RUN_ID})")
 
+                  # Раздел 24 — summary.json как Argo artifact, не только
+                  # Argo stdout: пишется здесь же, до решения pass/fail (тем
+                  # же доводом, что и push в VictoriaMetrics чуть выше) —
+                  # упавший по корректностному гейту прогон самый интересный
+                  # для разбора и не должен остаться без сводки.
+                  canary_failures_raw = os.environ.get("CANARY_FAILURES", "").strip()
+                  summary_doc = {
+                      "run_id": RUN_ID,
+                      "git_sha": GIT_SHA,
+                      "profile": PROFILE,
+                      "users": int(os.environ["USERS"]),
+                      "online_users": int(os.environ["ONLINE_USERS"]),
+                      "target_rate": int(os.environ["TARGET_RATE"]),
+                      "accepted": ACCEPTED,
+                      "persisted": persisted,
+                      # Раздел 13 (WS-телеметрия браузера) не реализован —
+                      # `null`, потому что не измерено, а не потому, что ноль.
+                      "ws_received": None,
+                      "missing": missing,
+                      "duplicates": None,
+                      "http_p95_ms": round(http_p95 * 1000, 1),
+                      "http_p99_ms": round(http_p99 * 1000, 1),
+                      "delivery_p95_ms": round(delivery_p95 * 1000, 1),
+                      "max_kafka_lag": max_kafka_lag,
+                      "max_outbox_age_ms": round(max_outbox_age * 1000, 1),
+                      # `browser-canary` печатает CANARY_METRICS до своего
+                      # итогового `expect(failures).toBe(0)` — доступно и на
+                      # упавшем прогоне canary, но не тогда, когда canary
+                      # упал раньше первого тика (signIn() и т.п.): тогда
+                      # метрика не измерена вовсе, и здесь честный `null`.
+                      "browser_canary_failures": int(canary_failures_raw) if canary_failures_raw else None,
+                      # Раздел 19 (recovery profile) не реализован.
+                      "recovery_seconds": None,
+                  }
+                  with open("/tmp/summary.json", "w", encoding="utf-8") as f:
+                      json.dump(summary_doc, f, indent=2, ensure_ascii=False)
+                      f.write("\n")
+                  print(f"summary.json записан (раздел 24): {summary_doc}")
+
               if persisted < ACCEPTED:
                   missing = ACCEPTED - persisted
                   print(f"REST reconciliation FAILED: {missing} сообщений приняты API, но не найдены в Postgres")
@@ -841,6 +892,15 @@ spec:
 
 
           asyncio.run(main())
+      outputs:
+        artifacts:
+          # Раздел 24 — "не полагаться только на Argo stdout". Собирается
+          # независимо от исхода `main()` (та же гарантия, что и у
+          # output-параметров `k6-load`/`browser-canary`): файл написан до
+          # корректностного гейта, так что даже провалившийся прогон
+          # оставляет свою сводку.
+          - name: summary
+            path: /tmp/summary.json
 
     # Раздел 9 — профиль identity не должен заранее выставлять
     # `emailVerified=true` (в отличие от provision для остальных
@@ -1383,10 +1443,30 @@ spec:
 
             cd /repo/apps/web
             npm ci --no-audit --no-fund
-            npx playwright test --project=canary
+
+            # Раздел 24 — summary.json прогона несёт browser_canary_failures,
+            # а не только Argo stdout. `CANARY_METRICS` печатается спекой
+            # (canary.spec.ts) ДО итогового `expect(failures).toBe(0)`, то
+            # есть доступен и на упавшем прогоне — но не тогда, когда сам
+            # canary упал раньше (например, signIn() бросил до первого
+            # тика): в этом случае честнее оставить output-параметр пустым,
+            # чем подставить 0, которого не измерили.
+            set +e
+            npx playwright test --project=canary 2>&1 | tee /tmp/canary-output.txt
+            status="${PIPESTATUS[0]}"
+            set -e
+            grep -o 'CANARY_METRICS failures=[0-9]*' /tmp/canary-output.txt | tail -1 |
+              grep -o '[0-9]*$' > /tmp/canary-failures || true
+            exit "$status"
         resources:
           requests: {cpu: "1", memory: 1Gi}
           limits: {cpu: "2", memory: 2Gi}
+      outputs:
+        parameters:
+          - name: canary_failures
+            valueFrom:
+              path: /tmp/canary-failures
+              default: ""
 
     # Раздел 26 — cleanup выполняется как `onExit`, независимо от исхода
     # Workflow (в том числе после Failed/Error), и снимает только
