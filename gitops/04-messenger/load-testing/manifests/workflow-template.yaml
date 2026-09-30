@@ -62,6 +62,10 @@ spec:
         value: "2m"
       - name: k6_parallelism
         value: "1"
+      - name: recovery_high_rate_fraction
+        value: "3"
+      - name: recovery_high_duration
+        value: "1m"
       - name: trace_sampling_mode
         value: capacity
         enum:
@@ -139,9 +143,13 @@ spec:
                   value: "{{tasks.resolve-gateway-address.outputs.parameters.gateway_ip}}"
                 - name: run_password
                   value: "{{tasks.provision.outputs.parameters.run_password}}"
+          - name: recovery-check
+            template: recovery-check
+            dependencies: [k6-load]
+            when: "{{workflow.parameters.profile}} == recovery"
           - name: reconciliation
             template: reconciliation
-            dependencies: [k6-load, browser-canary]
+            dependencies: [k6-load, browser-canary, recovery-check]
             when: "{{workflow.parameters.profile}} != identity"
             arguments:
               parameters:
@@ -149,6 +157,10 @@ spec:
                   value: "{{tasks.k6-load.outputs.parameters.accepted_count}}"
                 - name: canary_failures
                   value: "{{tasks.browser-canary.outputs.parameters.canary_failures}}"
+                - name: recovery_seconds
+                  value: "{{tasks.recovery-check.outputs.parameters.recovery_seconds}}"
+                - name: backlog_drain_rate
+                  value: "{{tasks.recovery-check.outputs.parameters.backlog_drain_rate}}"
           - name: identity-load
             template: identity-load
             dependencies: [preflight-connectivity, preflight-k6-operator]
@@ -555,6 +567,14 @@ spec:
             elif [ "$PROFILE" = "mixed" ]; then
               SCRIPT_CONFIGMAP="k6-mixed-script"
               SCRIPT_FILE="mixed.js"
+            elif [ "$PROFILE" = "recovery" ]; then
+              # Раздел 19 - profile=recovery: контролируемый backlog
+              # (stage_high), потом возврат к базовой нагрузке (stage_low),
+              # tests/load/messenger/recovery.js. Восстановился ли backlog -
+              # решает не k6, а отдельный шаг recovery-check ниже по DAG,
+              # уже после того, как этот TestRun завершится.
+              SCRIPT_CONFIGMAP="k6-recovery-script"
+              SCRIPT_FILE="recovery.js"
             else
               SCRIPT_CONFIGMAP="k6-messages-script"
               SCRIPT_FILE="messages.js"
@@ -608,6 +628,10 @@ spec:
                     value: "{{workflow.parameters.target_rate}}"
                   - name: DURATION
                     value: "{{workflow.parameters.duration}}"
+                  - name: HIGH_RATE_FRACTION
+                    value: "{{workflow.parameters.recovery_high_rate_fraction}}"
+                  - name: HIGH_DURATION
+                    value: "{{workflow.parameters.recovery_high_duration}}"
             EOF
 
             kubectl apply -f /tmp/testrun.yaml
@@ -649,6 +673,118 @@ spec:
             valueFrom:
               path: /tmp/accepted-count
 
+    # Раздел 19 - recovery profile. k6-load (profile=recovery) уже создал
+    # backlog (stage_high) и вернулся к базовой нагрузке (stage_low) -
+    # этот шаг запускается ПОСЛЕ того, как k6-load целиком завершится, то
+    # есть входящий трафик к этому моменту уже остановлен целиком (не
+    # "низкий, но продолжающийся", как в буквальной формулировке раздела
+    # 19 - упрощение, сделанное сознательно: параллельный запуск
+    # бесконечного низкого трафика и опроса до отдельного timeout -
+    # отдельная оркестрационная задача, не решаемая одним шагом с
+    # ограниченной длительностью). Опрашивает VictoriaMetrics, пока
+    # backlog (outbox pending + суммарный Kafka lag consumer-группы) не
+    # вернётся к малому базовому значению, устойчиво держащемуся
+    # несколько подряд опросов подряд (порог не "ровно ноль" - метрика
+    # может на секунду мигнуть между опросами, а не реальным backlog).
+    # Не проходит в MAX_WAIT_SECONDS - шаг падает: раздел 25 явно требует
+    # "recovery passed where applicable" как корректностный гейт.
+    - name: recovery-check
+      script:
+        image: ghcr.io/vigregus/messenger-api@sha256:36e63da2032997821e84f3993abd988ebf837d5f58c7d61f6e3a7351f0e3d8ce
+        command: ["python"]
+        env:
+          - name: RUN_ID
+            value: "{{workflow.parameters.run_id}}"
+        resources:
+          requests: {cpu: 50m, memory: 64Mi}
+          limits: {cpu: 200m, memory: 128Mi}
+        source: |
+          import asyncio
+          import os
+          import time
+
+          import httpx
+
+          RUN_ID = os.environ["RUN_ID"]
+          VM = "http://vmsingle-vm-local-victoria-metrics-k8s-stack.observability.svc.cluster.local:8428"
+          OUTBOX_BASELINE = 1
+          KAFKA_LAG_BASELINE = 2
+          POLL_INTERVAL_SECONDS = 3
+          POLL_STABLE_SAMPLES = 3
+          MAX_WAIT_SECONDS = 300
+
+
+          async def vm_query(client: httpx.AsyncClient, expr: str) -> float:
+              r = await client.get(f"{VM}/api/v1/query", params={"query": expr}, timeout=10.0)
+              r.raise_for_status()
+              result = r.json()["data"]["result"]
+              return float(result[0]["value"][1]) if result else 0.0
+
+
+          async def main() -> None:
+              async with httpx.AsyncClient() as client:
+                  start = time.monotonic()
+                  initial_backlog: float | None = None
+                  stable = 0
+
+                  while True:
+                      elapsed = time.monotonic() - start
+                      outbox = await vm_query(
+                          client, 'sum(messenger_outbox_pending{namespace="messenger"})'
+                      )
+                      kafka_lag = await vm_query(
+                          client, 'sum(kafka_consumergroup_lag{consumergroup="messenger-realtime"})'
+                      )
+                      if initial_backlog is None:
+                          initial_backlog = outbox
+                      print(f"t={elapsed:.1f}s outbox_pending={outbox:.0f} kafka_lag={kafka_lag:.0f}")
+
+                      if outbox <= OUTBOX_BASELINE and kafka_lag <= KAFKA_LAG_BASELINE:
+                          stable += 1
+                      else:
+                          stable = 0
+
+                      if stable >= POLL_STABLE_SAMPLES:
+                          recovery_seconds = max(
+                              elapsed - (POLL_STABLE_SAMPLES - 1) * POLL_INTERVAL_SECONDS, 0.0
+                          )
+                          drain_rate = (
+                              initial_backlog / recovery_seconds if recovery_seconds > 0 else 0.0
+                          )
+                          print(
+                              f"recovery: backlog вернулся к базовому уровню за {recovery_seconds:.1f}s "
+                              f"(initial_backlog={initial_backlog:.0f}, drain_rate={drain_rate:.2f} msg/s), "
+                              f"run_id={RUN_ID}"
+                          )
+                          with open("/tmp/recovery-seconds", "w", encoding="utf-8") as f:
+                              f.write(f"{recovery_seconds:.1f}")
+                          with open("/tmp/backlog-drain-rate", "w", encoding="utf-8") as f:
+                              f.write(f"{drain_rate:.2f}")
+                          return
+
+                      if elapsed >= MAX_WAIT_SECONDS:
+                          print(
+                              f"recovery FAILED: backlog не вернулся к базовому уровню за "
+                              f"{MAX_WAIT_SECONDS}s (последний outbox_pending={outbox:.0f}, "
+                              f"kafka_lag={kafka_lag:.0f}), run_id={RUN_ID}"
+                          )
+                          raise SystemExit(1)
+
+                      await asyncio.sleep(POLL_INTERVAL_SECONDS)
+
+
+          asyncio.run(main())
+      outputs:
+        parameters:
+          - name: recovery_seconds
+            valueFrom:
+              path: /tmp/recovery-seconds
+              default: ""
+          - name: backlog_drain_rate
+            valueFrom:
+              path: /tmp/backlog-drain-rate
+              default: ""
+
     # Раздел 14 — REST reconciliation: не доверять только HTTP-метрикам k6.
     # `accepted` (что подтвердил API) сверяется с тем, что реально
     # persisted в Postgres для бесед этого прогона. `persisted < accepted`
@@ -668,6 +804,8 @@ spec:
         parameters:
           - name: accepted_count
           - name: canary_failures
+          - name: recovery_seconds
+          - name: backlog_drain_rate
       script:
         image: ghcr.io/vigregus/messenger-api@sha256:36e63da2032997821e84f3993abd988ebf837d5f58c7d61f6e3a7351f0e3d8ce
         command: ["python"]
@@ -690,6 +828,10 @@ spec:
             value: "{{inputs.parameters.accepted_count}}"
           - name: CANARY_FAILURES
             value: "{{inputs.parameters.canary_failures}}"
+          - name: RECOVERY_SECONDS
+            value: "{{inputs.parameters.recovery_seconds}}"
+          - name: BACKLOG_DRAIN_RATE
+            value: "{{inputs.parameters.backlog_drain_rate}}"
         resources:
           requests: {cpu: 100m, memory: 128Mi}
           limits: {cpu: "1", memory: 256Mi}
@@ -814,21 +956,38 @@ spec:
 
                   missing = max(ACCEPTED - persisted, 0)
                   labels = f'run_id="{RUN_ID}",git_sha="{GIT_SHA}",profile="{PROFILE}"'
-                  summary = "\n".join(
-                      [
-                          f"load_run_accepted_messages{{{labels}}} {ACCEPTED}",
-                          f"load_run_persisted_messages{{{labels}}} {persisted}",
-                          f"load_run_missing_messages{{{labels}}} {missing}",
-                          f"load_run_http_p95_seconds{{{labels}}} {http_p95}",
-                          f"load_run_http_p99_seconds{{{labels}}} {http_p99}",
-                          f"load_run_delivery_p95_seconds{{{labels}}} {delivery_p95}",
-                          f"load_run_max_outbox_age_seconds{{{labels}}} {max_outbox_age}",
-                          f"load_run_max_kafka_lag{{{labels}}} {max_kafka_lag}",
-                      ]
-                  ) + "\n"
+                  metric_lines = [
+                      f"load_run_accepted_messages{{{labels}}} {ACCEPTED}",
+                      f"load_run_persisted_messages{{{labels}}} {persisted}",
+                      f"load_run_missing_messages{{{labels}}} {missing}",
+                      f"load_run_http_p95_seconds{{{labels}}} {http_p95}",
+                      f"load_run_http_p99_seconds{{{labels}}} {http_p99}",
+                      f"load_run_delivery_p95_seconds{{{labels}}} {delivery_p95}",
+                      f"load_run_max_outbox_age_seconds{{{labels}}} {max_outbox_age}",
+                      f"load_run_max_kafka_lag{{{labels}}} {max_kafka_lag}",
+                  ]
+                  # Раздел 19 — recovery-check выполняется только для
+                  # profile=recovery (DAG `when`); для остальных профилей
+                  # RECOVERY_SECONDS пуст, и строка метрики не добавляется
+                  # вовсе, а не пушится нулём, которого не измеряли. Тот же
+                  # довод для browser_canary_failures — browser-canary
+                  # доступен не для всех профилей и не для каждого исхода.
+                  recovery_seconds_raw = os.environ.get("RECOVERY_SECONDS", "").strip()
+                  if recovery_seconds_raw:
+                      metric_lines.append(f"load_run_recovery_seconds{{{labels}}} {recovery_seconds_raw}")
+                  canary_failures_for_metric = os.environ.get("CANARY_FAILURES", "").strip()
+                  if canary_failures_for_metric:
+                      metric_lines.append(
+                          f"load_run_browser_canary_failures{{{labels}}} {canary_failures_for_metric}"
+                      )
+                  summary = "\n".join(metric_lines) + "\n"
                   push = await client.post(f"{VM}/api/v1/import/prometheus", content=summary, timeout=10.0)
                   push.raise_for_status()
-                  print(f"summary-метрики раздела 21 отправлены в VictoriaMetrics (load_run_* × 8, run_id={RUN_ID})")
+                  pushed_count = len(metric_lines)
+                  print(
+                      "summary-метрики раздела 21 отправлены в VictoriaMetrics "
+                      f"(load_run_* × {pushed_count}, run_id={RUN_ID})"
+                  )
 
                   # Раздел 24 — summary.json как Argo artifact, не только
                   # Argo stdout: пишется здесь же, до решения pass/fail (тем
@@ -836,6 +995,7 @@ spec:
                   # упавший по корректностному гейту прогон самый интересный
                   # для разбора и не должен остаться без сводки.
                   canary_failures_raw = os.environ.get("CANARY_FAILURES", "").strip()
+                  backlog_drain_rate_raw = os.environ.get("BACKLOG_DRAIN_RATE", "").strip()
                   summary_doc = {
                       "run_id": RUN_ID,
                       "git_sha": GIT_SHA,
@@ -861,8 +1021,11 @@ spec:
                       # упал раньше первого тика (signIn() и т.п.): тогда
                       # метрика не измерена вовсе, и здесь честный `null`.
                       "browser_canary_failures": int(canary_failures_raw) if canary_failures_raw else None,
-                      # Раздел 19 (recovery profile) не реализован.
-                      "recovery_seconds": None,
+                      # Раздел 19 — recovery-check выполняется только для
+                      # profile=recovery; для остальных профилей честный
+                      # `null` (не измерено), не 0.
+                      "recovery_seconds": float(recovery_seconds_raw) if recovery_seconds_raw else None,
+                      "backlog_drain_rate": float(backlog_drain_rate_raw) if backlog_drain_rate_raw else None,
                   }
                   with open("/tmp/summary.json", "w", encoding="utf-8") as f:
                       json.dump(summary_doc, f, indent=2, ensure_ascii=False)

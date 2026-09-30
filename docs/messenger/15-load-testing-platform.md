@@ -666,7 +666,7 @@ throughput, но резко увеличивает:
 Не выдавать единственное число вроде `max = 843 msg/s` без этих трёх
 состояний.
 
-## 19. Recovery profile — `[ ]`
+## 19. Recovery profile — `[~]` (profile=recovery реализован: tests/load/messenger/recovery.js — контролируемый backlog (stage_high), потом возврат к базовой нагрузке (stage_low), тем же startTime-механизмом, что и stress.js; recovery-check опрашивает VictoriaMetrics (outbox pending + суммарный Kafka lag) до устойчивого возврата к базовому уровню, записывает recovery_seconds/backlog_drain_rate. Упрощение, сделанное сознательно: опрос стартует ПОСЛЕ полной остановки k6-load — входящий трафик на момент проверки уже нулевой, а не "низкий, но продолжающийся", как в буквальной формулировке раздела; latency/errors → baseline и Playwright → healthy отдельно не проверяются — только outbox/Kafka lag. Live-верификация после мерджа)
 
 После накопления controlled backlog:
 
@@ -717,7 +717,7 @@ k6 metrics отправлять в существующий metrics backend та
 
 Они принадлежат logs/traces/test artifacts.
 
-## 21. Summary metrics — `[~]` (8 из 12: load_run_accepted/persisted/missing_messages, load_run_http_p95/p99_seconds, load_run_delivery_p95_seconds, load_run_max_outbox_age_seconds, load_run_max_kafka_lag — reconciliation пушит их в VictoriaMetrics с run_id/git_sha/profile через `/api/v1/import/prometheus`, живо проверен сам механизм импорта. received/duplicate_messages, recovery_seconds, browser_canary_failures — нет, нужны разделы 13 (WS-телеметрия), 19, 16 соответственно)
+## 21. Summary metrics — `[~]` (10 из 12: load_run_accepted/persisted/missing_messages, load_run_http_p95/p99_seconds, load_run_delivery_p95_seconds, load_run_max_outbox_age_seconds, load_run_max_kafka_lag, load_run_recovery_seconds, load_run_browser_canary_failures — reconciliation пушит их в VictoriaMetrics с run_id/git_sha/profile через `/api/v1/import/prometheus`, живо проверен сам механизм импорта; recovery_seconds/browser_canary_failures добавляются в список только когда действительно измерены (profile=recovery / browser-canary дошёл до печати метрик) — не нулём, которого не было. received/duplicate_messages — нет, нужен раздел 13 (WS-телеметрия))
 
 Помимо raw k6 series сохранить компактный набор run-level результатов:
 
