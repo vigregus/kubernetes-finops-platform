@@ -104,8 +104,55 @@ const CALLBACK_TIMEOUT = 30_000
  */
 const FORM_TIMEOUT = 5_000
 
+/**
+ * Обмен кода на токен ответил 5xx — не отказ входа, а перегрузка на стороне
+ * сервера в момент обмена. Отдельный класс ошибки нужен затем, чтобы отличить
+ * это от настоящего отказа (4xx, пустое тело): только 5xx стоит повторять,
+ * остальное — это факт о попытке входа, а не шум инфраструктуры.
+ */
+class CallbackFailedError extends Error {
+	constructor(
+		public readonly status: number,
+		message: string,
+	) {
+		super(message)
+	}
+}
+
+/**
+ * Сколько раз повторить `signIn` целиком при 5xx на обмене кода на токен.
+ *
+ * Живой дефект (верификация §17, прогон `local-capacity-mixed-rvq55`):
+ * единственная пара browser-canary стартует одновременно с разгоном k6-load
+ * (оба — `dependencies: [playwright-smoke]`, раздел 16 требует именно
+ * параллельности), и на этом старте обмен кода на токен словил `500` —
+ * ответ не от `api` (в его access-логе за то окно нет ни одного 500, только
+ * 200 и 503), а от промежуточного слоя под перегрузкой холодного старта
+ * k6-раннера. Повтор здесь необходим по той же причине, что и в
+ * prepare-conversations: единичный отказ на чужой перегрузке не должен
+ * ронять весь browser-canary шаг. Код авторизации у Keycloak одноразовый,
+ * поэтому повторяется не запрос обмена, а вход целиком — со свежим
+ * контекстом и новым проходом через удостоверяющий центр.
+ */
+const SIGN_IN_ATTEMPTS = 3
+
 /** Вход настоящим authorization-code: `directAccessGrantsEnabled: false`, парольным грантом токен не взять. */
 export async function signIn(browser: Browser, fixture: Fixture): Promise<SignedIn> {
+	for (let attempt = 1; attempt <= SIGN_IN_ATTEMPTS; attempt += 1) {
+		try {
+			return await signInOnce(browser, fixture)
+		} catch (error) {
+			if (attempt === SIGN_IN_ATTEMPTS || !(error instanceof CallbackFailedError)) {
+				throw error
+			}
+			console.log(`signIn ${fixture.email}: transient ${error.message}, retry ${attempt}/${SIGN_IN_ATTEMPTS}`)
+			await new Promise((resolve) => setTimeout(resolve, 500 * attempt))
+		}
+	}
+	throw new Error("unreachable: цикл signIn обязан вернуть или бросить на последней попытке")
+}
+
+async function signInOnce(browser: Browser, fixture: Fixture): Promise<SignedIn> {
 	const context = await browser.newContext({
 		baseURL: BASE_URL,
 		// Локальный удостоверяющий центр стенда; `browser.newContext()` не
@@ -156,6 +203,12 @@ export async function signIn(browser: Browser, fixture: Fixture): Promise<Signed
 			page.waitForResponse(isCallback, { timeout: CALLBACK_TIMEOUT }),
 			page.click("#kc-login"),
 		])
+		if (callback.status() >= 500) {
+			throw new CallbackFailedError(
+				callback.status(),
+				`обмен кода на токен для ${fixture.email}: ${callback.status()}`,
+			)
+		}
 		expect(callback.status(), `обмен кода на токен для ${fixture.email}`).toBe(200)
 
 		const body = (await callback.json()) as { access_token?: unknown }

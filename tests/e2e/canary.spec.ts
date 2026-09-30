@@ -35,6 +35,23 @@ const RUN_PASSWORD = process.env.RUN_PASSWORD
 const PAIRS = Math.min(5, Math.max(1, parseInt(process.env.CANARY_PAIRS || "1", 10)))
 const DURATION_SECONDS = parseInt(process.env.CANARY_DURATION_SECONDS || "60", 10)
 const TICK_SECONDS = parseInt(process.env.CANARY_TICK_SECONDS || "10", 10)
+/**
+ * Отступ перед первым входом — даём k6-load пережить холодный старт своего
+ * Job/раннера, прежде чем canary впервые обменивает код на токен.
+ *
+ * `k6-load` и `browser-canary` оба стартуют по `dependencies:
+ * [playwright-smoke]` (раздел 16 — параллельно намеренно), но у k6 холодный
+ * старт (создание Job, планирование пода, разгон VU) не мгновенный, а у
+ * canary — свой (`npm ci` перед первым тестом). Живой дефект (верификация
+ * §17, `local-capacity-mixed-rvq55`): первый же обмен кода на токен словил
+ * 500 именно в этом стартовом окне — ответ не от `api` (в его access-логе
+ * нет ни одного 500 за то время), а от промежуточного слоя под нагрузкой
+ * чужого холодного старта. Число ниже — не измеренный порог, а бюджет с
+ * запасом под этот класс гонки; `signIn` вдобавок повторяет попытку на
+ * 5xx (`support/auth.ts`), так что отступ снижает частоту, а не заменяет
+ * повтор.
+ */
+const START_DELAY_SECONDS = parseInt(process.env.CANARY_START_DELAY_SECONDS || "20", 10)
 
 function requiredCanaryEnv(name: string, value: string | undefined): string {
 	if (!value) {
@@ -112,6 +129,8 @@ test("browser canary: периодический обмен уникальным
 	}
 
 	try {
+		await wait(START_DELAY_SECONDS * 1000)
+
 		for (let pair = 0; pair < PAIRS; pair += 1) {
 			const indexA = pair * 2 + 1
 			const indexB = pair * 2 + 2
