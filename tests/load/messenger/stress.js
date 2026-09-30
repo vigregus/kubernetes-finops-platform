@@ -1,6 +1,6 @@
 import http from 'k6/http';
 import crypto from 'k6/crypto';
-import { check } from 'k6';
+import { check, sleep } from 'k6';
 import { Counter, Trend } from 'k6/metrics';
 
 import { login, authHeaders, API } from './lib/auth.js';
@@ -28,6 +28,21 @@ const USERS = parseInt(__ENV.USERS || '10', 10);
 const RUN_PASSWORD = __ENV.RUN_PASSWORD;
 const TARGET_RATE = parseInt(__ENV.TARGET_RATE || '10', 10);
 const STAGE_DURATION = __ENV.DURATION || '30s';
+/**
+ * Разброс между логинами в `setup()` — секунд на аккаунт.
+ *
+ * Живой дефект (верификация §18, прогон `stress-probe1`): `constant-
+ * arrival-rate` преаллоцирует VU каждой ступени отдельно (свой пул на
+ * `stage_150pct`, свой на `stage_200pct`, …), и раньше логин был внутри
+ * `sendMessage` — на первой итерации каждого свежего VU. На `stage_200pct`
+ * (preAllocatedVUs ~120) это означало залп из ~120 одновременных логинов
+ * в Keycloak ровно на границе ступени — и именно там появилась лавина
+ * "форма входа не перенаправила": не обязательно предел throughput
+ * отправки сообщений, а разовый шторм авторизации от самой конструкции
+ * теста. Раздел 18 просит найти R_knee у ОТПРАВКИ сообщений — значит
+ * логин обязан быть отдельной, не таймируемой фазой.
+ */
+const LOGIN_STAGGER_SECONDS = parseFloat(__ENV.LOGIN_STAGGER_SECONDS || '1');
 
 const accepted = new Counter('load_run_accepted_messages');
 const offered = new Counter('load_run_offered_messages');
@@ -87,46 +102,57 @@ function uuidv4() {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-let cachedToken = null;
-let cachedConversationId = null;
+/**
+ * Логин и разбор бесед — здесь, а не в `sendMessage`.
+ *
+ * `setup()` в k6 выполняется один раз, до старта всех таймированных
+ * сценариев, вне VU-пула — значит регистрация (уже отдельный шаг
+ * provision) и логин (здесь) физически отделены от измерения отправки
+ * сообщений под растущей нагрузкой: `stage_*` видят только POST
+ * /messages на уже готовых токенах, не смешивая "Keycloak не успевает
+ * логинить" с "API не успевает принимать сообщения" в одной цифре.
+ *
+ * Разброс `LOGIN_STAGGER_SECONDS` между аккаунтами — не для скорости (эта
+ * фаза не таймируется и не идёт в метрики стадий), а чтобы сам процесс
+ * логина не создавал Keycloak собственный залп: `USERS` последовательных
+ * запросов с паузой, а не десятки параллельных VU одновременно.
+ */
+export function setup() {
+  const sessions = {};
+  for (let i = 1; i <= USERS; i += 1) {
+    const email = `local-capacity-${RUN_ID}-${String(i).padStart(6, '0')}@finops.local`;
+    const token = login(email, RUN_PASSWORD);
 
-function senderLogin() {
-  if (cachedToken) return cachedToken;
+    const r = http.get(`${API}/conversations`, { headers: authHeaders(token) });
+    if (r.status !== 200) {
+      throw new Error(`не удалось получить список бесед для ${email}: ${r.status} ${r.body}`);
+    }
+    const items = JSON.parse(r.body).items || [];
+    if (items.length === 0) {
+      throw new Error(`у пользователя ${email} нет ни одной беседы — prepare-conversations не отработал`);
+    }
+
+    sessions[i] = { token, conversationId: items[0].conversation_id };
+    if (i < USERS) sleep(LOGIN_STAGGER_SECONDS);
+  }
+  return { sessions };
+}
+
+export function sendMessage(data) {
   const index = ((__VU - 1) % USERS) + 1;
-  const email = `local-capacity-${RUN_ID}-${String(index).padStart(6, '0')}@finops.local`;
-  cachedToken = login(email, RUN_PASSWORD);
-  return cachedToken;
-}
-
-function senderConversationId(token) {
-  if (cachedConversationId) return cachedConversationId;
-  const r = http.get(`${API}/conversations`, { headers: authHeaders(token) });
-  if (r.status !== 200) {
-    throw new Error(`не удалось получить список бесед: ${r.status} ${r.body}`);
-  }
-  const items = JSON.parse(r.body).items || [];
-  if (items.length === 0) {
-    throw new Error('у пользователя нет ни одной беседы — prepare-conversations не отработал для него');
-  }
-  cachedConversationId = items[0].conversation_id;
-  return cachedConversationId;
-}
-
-export function sendMessage() {
-  const token = senderLogin();
-  const conversationId = senderConversationId(token);
+  const session = data.sessions[index];
 
   offered.add(1);
   const start = Date.now();
   const res = http.post(
-    `${API}/conversations/${conversationId}/messages`,
+    `${API}/conversations/${session.conversationId}/messages`,
     JSON.stringify({
       client_message_id: uuidv4(),
       type: 'text',
       payload: { text: `load-testing-stress ${RUN_ID} ${Date.now()}` },
       attachment_ids: [],
     }),
-    { headers: authHeaders(token) },
+    { headers: authHeaders(session.token) },
   );
   sendDuration.add(Date.now() - start);
 
