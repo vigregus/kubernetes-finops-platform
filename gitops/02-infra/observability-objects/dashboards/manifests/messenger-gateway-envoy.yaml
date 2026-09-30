@@ -20,7 +20,9 @@ spec:
       "links": [
         { "title": "01 · SLO Overview", "type": "link", "url": "/d/messenger-slo-overview", "icon": "dashboard" },
         { "title": "03 · API — RED", "type": "link", "url": "/d/messenger-api-red", "icon": "dashboard" },
-        { "title": "05 · Capacity — USE", "type": "link", "url": "/d/messenger-capacity", "icon": "dashboard" }
+        { "title": "05 · Capacity — USE", "type": "link", "url": "/d/messenger-capacity", "icon": "dashboard" },
+        { "title": "Deep-dive: Envoy / Overview", "type": "link", "url": "/d/envoy-overview", "icon": "external link" },
+        { "title": "Deep-dive: Envoy / Upstream", "type": "link", "url": "/d/envoy-upstream", "icon": "external link" }
       ],
       "panels": [
         {

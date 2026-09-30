@@ -1,0 +1,34 @@
+# Deep-dive drill-down для 08 · Gateway — Envoy (тот же принцип, что у
+# cilium-agent.yaml / postgres.yaml / kafka.yaml: не часть основной
+# восьмёрки, а forensic-дашборд, куда идут уже зная, что смотреть на
+# Envoy конкретно).
+#
+# envoy-mixin (github.com/adinhodovic/envoy-mixin) - написан под ванильные
+# admin-stats Envoy (job/cluster/namespace/pod/envoy_cluster_name/
+# envoy_http_conn_manager_prefix), не под Istio-специфичные лейблы -
+# проверено вручную по JSON перед добавлением: каждая метрика панелей
+# (envoy_cluster_upstream_*, envoy_http_downstream_*,
+# envoy_cluster_membership_*, envoy_listener_ssl_certificate_expiration_*)
+# реально снимается envoy-scrape.yaml с тем же набором лейблов, что мixin
+# ожидает через свои template variables. Два HTTP/2 flood-панели
+# (Inbound/Outbound) могут остаться "No data": мixin ждёт
+# envoy_http2_inbound_*/outbound_* (per-listener codec stats), а этот
+# Envoy отдаёт их только как envoy_cluster_http2_* (per-upstream) -
+# известное расхождение, не покрыто здесь: остальные ~26 из 28 панелей
+# совместимы напрямую.
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: envoy-overview
+  namespace: observability
+spec:
+  # Явный uid: без него grafana-operator генерирует случайный суффикс
+  # (например "envoy-overview-skj2"), и ссылка на 08 · Gateway — Envoy
+  # ссылалась бы на непредсказуемый URL, гуляющий между применениями.
+  uid: envoy-overview
+  instanceSelector:
+    matchLabels:
+      dashboards: "grafana-local"
+  grafanaCom:
+    id: 24459
+    revision: 3

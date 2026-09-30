@@ -1,0 +1,23 @@
+# Deep-dive drill-down для 08 · Gateway — Envoy, дополняет envoy-overview.yaml:
+# per-cluster разбор одного backend-а через template variable
+# $envoy_cluster_name (circuit breakers, retries, pending/overflow,
+# resets по rx/tx отдельно) - то, для чего 08 слишком тесен (там backend-ы
+# сравниваются друг с другом, здесь - раскрывается один).
+#
+# Тот же envoy-mixin, что envoy-overview.yaml. Проверено: все метрики
+# панелей (envoy_cluster_upstream_*, envoy_cluster_circuit_breakers_*,
+# envoy_cluster_membership_*) подтверждены живьём в этом кластере -
+# полностью совместим, без известных пробелов (в отличие от overview).
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: envoy-upstream
+  namespace: observability
+spec:
+  uid: envoy-upstream
+  instanceSelector:
+    matchLabels:
+      dashboards: "grafana-local"
+  grafanaCom:
+    id: 24457
+    revision: 4
