@@ -98,6 +98,14 @@ export function initialConnectionState(browserOnline: boolean): ConnectionMachin
 }
 
 /**
+ * `Centrifuge.disconnectedCodes.unauthorized` — измерено у закреплённого
+ * `5.7.4` (`build/index.js:554`), не импортировано из SDK: импорт `centrifuge`
+ * в этот модуль запрещён тестом (`realtimeClient.test.ts`, см. README этого
+ * каталога) — автомат обязан собираться и тестироваться без SDK.
+ */
+const CENTRIFUGE_UNAUTHORIZED_CODE = 1;
+
+/**
  * Терминален ли разрыв — по **измеренному** правилу SDK, а не по догадке.
  *
  * `_handleDisconnect` (`centrifuge/build/index.js:5353`) считает непереподключаемыми
@@ -109,9 +117,27 @@ export function initialConnectionState(browserOnline: boolean): ConnectionMachin
  *
  * Наш `4501` попадает сюда же — и это не совпадение: он выбран в этом диапазоне
  * именно как терминальный.
+ *
+ * `CENTRIFUGE_UNAUTHORIZED_CODE` (`= 1`) в диапазоны не попадает, но терминален
+ * по тому же измеренному правилу с другой стороны: `_handleGetDataError`
+ * (`:4647`) зовёт `_failUnauthorized()` только когда `getData` отклонился
+ * `UnauthorizedError`, а тот зовёт `_disconnect(unauthorized, 'unauthorized',
+ * false)` — тот же `reconnect = false`, что и у кодов из диапазона (`:4943`).
+ * До этой правки `getData` (`realtimeClient.ts`) отклонялся обычной `Error`
+ * при потерянной сессии, `_handleGetDataError` не узнавал в ней
+ * `UnauthorizedError` и уходил в ветку ниже (`:4650`), где SDK планирует
+ * следующую попытку по своему backoff — та снова зовёт `getData`, снова
+ * получает отказ, и так бесконечно: реальный сокет не перебивает `401` на
+ * `/auth/refresh` каждым `getData`, а браузер жив, пока вкладка открыта.
+ * Теперь `getData` сам оборачивает потерянную сессию в `UnauthorizedError`,
+ * SDK останавливается штатно своим кодом `1`, и он обязан быть здесь
+ * терминальным — иначе `reconnectAllowed` остался бы `true`, и первый же
+ * `browser-online` запустил бы тот же бесконечный цикл заново.
  */
 function isTerminalDisconnect(code: number): boolean {
-  return (code >= 3500 && code < 4000) || (code >= 4500 && code < 5000);
+  return (
+    code === CENTRIFUGE_UNAUTHORIZED_CODE || (code >= 3500 && code < 4000) || (code >= 4500 && code < 5000)
+  );
 }
 
 /** Состояние синхронизации с названной причиной — единственное место, где она ставится. */
