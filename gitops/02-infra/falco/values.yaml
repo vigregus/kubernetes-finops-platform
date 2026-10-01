@@ -96,6 +96,21 @@ resources:
   limits:
     memory: 768Mi
 
+# Отдельный sidecar-контейнер того же daemonset-пода (ds/falco), не
+# покрытый `resources` выше: он скачивает/обновляет rules-бандл по
+# расписанию, а не участвует в live-инспекции syscalls, поэтому его
+# профиль мельче основного falco-контейнера.
+falcoctl:
+  artifact:
+    follow:
+      resources:
+        requests:
+          cpu: 25m
+          memory: 64Mi
+        limits:
+          cpu: 100m
+          memory: 128Mi
+
 podLabels:
   finops.internal/product: platform
   finops.internal/team: platform-engineering

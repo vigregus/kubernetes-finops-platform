@@ -28,3 +28,12 @@ server:
     # 20Gi вслед за retention: было 5Gi под 7d, тот же профиль нагрузки
     # на ~30d - грубо тот же порядок, что и рост здесь.
     size: 20Gi
+  # Live kubectl top: 70m/526Mi - память уже заметная (индексы + кэш на
+  # чтение), запас под limits взят кратно, не впритык.
+  resources:
+    requests:
+      cpu: 50m
+      memory: 512Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi

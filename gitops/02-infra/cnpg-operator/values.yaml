@@ -1,1 +1,10 @@
 replicaCount: 1
+
+# Live kubectl top в покое: 15m/76Mi.
+resources:
+  requests:
+    cpu: 25m
+    memory: 128Mi
+  limits:
+    cpu: 250m
+    memory: 256Mi

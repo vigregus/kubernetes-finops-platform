@@ -31,6 +31,17 @@ operator:
   # node the second replica can never schedule past the anti-affinity rule, so
   # the Deployment sat at 1/2 with a rollout that could never complete, and
   # the running operator restarted repeatedly under the pressure.
+  #
+  # Та же причина, по которой resources живёт здесь, а не отдельным
+  # top-level блоком: второй `operator:` ниже по файлу значил бы то же самое
+  # молчаливое затирание. Live kubectl top в покое: 21m/78Mi.
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
   prometheus:
     enabled: true
     port: 9963
@@ -69,10 +80,42 @@ prometheus:
   serviceMonitor:
     enabled: false
 
+# cilium-agent сам (ds/cilium) - датаплейн на каждой ноде, самый тяжёлый
+# контейнер из всех в этом файле. Live kubectl top: 689m/542Mi на единственной
+# ноде этого кластера - лимит взят с запасом над этим пиком, а не над средним,
+# иначе агент сам стал бы узким местом ровно там, где раньше была перегрузка
+# ноды во время нагрузочных тестов (см. gitops/04-messenger/load-testing).
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: "2"
+    memory: 1Gi
+
+# cilium-envoy - отдельный DaemonSet (L7-прокси для network policy и Gateway
+# API, см. gatewayAPI ниже). Live kubectl top: 20m/66Mi.
+envoy:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
 hubble:
   enabled: true
   relay:
     enabled: true
+    # Live kubectl top: 3m/48Mi.
+    resources:
+      requests:
+        cpu: 25m
+        memory: 64Mi
+      limits:
+        cpu: 250m
+        memory: 128Mi
     podLabels:
       app.kubernetes.io/name: hubble-relay
       app.kubernetes.io/component: platform
@@ -82,6 +125,26 @@ hubble:
       finops.internal/component: platform
   ui:
     enabled: true
+    # frontend/backend - два отдельных контейнера одного Deployment.
+    # Live kubectl top (суммарно под hubble-ui): 125m/474Mi - большую часть
+    # этого ест backend (проксирует gRPC-стрим в браузер), frontend - просто
+    # nginx со статикой.
+    backend:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 256Mi
+        limits:
+          cpu: 500m
+          memory: 512Mi
+    frontend:
+      resources:
+        requests:
+          cpu: 25m
+          memory: 32Mi
+        limits:
+          cpu: 100m
+          memory: 128Mi
     podLabels:
       app.kubernetes.io/name: hubble-ui
       app.kubernetes.io/component: platform

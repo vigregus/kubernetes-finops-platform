@@ -2,3 +2,30 @@ vpa:
   enabled: true
   updater:
     enabled: false
+  # recommender/admissionController уже получают requests по дефолту
+  # чарта vpa (50m/500Mi и 50m/200Mi) - лимитов не было вовсе. Live
+  # kubectl top: recommender 20m/54Mi, admission-controller 6m/18Mi.
+  recommender:
+    resources:
+      limits:
+        cpu: 500m
+        memory: 1Gi
+  admissionController:
+    resources:
+      limits:
+        cpu: 250m
+        memory: 400Mi
+
+# Сам контроллер goldilocks (создаёт VPA per-namespace) и веб-dashboard -
+# requests уже заданы чартом (25m/256Mi у обоих), limits не было.
+# Live kubectl top: controller 1m/56Mi, dashboard 2m/14Mi (x2 реплики).
+controller:
+  resources:
+    limits:
+      cpu: 250m
+      memory: 512Mi
+dashboard:
+  resources:
+    limits:
+      cpu: 100m
+      memory: 512Mi

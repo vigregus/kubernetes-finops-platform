@@ -80,12 +80,40 @@ spec:
       # повтор отправки из outbox создаёт дубль в топике, и дедупликация
       # по event_id остаётся единственной защитой.
       enable.idempotence: "true"
+  # Оба контейнера без лимитов делили один под (entity-operator) без
+  # ограничений вовсе - live kubectl top на под целиком: 28m/973Mi. Деление
+  # пополам между topicOperator/userOperator - не измеренная пропорция
+  # (Strimzi не даёт per-container top на этот под отдельно), а симметричный
+  # запас под оба на случай, если кто-то один утечёт.
   entityOperator:
-    topicOperator: {}
-    userOperator: {}
+    topicOperator:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 256Mi
+        limits:
+          cpu: 500m
+          memory: 512Mi
+    userOperator:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 256Mi
+        limits:
+          cpu: 500m
+          memory: 512Mi
   # Без этого экспортёра нигде нет метрики отставания consumer group, то есть
   # застрявший потребитель невидим, пока кто-то ниже по течению не заметит
   # устаревшие данные. Для мессенджера это отставание доставки сообщений.
+  #
+  # Live kubectl top: 9m/20Mi.
   kafkaExporter:
     topicRegex: ".*"
     groupRegex: ".*"
+    resources:
+      requests:
+        cpu: 25m
+        memory: 32Mi
+      limits:
+        cpu: 250m
+        memory: 128Mi
