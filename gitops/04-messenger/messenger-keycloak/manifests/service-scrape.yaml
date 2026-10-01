@@ -1,0 +1,23 @@
+# Keycloak отдаёт метрики на management-порту (keycloak.yaml включает
+# metrics-enabled/health-enabled/http-metrics-histograms-enabled) -
+# Service messenger-idp-service, которую заводит сам keycloak-operator,
+# уже несёт порт "management" (9000) безусловно, вне зависимости от
+# того, включены метрики или нет - сам порт появился не этой правкой.
+#
+# Скребём службу, а не под: namespace keycloak отдельный от messenger,
+# и роль endpoints добавляет к серии namespace/pod - тот же довод, что
+# у messenger-centrifugo/manifests/service-scrape.yaml.
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMServiceScrape
+metadata:
+  name: messenger-idp
+  namespace: keycloak
+spec:
+  selector:
+    matchLabels:
+      app: keycloak
+      app.kubernetes.io/instance: messenger-idp
+  endpoints:
+    - port: management
+      path: /metrics
+      interval: 30s
