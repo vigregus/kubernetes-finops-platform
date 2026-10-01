@@ -18,6 +18,7 @@ import type { SendReceipt } from "./features/receipts/useReceipts";
 import type { BootState } from "./api/client";
 import type { SessionState } from "./features/auth/sessionState";
 import type { ResendVerificationEmail } from "./features/auth/components/EmailVerificationBanner";
+import type { TelemetryClient } from "./features/telemetry/telemetryClient";
 
 interface AppProps {
   session: SessionState;
@@ -119,6 +120,13 @@ interface AppProps {
    * тот код, который исполняется (`realtimeClient.ts:44-53`).
    */
   createCentrifuge?: CentrifugeFactory;
+  /**
+   * G3-008: приёмник best-effort телеметрии доставки — транзитом в
+   * `ChatPage`. `record`, а не весь `TelemetryClient`: панели нечем
+   * сбрасывать очередь (`flush`/`dispose` — дело владельца жизненного
+   * цикла, `main.tsx`), им нужен только способ записать факт.
+   */
+  telemetry: Pick<TelemetryClient, "record">;
 }
 
 /** Состояние готовности: данные `/me` и списка бесед в одном снимке. */
@@ -148,6 +156,7 @@ export function App({
   readCentrifugoUrl,
   issueTicket,
   createCentrifuge,
+  telemetry,
 }: AppProps) {
   const state = useSyncExternalStore(session.subscribe, session.getSnapshot);
 
@@ -198,6 +207,7 @@ export function App({
           readCentrifugoUrl={readCentrifugoUrl}
           issueTicket={issueTicket}
           createCentrifuge={createCentrifuge}
+          telemetry={telemetry}
         />
       );
   }
@@ -216,6 +226,7 @@ interface ReadyScreenProps {
   readCentrifugoUrl: () => string;
   issueTicket: RealtimeTicketIssuer;
   createCentrifuge?: CentrifugeFactory;
+  telemetry: Pick<TelemetryClient, "record">;
 }
 
 function ReadyScreen({
@@ -231,6 +242,7 @@ function ReadyScreen({
   readCentrifugoUrl,
   issueTicket,
   createCentrifuge,
+  telemetry,
 }: ReadyScreenProps) {
   const viewer = useMemo(() => adaptMe(state.account), [state.account]);
 
@@ -285,6 +297,7 @@ function ReadyScreen({
       centrifugoUrl={centrifugoUrl}
       issueTicket={issueTicket}
       createCentrifuge={createCentrifuge}
+      telemetry={telemetry}
     />
   );
 }

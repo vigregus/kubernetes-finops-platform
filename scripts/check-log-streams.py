@@ -102,6 +102,11 @@ EVENTS: dict[str, str] = {
     "realtime_cycle": APPLICATION,
     "realtime_delivery": APPLICATION,
     "realtime_duplicate": APPLICATION,
+    # G3-008: приём best-effort телеметрии браузера. Та же плоскость, что
+    # у остальных событий конвейера сообщения - не security/access, а
+    # диагностика конкретного пути (delivery_ack без message_id и
+    # delivery_ack на неизвестное сообщение).
+    "browser_telemetry": APPLICATION,
     # Проекция непрочитанного. Два имени, а не одно: `unread_cycle`
     # отвечает на «жив ли потребитель», `unread_event` — на «что стало
     # с конкретным событием». Слить их значило бы потерять второе:

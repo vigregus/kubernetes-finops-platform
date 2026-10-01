@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from typing import Any
 
 import asyncpg
@@ -153,6 +154,21 @@ async def lock_active_conversation(
         sender_id,
     )
     return ConversationSeq(value) if value is not None else None
+
+
+async def fetch_created_at(
+    conn: asyncpg.Connection, *, message_id: MessageId
+) -> datetime | None:
+    """`t1` для `G3-008` — только колонка, не вся строка.
+
+    Браузерная телеметрия сверяет `delivery_ack` с моментом коммита, и ей
+    не нужно ни содержимое, ни остальные десять колонок `_COLUMNS`: лишняя
+    выборка здесь — лишняя цена на best-effort пути, который и так не
+    должен становиться тяжелее отправки.
+    """
+    return await conn.fetchval(
+        "SELECT created_at FROM messages WHERE message_id = $1", message_id
+    )
 
 
 async def fetch_by_client_id(

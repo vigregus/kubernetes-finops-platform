@@ -39,6 +39,16 @@ export interface UseRealtimeConnectionOptions {
   readonly onUserPublication: (payload: unknown) => void;
   /** Подмена SDK — для тестов обвязки; в production не задаётся. */
   readonly createCentrifuge?: RealtimeClientOptions["createCentrifuge"];
+  /**
+   * Факт автомата — наружу, **до** перехода. Не логика (G3-008): что из
+   * этого факта следует для телеметрии, решает `features/telemetry`, а не
+   * этот файл, у которого решений про соединение по-прежнему нет ни одного.
+   * Состояние передаётся тем, что было **до** события, по той же причине,
+   * по которой `goOnline` ниже читает `stateRef.current` до своего
+   * `dispatch`: событие само по себе не говорит, из какого состояния оно
+   * пришло, а переход это состояние меняет безвозвратно.
+   */
+  readonly onObservedEvent?: (event: ConnectionEvent, before: ConnectionMachineState) => void;
 }
 
 /**
@@ -111,6 +121,20 @@ export function useRealtimeConnection(
 
   const clientRef = useRef<RealtimeClient | null>(null);
 
+  const onObservedEventRef = useRef(options.onObservedEvent);
+  useEffect(() => {
+    onObservedEventRef.current = options.onObservedEvent;
+  }, [options.onObservedEvent]);
+
+  // Единственная точка, через которую проходит любое событие автомата,
+  // откуда бы оно ни пришло (SDK, браузер, детектор пропуска): факт уходит
+  // наблюдателю **до** `dispatch`, пока `stateRef` ещё держит состояние,
+  // в котором событие застало автомат.
+  const dispatchObserved = useCallback((event: ConnectionEvent) => {
+    onObservedEventRef.current?.(event, stateRef.current);
+    dispatch(event);
+  }, []);
+
   const { centrifugoUrl, channel, userChannel, issueTicket, createCentrifuge } = options;
 
   useEffect(() => {
@@ -119,7 +143,7 @@ export function useRealtimeConnection(
       channel,
       userChannel,
       issueTicket,
-      onEvent: dispatch,
+      onEvent: dispatchObserved,
       onPublication: (payload) => publicationRef.current(payload),
       onUserPublication: (payload) => userPublicationRef.current(payload),
       createCentrifuge,
@@ -132,10 +156,10 @@ export function useRealtimeConnection(
       clientRef.current = null;
       client.stop();
     };
-  }, [centrifugoUrl, channel, userChannel, issueTicket, createCentrifuge]);
+  }, [centrifugoUrl, channel, userChannel, issueTicket, createCentrifuge, dispatchObserved]);
 
   useEffect(() => {
-    const goOffline = () => dispatch({ type: "browser-offline" });
+    const goOffline = () => dispatchObserved({ type: "browser-offline" });
 
     const goOnline = () => {
       // Читается состояние **до** этого перехода — тем самым `stateRef`
@@ -143,7 +167,7 @@ export function useRealtimeConnection(
       // `reconnectAllowed` отвечает на вопрос «можно ли возобновлять», и
       // ответ на него не зависит от того, что сеть вернулась.
       const allowed = stateRef.current.reconnectAllowed;
-      dispatch({ type: "browser-online" });
+      dispatchObserved({ type: "browser-online" });
       if (allowed) {
         clientRef.current?.connect();
       }
@@ -156,9 +180,12 @@ export function useRealtimeConnection(
       window.removeEventListener("offline", goOffline);
       window.removeEventListener("online", goOnline);
     };
-  }, []);
+  }, [dispatchObserved]);
 
-  const notify = useCallback((event: ClientObservedEvent) => dispatch(event), []);
+  const notify = useCallback(
+    (event: ClientObservedEvent) => dispatchObserved(event),
+    [dispatchObserved],
+  );
 
   // Объект собирается через `useMemo`, потому что от него зависит эффект
   // композиции («вошли в SYNCING — пойти за историей»): новая ссылка на каждом

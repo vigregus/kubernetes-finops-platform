@@ -8,10 +8,12 @@ import {
   ConversationsApi,
   MessagesApi,
   SendMessageRequestTypeEnum,
+  TelemetryApi,
   UsersApi,
 } from "./api/generated";
 import { createRealtimeTicketIssuer } from "./api/realtimeToken";
 import { bootStateOf, completeLogin } from "./features/auth/callback";
+import { createTelemetryClient } from "./features/telemetry/telemetryClient";
 import { ensureDeviceId, loadDeviceId, saveDeviceId } from "./features/auth/deviceId";
 import { CALLBACK_PATH } from "./features/auth/session";
 import { createSessionState } from "./features/auth/sessionState";
@@ -49,6 +51,20 @@ const authApi = withUnwrappedErrors(new AuthApi(client.configuration));
 const conversationsApi = withUnwrappedErrors(new ConversationsApi(client.configuration));
 const messagesApi = withUnwrappedErrors(new MessagesApi(client.configuration));
 const usersApi = withUnwrappedErrors(new UsersApi(client.configuration));
+
+/**
+ * G3-008, одна константа на приложение — тем же доводом, что у
+ * `outboxStore`: очередь телеметрии копится между рендерами и панелями,
+ * второй объект завёл бы вторую, никогда не сбрасываемую очередь.
+ *
+ * Без `withUnwrappedErrors`: `telemetryClient.flush()` сам глотает любой
+ * отказ (`telemetryClient.ts`), и разворачивать `FetchError` в `ApiProblem`
+ * здесь нечему — поймать его и выбросить заново успело бы само тело
+ * `try/catch` внутри `flush()`.
+ */
+const telemetryClient = createTelemetryClient({
+  api: new TelemetryApi(client.configuration),
+});
 
 /**
  * Клиент истории отдаётся **операцией**, а не объектом: `HistorySource`
@@ -269,6 +285,7 @@ createRoot(document.getElementById("root")!).render(
       outboxStore={outboxStore}
       readCentrifugoUrl={readCentrifugoUrl}
       issueTicket={issueTicket}
+      telemetry={telemetryClient}
     />
   </StrictMode>,
 );

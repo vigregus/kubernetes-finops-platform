@@ -421,3 +421,38 @@ def message_delivery_duration(seconds: float) -> None:
     MESSAGE_DELIVERY_DURATION.labels(service=SERVICE).observe(
         seconds, exemplar=_exemplar()
     )
+
+
+# G3-008: счётчик всех событий браузерной телеметрии, один на все 12 типов
+# из 06-observability.md, а не по счётчику на тип. Это best-effort/sampled
+# канал (та же глава), и его собственная кардинальность не должна расти
+# быстрее, чем решения, которые по ней принимают: доля recovered=false
+# (PERF-005) и факт алерта (OBS-003/004) считаются той же меткой `event_type`
+# через `rate(...) by (event_type)`, отдельных имён под них не требуется.
+BROWSER_EVENTS = Counter(
+    "messenger_browser_events_total",
+    "События клиентской телеметрии (G3-008), по типу",
+    ["service", "event_type"],
+)
+
+
+def browser_event(event_type: str) -> None:
+    BROWSER_EVENTS.labels(service=SERVICE, event_type=event_type).inc()
+
+
+# Настоящий T_delivery: t7 (`delivery_ack` браузера-получателя) минус t1
+# (коммит сообщения в Postgres, `created_at`). В отличие от
+# MESSAGE_DELIVERY_DURATION выше — та же величина, что и до G3-008, не
+# подменяется: приближение остаётся приближением и для сравнения, и на
+# случай, если у части клиентов телеметрия выключена/недоступна (sampling).
+BROWSER_DELIVERY_DURATION = Histogram(
+    "messenger_browser_delivery_e2e_duration_seconds",
+    "T_delivery (t7 - t1), подтверждённое браузером-получателем",
+    ["service"],
+)
+
+
+def browser_delivery_duration(seconds: float) -> None:
+    BROWSER_DELIVERY_DURATION.labels(service=SERVICE).observe(
+        seconds, exemplar=_exemplar()
+    )

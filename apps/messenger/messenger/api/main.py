@@ -37,6 +37,7 @@ from messenger.domain.ids import (
     ClientMessageId,
     ConversationId,
     DeviceId,
+    MessageId,
     SessionId,
     UserId,
 )
@@ -54,6 +55,7 @@ from messenger.domain.receipts import (
 )
 from messenger.domain.user import capabilities_of, normalize_email
 from messenger.services import backchannel as backchannel_service
+from messenger.services import browser_telemetry as browser_telemetry_service
 from messenger.services import conversations as conversation_service
 from messenger.services import history as history_service
 from messenger.services import identity as identity_service
@@ -1930,6 +1932,82 @@ async def set_receipts(
     with tracing.span("response"):
         body_out = _receipts_body(result.state)
     return body_out
+
+
+_DELIVERY_SCOPED_EVENTS = frozenset(
+    {"message_received", "message_rendered", "delivery_ack"}
+)
+
+
+class BrowserTelemetryEvent(BaseModel):
+    """Один элемент пачки `POST /telemetry/browser`. Имена - из контракта.
+
+    `extra="forbid"` тем же доводом, что у `SetReceipts`: опечатка в имени
+    поля здесь не ошибка клиента, которую стоило бы ловить 422-м, а просто
+    непонятое best-effort измерение - но молчаливое проглатывание было бы
+    хуже отказа, который виден в тестах при написании клиента.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal[
+        "ws_connected", "ws_disconnected", "ws_reconnected", "gap_detected",
+        "message_received", "message_rendered", "delivery_ack",
+        "recovery_success", "recovery_failed", "sync_started", "sync_finished",
+        "js_error",
+    ]
+    occurred_at: datetime
+    message_id: uuid.UUID | None = None
+    conversation_id: uuid.UUID | None = None
+    detail: str | None = Field(default=None, max_length=200)
+
+    @model_validator(mode="after")
+    def _message_scoped_events_need_message_id(self) -> BrowserTelemetryEvent:
+        if self.type in _DELIVERY_SCOPED_EVENTS and self.message_id is None:
+            raise ValueError(f"{self.type} без message_id не с чем сверить t1")
+        return self
+
+
+class BrowserTelemetryBatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    events: list[BrowserTelemetryEvent] = Field(max_length=50)
+
+
+@app.post("/telemetry/browser", status_code=202, response_model=None)
+async def ingest_browser_telemetry(
+    body: BrowserTelemetryBatch, request: Request, response: Response
+) -> Response:
+    """G3-008: приём клиентской телеметрии доставки. См. `06-observability.md`,
+    "Телеметрия браузера обязательна", и `services/browser_telemetry.py`.
+
+    `202`, не `200`/`204`: тело принято к учёту, а не гарантированно
+    записано - запись best-effort (сервис тихо отбрасывает то, что не
+    может сверить), и код ответа не должен обещать больше этого.
+
+    Аутентификация - та же проверка токена, что у остальных точек
+    (`security: [bearerAuth]` в контракте без переопределения), но без
+    домена: телеметрия не спрашивает, участник ли отправитель беседы,
+    упомянутой в событии, - это не продуктовое действие, а измерение
+    собственного клиента, и статус беседы здесь ни при чём.
+    """
+    runtime = request.app.state.runtime
+    async with runtime.connection() as conn:
+        auth = await _current(request, conn)
+        if not auth.ok or auth.user is None:
+            return _auth_failure(auth.rejection, response)
+
+        events = [
+            browser_telemetry_service.TelemetryEvent(
+                event_type=event.type,
+                occurred_at=event.occurred_at,
+                message_id=MessageId(event.message_id) if event.message_id else None,
+            )
+            for event in body.events
+        ]
+        await browser_telemetry_service.ingest(conn, events=events)
+
+    return Response(status_code=202)
 
 
 @app.post("/auth/verify-email/resend", response_model=dict[str, object])
