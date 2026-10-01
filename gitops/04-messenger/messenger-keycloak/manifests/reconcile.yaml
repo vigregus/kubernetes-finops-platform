@@ -161,6 +161,19 @@ spec:
               # Events Admin API. eventsExpiration — семь дней, тот же срок,
               # что и у ssoSessionIdleTimeout: без него таблица событий в
               # Postgres росла бы неограниченно.
+              #
+              # refreshTokenMaxReuse — тем же PUT. Живой инцидент, пойманный
+              # именно этими событиями (REFRESH_TOKEN_ERROR "Maximum allowed
+              # refresh token reuse exceeded", следом "Session doesn't have
+              # required client" для всей сессии): несколько вкладок одного
+              # браузера делят один refresh-cookie, и при maxReuse=0 обмен
+              # второй вкладки долей секунды позже первой ронял всю сессию —
+              # разлогин всех вкладок разом. Контракт (`/auth/refresh`,
+              # openapi.yaml) прямо обещает, что несколько вкладок обменивают
+              # каждая свой и одновременные запросы — норма; с maxReuse=0 это
+              # обещание было ложным. Небольшая терпимость покрывает горстку
+              # конкурентных обменов в узком окне, не маскируя настоящий
+              # перехват токена (десятки повторов, не единицы).
               curl -sf -H "$AUTH" \
                 "$KEYCLOAK/admin/realms/$REALM" > /tmp/realm.json
               jq '.verifyEmail = false
@@ -171,13 +184,15 @@ spec:
                       "CODE_TO_TOKEN", "CODE_TO_TOKEN_ERROR",
                       "REFRESH_TOKEN", "REFRESH_TOKEN_ERROR"
                     ]
-                  | .eventsExpiration = 604800' \
+                  | .eventsExpiration = 604800
+                  | .refreshTokenMaxReuse = 3' \
                 /tmp/realm.json > /tmp/realm-patched.json
               curl -sf -X PUT -H "$AUTH" -H 'Content-Type: application/json' \
                 --data-binary @/tmp/realm-patched.json \
                 "$KEYCLOAK/admin/realms/$REALM"
               rm -f /tmp/realm.json /tmp/realm-patched.json
               echo "messenger: события Keycloak включены (REFRESH_TOKEN_ERROR и другие, TTL 7 дней)"
+              echo "messenger: refreshTokenMaxReuse=3 (терпимость к конкурентным вкладкам)"
 
               # Браузерная сессия принадлежит messenger-web, поэтому именно
               # этот клиент получает Back-Channel Logout. Без повторяемой
