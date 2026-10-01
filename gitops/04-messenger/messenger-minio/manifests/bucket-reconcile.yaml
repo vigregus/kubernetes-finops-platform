@@ -1,0 +1,109 @@
+# Раздел 24 плана (docs/messenger/15-load-testing-platform.md) — живой
+# дефект, пойманный верификацией после artifact-repository-bootstrap.yaml:
+# добавление бакета в уже существующий Tenant.spec.buckets (tenant.yaml)
+# НЕ создаёт его. Проверено в кластере: MinIO Operator провижинит бакеты
+# из spec.buckets один раз, во время первоначального создания Tenant
+# (переход .status.currentState в Initialized) — то же ограничение
+# жизненного цикла, что у KeycloakRealmImport (messenger-keycloak/manifests/
+# reconcile.yaml), только для бакетов, а не для настроек реалма. Логи
+# minio-operator за время синка tenant.yaml с load-testing-artifacts не
+# содержат вообще ни одного упоминания этого бакета или Tenant — оператор
+# его не заметил, Tenant синхронизирован с git (status.sync=Synced), а
+# `aws s3 ls` внутри кластера бакет не видит: "The specified bucket does
+# not exist" на шаге reconciliation в load-testing workflow.
+#
+# Джоб идемпотентен: для каждого бакета из BUCKETS сначала head-bucket
+# (0 = существует, не 0 = нет), создаёт только отсутствующие. Список
+# продублирован из tenant.yaml намеренно, а не вычитан оттуда через
+# `kubectl get tenant`: образ amazon/aws-cli не несёт kubectl, и заводить
+# второй инструмент с отдельным RBAC ради трёх строк, которые меняются
+# редко, — не оправдано на однонодовом стенде (тот же компромисс, что уже
+# в tenant.yaml про root-креды вместо отдельного IAM-пользователя).
+#
+# Образ minio/mc и quay.io/minio/mc не пуллятся в этом кластере (проверено:
+# "pull access denied"/"unauthorized" на оба) — amazon/aws-cli пуллится
+# и проверен живьём (`aws s3 ls` против messenger-objects-hl уже отработал
+# при диагностике этого дефекта).
+#
+# Секрет смонтирован volume'ом, а не прочитан через `kubectl get secret`:
+# тот же приём избавляет от необходимости в ServiceAccount/Role вообще -
+# монтирование Secret в под не требует RBAC (это делает kubelet, не API
+# authorization), в отличие от messenger-realm-reconcile и
+# artifact-repository-bootstrap.yaml, которым kubectl был нужен для
+# записи в другой namespace, а не только для чтения.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: messenger-minio-bucket-reconcile
+  namespace: messenger
+  annotations:
+    # Тот же хук, что у остальных bootstrap-джобов: поля Job неизменяемы,
+    # обычный ресурс упал бы на втором синке. Явной волны нет - применяется
+    # в волне самого приложения messenger-minio ("4", application.yaml),
+    # после Tenant из этого же манифеста, чтобы Service
+    # messenger-objects-hl уже существовал.
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: messenger-minio-bucket-reconcile
+        app.kubernetes.io/component: bootstrap
+        finops.internal/product: messenger
+        finops.internal/team: platform-engineering
+        finops.internal/environment: local
+        finops.internal/component: object-storage
+    spec:
+      restartPolicy: Never
+      volumes:
+        - name: minio-env
+          secret:
+            secretName: messenger-minio-env
+      containers:
+        - name: reconcile
+          image: amazon/aws-cli
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+
+              ENDPOINT=http://messenger-objects-hl.messenger.svc.cluster.local:9000
+              BUCKETS="messenger-attachments messenger-voice load-testing-artifacts"
+
+              # /secrets/config.env - формат shell-export'ов (messenger-
+              # secrets/manifests/bootstrap.yaml), не source: секрет не
+              # должен исполняться как код, только разбираться grep/cut.
+              export AWS_ACCESS_KEY_ID=$(grep MINIO_ROOT_USER /secrets/config.env | cut -d= -f2)
+              export AWS_SECRET_ACCESS_KEY=$(grep MINIO_ROOT_PASSWORD /secrets/config.env | cut -d= -f2)
+              [ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$AWS_SECRET_ACCESS_KEY" ] || {
+                echo "не удалось разобрать messenger-minio-env" >&2; exit 1; }
+
+              # Tenant.status может стать Synced раньше, чем под MinIO
+              # реально принимает S3-соединения (readiness - отдельный
+              # цикл от applied-в-git). До 60с ожидания вместо падения
+              # с первой попытки.
+              i=0
+              until aws --endpoint-url "$ENDPOINT" --region us-east-1 s3 ls >/dev/null 2>&1; do
+                i=$((i + 1))
+                [ "$i" -lt 12 ] || { echo "MinIO не отвечает на $ENDPOINT после 60с" >&2; exit 1; }
+                sleep 5
+              done
+
+              for b in $BUCKETS; do
+                if aws --endpoint-url "$ENDPOINT" --region us-east-1 s3api head-bucket --bucket "$b" >/dev/null 2>&1; then
+                  echo "$b: уже существует"
+                else
+                  aws --endpoint-url "$ENDPOINT" --region us-east-1 s3api create-bucket --bucket "$b" >/dev/null
+                  echo "$b: создан"
+                fi
+              done
+          volumeMounts:
+            - name: minio-env
+              mountPath: /secrets
+              readOnly: true
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { cpu: 100m, memory: 64Mi }
