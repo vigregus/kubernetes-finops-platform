@@ -258,6 +258,32 @@ EXTERNAL_METRICS: dict[str, str] = {
     "envoy_cluster_upstream_rq_time": (
         "gitops/02-infra/cilium-observability/manifests/envoy-scrape.yaml"
     ),
+    # Keycloak — встроенные Quarkus/Micrometer метрики на management-порту
+    # (metrics-enabled/http-metrics-histograms-enabled в keycloak.yaml), не
+    # приложение из apps/**. Снимается VMServiceScrape в том же каталоге
+    # манифестов (05 · Capacity, карточки Keycloak 5xx %/DB pool % и секция
+    # "Keycloak — Identity"). Пропуск этих строк в PR #99 — тот самый
+    # дефект, от которого защищает инвариант A: панели смержились, CI на
+    # них не упал (allowlist не обновили вместе с панелями), и о пробеле
+    # узнали только на следующем, не связанном по теме PR.
+    "http_server_requests_seconds": (
+        "gitops/04-messenger/messenger-keycloak/manifests/service-scrape.yaml"
+    ),
+    "agroal_active": (
+        "gitops/04-messenger/messenger-keycloak/manifests/service-scrape.yaml"
+    ),
+    "agroal_available": (
+        "gitops/04-messenger/messenger-keycloak/manifests/service-scrape.yaml"
+    ),
+    "process_cpu_usage": (
+        "gitops/04-messenger/messenger-keycloak/manifests/service-scrape.yaml"
+    ),
+    "jvm_memory_used_bytes": (
+        "gitops/04-messenger/messenger-keycloak/manifests/service-scrape.yaml"
+    ),
+    "jvm_memory_max_bytes": (
+        "gitops/04-messenger/messenger-keycloak/manifests/service-scrape.yaml"
+    ),
 }
 
 # Ключевые слова PromQL, которые не сопровождаются скобкой и потому не
