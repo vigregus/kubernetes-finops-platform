@@ -1,3 +1,16 @@
+# Без этого блока у daemonset нет requests/limits вовсе: на одноузловом
+# minikube это означает, что promtail свободно конкурирует за CPU с
+# тестируемыми сервисами. Live-замер (kubectl top) во время нагрузочного
+# прогона: 403m CPU / 344Mi RAM - сняты ниже limits с запасом, requests
+# занижены под простой (без прогона promtail почти не ест CPU).
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
 config:
   clients:
     # `_msg_field` перечисляет поля, из которых берётся текст записи,
