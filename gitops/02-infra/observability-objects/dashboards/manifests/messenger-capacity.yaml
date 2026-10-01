@@ -14,7 +14,7 @@ spec:
       "description": "USE (Utilization/Saturation/Errors, Brendan Gregg) поперёк компонентов на одном экране: отвечает «во что мы упираемся», а не «где тормозит» (02 · Journey) и не «есть ли проблема у пользователя» (01 · SLO). Current saturation и Compute остаются раскрытыми по умолчанию, остальные секции — collapsed: раскрывать по конкретному подозрению (например Redis memory % ушёл в красное), а не листать десятки графиков.",
       "tags": ["messenger", "use", "capacity"],
       "schemaVersion": 39,
-      "version": 7,
+      "version": 8,
       "editable": true,
       "time": { "from": "now-6h", "to": "now" },
       "links": [
@@ -40,7 +40,7 @@ spec:
         {
           "id": 27,
           "type": "row",
-          "title": "Current saturation",
+          "title": "Current / peak saturation",
           "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
         },
         {
@@ -109,9 +109,9 @@ spec:
           "id": 30,
           "type": "stat",
           "title": "API DB pool %",
-          "description": "in_use / max, агрегировано по всем репликам service — 10/10 на одной реплике и 20/20 на двух выглядят здесь одинаково (100%), раздельные числа busy/max смотреть в развёрнутой секции PostgreSQL ниже (API DB pool: in_use vs idle vs max). peak — максимум за выбранный диапазон, не только текущий момент: пул мог упереться в 100% во время пика нагрузки и уже отпустить к моменту просмотра дашборда.",
+          "description": "topk(1, ... by pod) — не агрегат по репликам: раньше считалось sum(in_use)/sum(max) по всем pod сразу, и api-1 10/10 + api-2 0/10 показывали бы 50% вместо реального «одна реплика уже насыщена». messenger_db_pool_connections несёт label pod (проверено живьём) — то же решение, что уже применено к CPU/Memory max % рядом. Раздельные числа busy/max по каждой реплике — в развёрнутой секции PostgreSQL ниже (API DB pool: in_use vs idle vs max). peak — худший под за весь выбранный диапазон, не обязательно тот же под, что лидирует сейчас.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "options": { "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "options": { "graphMode": "area", "textMode": "value_and_name", "reduceOptions": { "calcs": ["lastNotNull"] } },
           "fieldConfig": {
             "defaults": {
               "unit": "percentunit",
@@ -124,8 +124,16 @@ spec:
           },
           "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
           "targets": [
-            { "expr": "max(sum by (service) (messenger_db_pool_connections{namespace=~\"$namespace\",state=\"in_use\"}) / clamp_min(sum by (service) (messenger_db_pool_max_connections{namespace=~\"$namespace\"}), 1))", "legendFormat": "current" },
-            { "expr": "max_over_time((max(sum by (service) (messenger_db_pool_connections{namespace=~\"$namespace\",state=\"in_use\"}) / clamp_min(sum by (service) (messenger_db_pool_max_connections{namespace=~\"$namespace\"}), 1)))[$__range:])", "legendFormat": "peak" }
+            {
+              "instant": true,
+              "expr": "topk(1, sum by (pod) (messenger_db_pool_connections{namespace=~\"$namespace\",state=\"in_use\"}) / clamp_min(sum by (pod) (messenger_db_pool_max_connections{namespace=~\"$namespace\"}), 1))",
+              "legendFormat": "{{pod}} (current)"
+            },
+            {
+              "instant": true,
+              "expr": "topk(1, max_over_time((sum by (pod) (messenger_db_pool_connections{namespace=~\"$namespace\",state=\"in_use\"}) / clamp_min(sum by (pod) (messenger_db_pool_max_connections{namespace=~\"$namespace\"}), 1))[$__range:]))",
+              "legendFormat": "{{pod}} (peak)"
+            }
           ]
         },
         {
@@ -134,7 +142,7 @@ spec:
           "title": "Redis memory %",
           "description": "peak — максимум за выбранный диапазон, не только текущий момент.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "options": { "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "options": { "graphMode": "area", "textMode": "value_and_name", "reduceOptions": { "calcs": ["lastNotNull"] } },
           "fieldConfig": {
             "defaults": {
               "unit": "percentunit",
@@ -188,7 +196,7 @@ spec:
           "title": "Outbox oldest age",
           "description": "peak — максимум за выбранный диапазон, не только текущий момент.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "options": { "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "options": { "graphMode": "area", "textMode": "value_and_name", "reduceOptions": { "calcs": ["lastNotNull"] } },
           "fieldConfig": {
             "defaults": {
               "unit": "s",
@@ -209,12 +217,12 @@ spec:
           "id": 37,
           "type": "stat",
           "title": "Keycloak 5xx %",
-          "description": "Keycloak живёт в namespace keycloak, отдельном от переменной $namespace (по умолчанию messenger) — остальные панели этого ряда его не видят ни при каком значении переменной, поэтому фильтр здесь намеренно статический, не $namespace. outcome=\"SERVER_ERROR\" — готовая классификация Micrometer/Quarkus (http.server.requests), не парсинг кода статуса вручную. peak — максимум за выбранный диапазон, не только текущий момент.",
+          "description": "Keycloak живёт в namespace keycloak, отдельном от переменной $namespace (по умолчанию messenger) — остальные панели этого ряда его не видят ни при каком значении переменной, поэтому фильтр здесь намеренно статический, не $namespace. outcome=\"SERVER_ERROR\" — готовая классификация Micrometer/Quarkus (http.server.requests), не парсинг кода статуса вручную. Живой баг предыдущей версии: знаменатель был обёрнут в clamp_min(rate, 1) — для СЧЁТЧИКА-ставки (запросов/сек) это занижало процент при низком трафике (0.2 rps пола до 1, то есть «0.01 ошибок/сек из 0.2 реальных» считалось бы как «из 1»), а не просто защищало от деления на 0. or vector(0) + noValue:\"N/A\" — тот же приём, что у Login SLI на 01 и Success rate на 06: честный 0% при трафике без единой ошибки, N/A при полном отсутствии трафика, не заниженный процент. peak — максимум за выбранный диапазон, не только текущий момент.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "options": { "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "options": { "graphMode": "area", "textMode": "value_and_name", "reduceOptions": { "calcs": ["lastNotNull"] } },
           "fieldConfig": {
             "defaults": {
-              "unit": "percentunit",
+              "unit": "percentunit", "noValue": "N/A",
               "thresholds": { "mode": "absolute", "steps": [
                 { "color": "green", "value": null },
                 { "color": "yellow", "value": 0.01 },
@@ -224,17 +232,17 @@ spec:
           },
           "gridPos": { "h": 4, "w": 6, "x": 12, "y": 5 },
           "targets": [
-            { "expr": "sum(rate(http_server_requests_seconds_count{namespace=\"keycloak\",outcome=\"SERVER_ERROR\"}[5m])) / clamp_min(sum(rate(http_server_requests_seconds_count{namespace=\"keycloak\"}[5m])), 1)", "legendFormat": "current" },
-            { "expr": "max_over_time((sum(rate(http_server_requests_seconds_count{namespace=\"keycloak\",outcome=\"SERVER_ERROR\"}[5m])) / clamp_min(sum(rate(http_server_requests_seconds_count{namespace=\"keycloak\"}[5m])), 1))[$__range:])", "legendFormat": "peak" }
+            { "expr": "(sum(rate(http_server_requests_seconds_count{namespace=\"keycloak\",outcome=\"SERVER_ERROR\"}[5m])) or vector(0)) / sum(rate(http_server_requests_seconds_count{namespace=\"keycloak\"}[5m]))", "legendFormat": "current" },
+            { "expr": "max_over_time(((sum(rate(http_server_requests_seconds_count{namespace=\"keycloak\",outcome=\"SERVER_ERROR\"}[5m])) or vector(0)) / sum(rate(http_server_requests_seconds_count{namespace=\"keycloak\"}[5m])))[$__range:])", "legendFormat": "peak" }
           ]
         },
         {
           "id": 38,
           "type": "stat",
-          "title": "Keycloak DB pool %",
-          "description": "agroal_active_count / (active + available) — доля сейчас занятых соединений из уже поднятого пула. Не in_use/max: Agroal не отдаёт настроенный максимум отдельной метрикой, а db.poolMaxSize=10 (keycloak.yaml) нигде не экспортируется как число — только фактически открытые (available) и занятые (active). Красный здесь означает «все открытые сейчас соединения заняты», что при poolMaxSize=10 и poolInitialSize=1 может означать и рост к пределу, и просто догонку пула под нагрузкой — для точного прочтения открывать deep-dive секцию Keycloak ниже. peak — максимум за выбранный диапазон, не только текущий момент.",
+          "title": "Keycloak DB pool busy/open %",
+          "description": "Переименовано с «Keycloak DB pool %»: agroal_active_count / (active + available) — доля сейчас занятых из уже ОТКРЫТЫХ соединений, не из настроенного предела. Не in_use/max: Agroal не отдаёт poolMaxSize=10 (keycloak.yaml) отдельной метрикой. active=1, available=0 даёт 100%, даже если Keycloak мог бы открыть ещё до 9 соединений, просто пока не успел — прежнее название «DB pool %» звучало как доля от общего лимита, хотя им не являлось. Красный здесь означает «все уже открытые соединения заняты» — для точного прочтения открывать deep-dive секцию Keycloak ниже. peak — максимум за выбранный диапазон, не только текущий момент.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "options": { "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "options": { "graphMode": "area", "textMode": "value_and_name", "reduceOptions": { "calcs": ["lastNotNull"] } },
           "fieldConfig": {
             "defaults": {
               "unit": "percentunit",
@@ -748,6 +756,50 @@ spec:
               "targets": [
                 { "expr": "process_cpu_usage{namespace=\"keycloak\"}", "legendFormat": "process CPU" },
                 { "expr": "sum(jvm_memory_used_bytes{namespace=\"keycloak\",area=\"heap\"}) / clamp_min(sum(jvm_memory_max_bytes{namespace=\"keycloak\",area=\"heap\"}), 1)", "legendFormat": "heap used" }
+              ]
+            },
+            {
+              "id": 44,
+              "type": "timeseries",
+              "title": "Container CPU / limit, Memory / limit",
+              "description": "Живой повод добавить эти две панели: инцидент, с которого начался весь этот ряд правок, был именно про падающий pod Keycloak, а до сих пор ни один дашборд не показывал его container-уровня cAdvisor-метрики — JVM-метрики (process CPU / heap выше) пропадают из /metrics ровно в момент отказа пода, container-уровня нет. Те же recording rules, что уже использует Compute выше (container-resource-usage.yaml), только namespace=\"keycloak\" вместо $namespace — Keycloak не входит ни в какое значение переменной namespace. container=\"keycloak\" — сам identity-сервер, не postgres/operator/reconcile-джобы того же namespace.",
+              "options": {
+                "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] },
+                "tooltip": { "mode": "multi", "sort": "desc" }
+              },
+              "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "percentunit",
+                  "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 },
+                  "thresholds": { "mode": "absolute", "steps": [
+                    { "color": "green", "value": null },
+                    { "color": "yellow", "value": 0.8 },
+                    { "color": "red", "value": 1 }
+                  ]}
+                }
+              },
+              "gridPos": { "h": 8, "w": 12, "x": 0, "y": 111 },
+              "targets": [
+                { "expr": "sum by (pod, container) (node_namespace_pod_container:container_cpu_usage_seconds_total:sum_irate{namespace=\"keycloak\",container=\"keycloak\"}) / sum by (pod, container) (namespace_pod_container:container_resource_limits_cpu_cores{namespace=\"keycloak\",container=\"keycloak\"})", "legendFormat": "CPU / limit" },
+                { "expr": "sum by (pod, container) (node_namespace_pod_container:container_memory_working_set_bytes{namespace=\"keycloak\",container=\"keycloak\"}) / sum by (pod, container) (namespace_pod_container:container_resource_limits_memory_bytes{namespace=\"keycloak\",container=\"keycloak\"})", "legendFormat": "Memory / limit" }
+              ]
+            },
+            {
+              "id": 45,
+              "type": "timeseries",
+              "title": "Restarts / OOMKilled (Errors)",
+              "description": "Та же пара recording rules, что в Compute (container-restarts-total/last-terminated-oomkilled), только явный namespace=\"keycloak\". Плоская линия restarts — здоровый под; ступенька — событие, которое стоит сопоставить с логами. oomkilled держит 1 и после того, как под уже перезапустился и работает нормально (флаг истории, не текущего момента).",
+              "options": {
+                "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] },
+                "tooltip": { "mode": "multi", "sort": "desc" }
+              },
+              "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+              "fieldConfig": { "defaults": { "unit": "short", "custom": { "lineWidth": 2, "fillOpacity": 0, "pointSize": 4 } } },
+              "gridPos": { "h": 8, "w": 12, "x": 12, "y": 111 },
+              "targets": [
+                { "expr": "max by (pod, container) (namespace_pod_container:container_restarts_total{namespace=\"keycloak\",container=\"keycloak\"})", "legendFormat": "restarts" },
+                { "expr": "max by (pod, container) (namespace_pod_container:container_last_terminated_oomkilled{namespace=\"keycloak\",container=\"keycloak\"})", "legendFormat": "oomkilled" }
               ]
             }
           ]
