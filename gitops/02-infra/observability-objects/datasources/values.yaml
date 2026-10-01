@@ -1,2 +1,12 @@
 namespaceScope: true
 watchNamespaces: "observability"
+
+# grafana-operator (контроллер), не сама Grafana. Live kubectl top в покое:
+# 9m/46Mi.
+resources:
+  requests:
+    cpu: 25m
+    memory: 64Mi
+  limits:
+    cpu: 250m
+    memory: 256Mi

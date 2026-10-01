@@ -47,3 +47,58 @@ controller:
     limits:
       cpu: 1000m
       memory: 2Gi
+
+# Остальные компоненты чарта (не controller) - тоже без лимитов до этой
+# правки. Цифры взяты с запасом над живым kubectl top в покое: server/dex/
+# redis/applicationset/notifications держатся в однозначных мегабайтах и
+# десятках милликор, repo-server — единственный из них, кто во время sync
+# реально разворачивает Helm-чарты в памяти (31m/58Mi в покое), поэтому ему
+# лимит шире остальных.
+applicationSet:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+dex:
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+notifications:
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+redis:
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+repoServer:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+server:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi

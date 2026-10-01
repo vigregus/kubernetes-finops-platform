@@ -70,8 +70,60 @@ vmagent:
     scrapeInterval: 20s
     externalLabels:
       cluster: local-v1
+    # Основной контейнер vmagent получает resources по чартовому
+    # useDefaultResources - под лимитом он уже. config-reloader рядом с ним
+    # его не наследует (это отдельный sidecar-контейнер того же CR) и был
+    # без limits вовсе - live kubectl top: 10m/25Mi. То же верно для
+    # vmalert/vmalertmanager ниже: у всех трёх один и тот же sidecar.
+    configReloaderResources:
+      requests:
+        cpu: 10m
+        memory: 25Mi
+      limits:
+        cpu: 100m
+        memory: 64Mi
+# vmalert/vmalertmanager не были объявлены в этом файле вовсе - чарт включает
+# их по умолчанию (enabled: true), а их CR создаёт тот же config-reloader
+# sidecar без limits, что и у vmagent выше.
+vmalert:
+  spec:
+    configReloaderResources:
+      requests:
+        cpu: 10m
+        memory: 25Mi
+      limits:
+        cpu: 100m
+        memory: 64Mi
+vmalertmanager:
+  spec:
+    configReloaderResources:
+      requests:
+        cpu: 10m
+        memory: 25Mi
+      limits:
+        cpu: 100m
+        memory: 64Mi
+# Сам контроллер VictoriaMetrics Operator - без него никто не создаёт
+# VMAgent/VMAlert/VMAlertmanager/VMSingle из CR выше. Live kubectl top:
+# 15m/108Mi.
+victoria-metrics-operator:
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
 kube-state-metrics:
   enabled: true
+  # Live kubectl top: 12m/145Mi.
+  resources:
+    requests:
+      cpu: 25m
+      memory: 128Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
   rbac:
     extraRules:
       - apiGroups: ["autoscaling.k8s.io"]
@@ -113,3 +165,11 @@ kube-state-metrics:
                     valueFrom: [target, memory]
 prometheus-node-exporter:
   enabled: true
+  # Live kubectl top: 10m/25Mi.
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi

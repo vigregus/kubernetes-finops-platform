@@ -7,3 +7,16 @@ operator:
     requests:
       cpu: 25m
       memory: 128Mi
+    # Live kubectl top держится у 1 ядра почти постоянно - это НЕ рабочая
+    # нагрузка, а live-найденный шторм ретраев: сам контейнер непрерывно
+    # валит TLS handshake timeout на watch к apiserver (Deployment/Pod/
+    # Secret/Service/StatefulSet/Tenant/PolicyBinding) и тут же релистит
+    # заново. У apiserver и у ноды в этот момент есть запас (apiserver
+    # 273m CPU, нода 32%), и у соседних контроллеров (argocd-application-
+    # controller, strimzi-cluster-operator, cnpg) той же ошибки нет -
+    # то есть дело не в apiserver/ноде, а в самом minio-operator. Лимит
+    # ниже не лечит причину, только не даёт этому ретрай-шторму вытеснить
+    # по CPU что-то ещё; сама причина - отдельная задача на расследование.
+    limits:
+      cpu: "1.5"
+      memory: 256Mi
