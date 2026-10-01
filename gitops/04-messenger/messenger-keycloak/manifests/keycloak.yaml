@@ -66,9 +66,28 @@ spec:
   # `log-console-output=json` переводится оператором в
   # `KC_LOG_CONSOLE_OUTPUT=json`; поток (`log_stream`) записи не несут -
   # его добавляет promtail отдельной стадией под namespace `keycloak`.
+  #
+  # metrics-enabled/health-enabled/http-metrics-histograms-enabled - до
+  # этой правки `/metrics` на management-порту отвечал 404 (проверено
+  # живьём), и Keycloak был слепым пятном для 05 · Capacity: тот
+  # дашборд фильтрует все панели по `namespace=~"$namespace"`, где
+  # `$namespace` по умолчанию `messenger` - namespace `keycloak` туда
+  # не попадает ни при каком значении этой переменной. Инцидент с
+  # refreshTokenMaxReuse (массовый логаут при конкурентном /auth/refresh)
+  # обнаружился не по дашборду, а по логам Keycloak постфактум именно
+  # поэтому: нагрузка на Keycloak росла, а capacity-экран оставался
+  # зелёным. http-metrics-histograms-enabled - без него HTTP-метрики
+  # (`http_server_requests_seconds_*`) есть, но без бакетов, которые
+  # нужны для p95/p99 (service-scrape.yaml и панели latency ниже).
   additionalOptions:
     - name: log-console-output
       value: json
+    - name: metrics-enabled
+      value: "true"
+    - name: health-enabled
+      value: "true"
+    - name: http-metrics-histograms-enabled
+      value: "true"
 
   resources:
     requests:
