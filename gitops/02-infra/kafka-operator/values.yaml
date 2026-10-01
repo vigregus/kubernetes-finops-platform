@@ -2,3 +2,22 @@
 # with watchAnyNamespace/watchNamespaces left at their defaults the
 # operator watches only its own namespace, which is exactly where the
 # Kafka cluster/topic CRs live too - no cross-namespace RBAC needed.
+
+# Чартовый дефолт ставит requests.memory == limits.memory == 384Mi - для
+# JVM-процесса это нулевой запас сверх того, что сама JVM решит выделить
+# под кучу при старте: любой всплеск GC выше этого потолка - OOMKill, а не
+# постепенная деградация. Live-найдено: strimzi-cluster-operator имеет
+# 102 рестарта за 19 дней. Большинство (подтверждено по --previous логу)
+# - самостоятельный выход при потере leader-election lease из-за
+# прерванного вызова к apiserver (тот же класс сетевой нестабильности
+# кластера, что и TLS handshake timeout у minio-operator, не баг Strimzi) -
+# но без запаса по памяти часть этих 102 рестартов могла быть OOMKill,
+# неотличимым от leader-election без истории снятого пода. Лимит поднят,
+# request не трогаю (реальное потребление в покое им не ограничено).
+resources:
+  requests:
+    memory: 384Mi
+    cpu: 200m
+  limits:
+    memory: 768Mi
+    cpu: 1000m
