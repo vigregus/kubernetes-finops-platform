@@ -225,6 +225,31 @@ EXTERNAL_METRICS: dict[str, str] = {
     "load_run_max_kafka_lag": (
         "gitops/04-messenger/load-testing/manifests/workflow-template.yaml"
     ),
+    # Capacity headroom (LT-02 · Load Compare) — те же peak-expr, что уже
+    # проверены живьём на 05 · Capacity/LT-01 Load Run, пушатся шагом
+    # reconciliation с теми же run_id/git_sha/profile, что и остальные
+    # load_run_* метрики выше.
+    "load_run_api_cpu_peak": (
+        "gitops/04-messenger/load-testing/manifests/workflow-template.yaml"
+    ),
+    "load_run_api_memory_peak": (
+        "gitops/04-messenger/load-testing/manifests/workflow-template.yaml"
+    ),
+    "load_run_api_db_pool_peak": (
+        "gitops/04-messenger/load-testing/manifests/workflow-template.yaml"
+    ),
+    "load_run_keycloak_cpu_peak": (
+        "gitops/04-messenger/load-testing/manifests/workflow-template.yaml"
+    ),
+    "load_run_keycloak_db_pool_peak": (
+        "gitops/04-messenger/load-testing/manifests/workflow-template.yaml"
+    ),
+    "load_run_keycloak_p99_peak_seconds": (
+        "gitops/04-messenger/load-testing/manifests/workflow-template.yaml"
+    ),
+    "load_run_keycloak_5xx_peak": (
+        "gitops/04-messenger/load-testing/manifests/workflow-template.yaml"
+    ),
     # cilium-envoy — сам Envoy, встроенный в Cilium Gateway, не приложение
     # из apps/**. Снимается с admin-порта 9964, см. envoy-scrape.yaml
     # (08 · Gateway — Envoy).
