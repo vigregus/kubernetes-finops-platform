@@ -98,7 +98,12 @@ spec:
       serviceAccountName: load-testing-artifact-repo-bootstrap
       containers:
         - name: bootstrap
-          image: bitnami/kubectl:1.31
+          # Живой дефект: bitnami/kubectl:1.31 не существует (Bitnami не
+          # публикует такие короткие теги) — ImagePullBackOff на первом же
+          # прогоне. alpine/k8s:1.34.1 — тот же образ, что уже проверен в
+          # этом кластере у messenger-realm-reconcile (messenger-keycloak/
+          # manifests/reconcile.yaml), несёт kubectl.
+          image: alpine/k8s:1.34.1
           command:
             - /bin/sh
             - -c
