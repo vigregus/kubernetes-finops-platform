@@ -14,7 +14,7 @@ spec:
       "description": "Слой, которого не было ни на одном из 01-05: между клиентом и приложением стоит Cilium Gateway (Envoy), и 03 · API — RED видит только FastAPI application layer, не сам шлюз (см. description 03). Источник - envoy_* метрики с cilium-envoy:9964 (VMPodScrape gitops/02-infra/cilium-observability/manifests/envoy-scrape.yaml). Без per-request Host-заголовка в стандартных Envoy stats: 'по бэкенду' здесь - по Envoy cluster (namespace_service_port), не по домену напрямую, но в этом кластере это одно и то же 1:1 - у каждого backend Service ровно один HTTPRoute.",
       "tags": ["messenger", "gateway", "envoy"],
       "schemaVersion": 39,
-      "version": 1,
+      "version": 2,
       "editable": true,
       "time": { "from": "now-6h", "to": "now" },
       "links": [
@@ -143,89 +143,11 @@ spec:
           ]
         },
         {
-          "id": 8,
-          "type": "row",
-          "title": "Connections",
-          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 6 }
-        },
-        {
-          "id": 9,
-          "type": "timeseries",
-          "title": "Active downstream connections",
-          "description": "Клиент ↔ Gateway. listener-secure + listener-insecure.",
-          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "fieldConfig": { "defaults": { "unit": "short", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } } },
-          "gridPos": { "h": 7, "w": 12, "x": 0, "y": 7 },
-          "targets": [
-            { "expr": "sum(envoy_http_downstream_cx_active{envoy_http_conn_manager_prefix=~\"listener-secure|listener-insecure\"})" }
-          ]
-        },
-        {
-          "id": 10,
-          "type": "bargauge",
-          "title": "Active upstream connections by backend",
-          "description": "Gateway ↔ backend Service. Ranking по клиентам шлюза читается быстрее, чем 15 накладывающихся line chart.",
-          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "options": {
-            "orientation": "horizontal",
-            "displayMode": "gradient",
-            "showUnfilled": true,
-            "reduceOptions": { "calcs": ["lastNotNull"] }
-          },
-          "fieldConfig": { "defaults": { "unit": "short" } },
-          "gridPos": { "h": 7, "w": 12, "x": 12, "y": 7 },
-          "targets": [
-            {
-              "expr": "label_replace(sum by (envoy_cluster_name) (envoy_cluster_upstream_cx_active{envoy_cluster_name=~\"edge/.*\"}), \"backend\", \"$1\", \"envoy_cluster_name\", \"edge/cilium-gateway-edge/(.*)\")",
-              "legendFormat": "{{backend}}"
-            }
-          ]
-        },
-        {
-          "id": 11,
-          "type": "timeseries",
-          "title": "Upstream connect failures / timeouts",
-          "description": "Gateway не смог достучаться до backend Pod'а — сетевой отказ или backend не отвечает на приёме соединения, до HTTP-уровня.",
-          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "options": {
-            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max", "mean"] },
-            "tooltip": { "mode": "multi", "sort": "desc" }
-          },
-          "fieldConfig": {
-            "defaults": { "unit": "cps", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } },
-            "overrides": [
-              { "matcher": { "id": "byName", "options": "connect failed" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } } ] },
-              { "matcher": { "id": "byName", "options": "connect timeout" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } } ] }
-            ]
-          },
-          "gridPos": { "h": 7, "w": 12, "x": 0, "y": 14 },
-          "targets": [
-            { "expr": "sum(rate(envoy_cluster_upstream_cx_connect_fail{envoy_cluster_name=~\"edge/.*\"}[5m]))", "legendFormat": "connect failed" },
-            { "expr": "sum(rate(envoy_cluster_upstream_cx_connect_timeout{envoy_cluster_name=~\"edge/.*\"}[5m]))", "legendFormat": "connect timeout" }
-          ]
-        },
-        {
-          "id": 12,
-          "type": "timeseries",
-          "title": "Upstream resets",
-          "description": "Backend оборвал уже установленное соединение посреди запроса (rx) или Gateway оборвал сам (tx) — не то же самое, что connect failure выше (там соединение вообще не установилось).",
-          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "options": {
-            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max", "mean"] },
-            "tooltip": { "mode": "multi", "sort": "desc" }
-          },
-          "fieldConfig": { "defaults": { "unit": "cps", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } } },
-          "gridPos": { "h": 7, "w": 12, "x": 12, "y": 14 },
-          "targets": [
-            { "expr": "sum(rate(envoy_cluster_upstream_rq_rx_reset{envoy_cluster_name=~\"edge/.*\"}[5m]))", "legendFormat": "rx reset (backend closed)" },
-            { "expr": "sum(rate(envoy_cluster_upstream_rq_tx_reset{envoy_cluster_name=~\"edge/.*\"}[5m]))", "legendFormat": "tx reset (gateway closed)" }
-          ]
-        },
-        {
           "id": 13,
           "type": "row",
           "title": "By backend",
-          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 21 }
+          "description": "Поднято сразу после RED-строки (было ниже Connections): ranking по backend — второе место после 01 · SLO, где проблема конкретного сервиса (например Keycloak) должна бросаться в глаза, не только агрегат по всему шлюзу выше.",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 6 }
         },
         {
           "id": 14,
@@ -264,13 +186,92 @@ spec:
               { "matcher": { "id": "byName", "options": "p99" }, "properties": [ { "id": "unit", "value": "ms" }, { "id": "custom.width", "value": 100 }, { "id": "thresholds", "value": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 500 }, { "color": "red", "value": 1000 } ] } }, { "id": "custom.cellOptions", "value": { "type": "color-background" } } ] }
             ]
           },
-          "gridPos": { "h": 10, "w": 24, "x": 0, "y": 22 },
+          "gridPos": { "h": 10, "w": 24, "x": 0, "y": 7 },
           "targets": [
             { "refId": "A", "format": "table", "instant": true, "expr": "label_replace(sum by (envoy_cluster_name) (rate(envoy_cluster_upstream_rq_xx{envoy_cluster_name=~\"edge/.*\"}[5m])), \"backend\", \"$1\", \"envoy_cluster_name\", \"edge/cilium-gateway-edge/(.*)\")" },
             { "refId": "B", "format": "table", "instant": true, "expr": "label_replace((sum by (envoy_cluster_name) (rate(envoy_cluster_upstream_rq_xx{envoy_cluster_name=~\"edge/.*\",envoy_response_code_class=~\"1|2|3\"}[5m])) or (0 * sum by (envoy_cluster_name) (rate(envoy_cluster_upstream_rq_xx{envoy_cluster_name=~\"edge/.*\"}[5m])))) / sum by (envoy_cluster_name) (rate(envoy_cluster_upstream_rq_xx{envoy_cluster_name=~\"edge/.*\"}[5m])), \"backend\", \"$1\", \"envoy_cluster_name\", \"edge/cilium-gateway-edge/(.*)\")" },
             { "refId": "C", "format": "table", "instant": true, "expr": "label_replace((sum by (envoy_cluster_name) (rate(envoy_cluster_upstream_rq_xx{envoy_cluster_name=~\"edge/.*\",envoy_response_code_class=\"4\"}[5m])) or (0 * sum by (envoy_cluster_name) (rate(envoy_cluster_upstream_rq_xx{envoy_cluster_name=~\"edge/.*\"}[5m])))) / sum by (envoy_cluster_name) (rate(envoy_cluster_upstream_rq_xx{envoy_cluster_name=~\"edge/.*\"}[5m])), \"backend\", \"$1\", \"envoy_cluster_name\", \"edge/cilium-gateway-edge/(.*)\")" },
             { "refId": "D", "format": "table", "instant": true, "expr": "label_replace((sum by (envoy_cluster_name) (rate(envoy_cluster_upstream_rq_xx{envoy_cluster_name=~\"edge/.*\",envoy_response_code_class=\"5\"}[5m])) or (0 * sum by (envoy_cluster_name) (rate(envoy_cluster_upstream_rq_xx{envoy_cluster_name=~\"edge/.*\"}[5m])))) / sum by (envoy_cluster_name) (rate(envoy_cluster_upstream_rq_xx{envoy_cluster_name=~\"edge/.*\"}[5m])), \"backend\", \"$1\", \"envoy_cluster_name\", \"edge/cilium-gateway-edge/(.*)\")" },
             { "refId": "E", "format": "table", "instant": true, "expr": "label_replace(histogram_quantile(0.99, sum by (le, envoy_cluster_name) (rate(envoy_cluster_upstream_rq_time_bucket{envoy_cluster_name=~\"edge/.*\"}[5m]))), \"backend\", \"$1\", \"envoy_cluster_name\", \"edge/cilium-gateway-edge/(.*)\")" }
+          ]
+        },
+        {
+          "id": 8,
+          "type": "row",
+          "title": "Connections",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 17 }
+        },
+        {
+          "id": 9,
+          "type": "timeseries",
+          "title": "Active downstream connections",
+          "description": "Клиент ↔ Gateway. listener-secure + listener-insecure.",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "short", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } } },
+          "gridPos": { "h": 7, "w": 12, "x": 0, "y": 18 },
+          "targets": [
+            { "expr": "sum(envoy_http_downstream_cx_active{envoy_http_conn_manager_prefix=~\"listener-secure|listener-insecure\"})" }
+          ]
+        },
+        {
+          "id": 10,
+          "type": "bargauge",
+          "title": "Active upstream connections by backend",
+          "description": "Gateway ↔ backend Service. Ranking по клиентам шлюза читается быстрее, чем 15 накладывающихся line chart.",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "options": {
+            "orientation": "horizontal",
+            "displayMode": "gradient",
+            "showUnfilled": true,
+            "reduceOptions": { "calcs": ["lastNotNull"] }
+          },
+          "fieldConfig": { "defaults": { "unit": "short" } },
+          "gridPos": { "h": 7, "w": 12, "x": 12, "y": 18 },
+          "targets": [
+            {
+              "expr": "label_replace(sum by (envoy_cluster_name) (envoy_cluster_upstream_cx_active{envoy_cluster_name=~\"edge/.*\"}), \"backend\", \"$1\", \"envoy_cluster_name\", \"edge/cilium-gateway-edge/(.*)\")",
+              "legendFormat": "{{backend}}"
+            }
+          ]
+        },
+        {
+          "id": 11,
+          "type": "timeseries",
+          "title": "Upstream connect failures / timeouts",
+          "description": "Gateway не смог достучаться до backend Pod'а — сетевой отказ или backend не отвечает на приёме соединения, до HTTP-уровня.",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "options": {
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max", "mean"] },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          },
+          "fieldConfig": {
+            "defaults": { "unit": "cps", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } },
+            "overrides": [
+              { "matcher": { "id": "byName", "options": "connect failed" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } } ] },
+              { "matcher": { "id": "byName", "options": "connect timeout" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } } ] }
+            ]
+          },
+          "gridPos": { "h": 7, "w": 12, "x": 0, "y": 25 },
+          "targets": [
+            { "expr": "sum(rate(envoy_cluster_upstream_cx_connect_fail{envoy_cluster_name=~\"edge/.*\"}[5m]))", "legendFormat": "connect failed" },
+            { "expr": "sum(rate(envoy_cluster_upstream_cx_connect_timeout{envoy_cluster_name=~\"edge/.*\"}[5m]))", "legendFormat": "connect timeout" }
+          ]
+        },
+        {
+          "id": 12,
+          "type": "timeseries",
+          "title": "Upstream resets",
+          "description": "Backend оборвал уже установленное соединение посреди запроса (rx) или Gateway оборвал сам (tx) — не то же самое, что connect failure выше (там соединение вообще не установилось).",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "options": {
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max", "mean"] },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          },
+          "fieldConfig": { "defaults": { "unit": "cps", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } } },
+          "gridPos": { "h": 7, "w": 12, "x": 12, "y": 25 },
+          "targets": [
+            { "expr": "sum(rate(envoy_cluster_upstream_rq_rx_reset{envoy_cluster_name=~\"edge/.*\"}[5m]))", "legendFormat": "rx reset (backend closed)" },
+            { "expr": "sum(rate(envoy_cluster_upstream_rq_tx_reset{envoy_cluster_name=~\"edge/.*\"}[5m]))", "legendFormat": "tx reset (gateway closed)" }
           ]
         },
         {
