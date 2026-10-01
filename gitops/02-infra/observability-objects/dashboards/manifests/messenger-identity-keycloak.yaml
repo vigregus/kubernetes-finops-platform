@@ -1,0 +1,254 @@
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: messenger-identity-keycloak
+  namespace: observability
+spec:
+  instanceSelector:
+    matchLabels:
+      dashboards: "grafana-local"
+  json: |
+    {
+      "uid": "messenger-identity-keycloak",
+      "title": "06 · Identity — Keycloak",
+      "description": "Keycloak был слепым пятном всей observability до #98 (metrics-enabled выключен, /metrics отвечал 404) — не только 05 · Capacity. Живой повод: ранний stress-тест стал login-штормом в Keycloak (120 одновременных логинов на границе k6-ступени), и ни один дашборд тогда не мог объяснить это, кроме логов постфактум. RED-строка здесь — тот же вопрос, что у 03 · API — RED и 08 · Gateway, только для identity, не для messaging. Deep-dive без collapsed: это сам целевой дашборд для расследования Keycloak, не контекстная секция внутри другого.",
+      "tags": ["messenger", "identity", "keycloak"],
+      "schemaVersion": 39,
+      "version": 1,
+      "editable": true,
+      "time": { "from": "now-6h", "to": "now" },
+      "links": [
+        { "title": "01 · SLO Overview", "type": "link", "url": "/d/messenger-slo-overview", "icon": "dashboard" },
+        { "title": "05 · Capacity — USE", "type": "link", "url": "/d/messenger-capacity", "icon": "dashboard" },
+        { "title": "08 · Gateway — Envoy", "type": "link", "url": "/d/messenger-gateway-envoy", "icon": "dashboard" }
+      ],
+      "panels": [
+        {
+          "id": 1,
+          "type": "row",
+          "title": "Identity RED",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+        },
+        {
+          "id": 2,
+          "type": "stat",
+          "title": "Auth RPS",
+          "description": "uri=\"/realms/{realm}/protocol/{protocol}/token\" — шаблонный путь token-эндпоинта, без подстановки значений (низкая кардинальность; то же выражение, что у Login SLI на 01). Включает и логин, и /auth/refresh — оба проходят через один и тот же token-эндпоинт Keycloak, различить их по этой метрике нельзя (см. панель Scope внизу).",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "options": { "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "fieldConfig": { "defaults": { "unit": "reqps" } },
+          "gridPos": { "h": 5, "w": 4, "x": 0, "y": 1 },
+          "targets": [
+            { "expr": "sum(rate(http_server_requests_seconds_count{namespace=\"keycloak\",uri=\"/realms/{realm}/protocol/{protocol}/token\"}[5m]))" }
+          ]
+        },
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "Success rate",
+          "description": "outcome=\"SUCCESS\" — готовая классификация Micrometer/Quarkus, не парсинг кода статуса. N/A без трафика, честный 0% при трафике без единого успеха (or vector(0), тот же приём, что на 01/03/04/05/08).",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "options": { "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit", "noValue": "N/A",
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "red", "value": null },
+                { "color": "yellow", "value": 0.95 },
+                { "color": "green", "value": 0.99 }
+              ]}
+            }
+          },
+          "gridPos": { "h": 5, "w": 4, "x": 4, "y": 1 },
+          "targets": [
+            { "expr": "(sum(rate(http_server_requests_seconds_count{namespace=\"keycloak\",uri=\"/realms/{realm}/protocol/{protocol}/token\",outcome=\"SUCCESS\"}[5m])) or vector(0)) / sum(rate(http_server_requests_seconds_count{namespace=\"keycloak\",uri=\"/realms/{realm}/protocol/{protocol}/token\"}[5m]))" }
+          ]
+        },
+        {
+          "id": 4,
+          "type": "stat",
+          "title": "4xx % (CLIENT_ERROR)",
+          "description": "Неверный пароль, просроченный refresh-токен и подобное — отказ по вине клиента, не поломка Keycloak. Высокий процент здесь без роста 5xx — не инцидент сам по себе (ABUSE: отдельно считается подбор пароля per-account, не per-RPS, см. bruteForceProtected в realm.yaml).",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "options": { "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "fieldConfig": { "defaults": { "unit": "percentunit", "noValue": "N/A" } },
+          "gridPos": { "h": 5, "w": 4, "x": 8, "y": 1 },
+          "targets": [
+            { "expr": "(sum(rate(http_server_requests_seconds_count{namespace=\"keycloak\",uri=\"/realms/{realm}/protocol/{protocol}/token\",outcome=\"CLIENT_ERROR\"}[5m])) or vector(0)) / sum(rate(http_server_requests_seconds_count{namespace=\"keycloak\",uri=\"/realms/{realm}/protocol/{protocol}/token\"}[5m]))" }
+          ]
+        },
+        {
+          "id": 5,
+          "type": "stat",
+          "title": "5xx % (SERVER_ERROR)",
+          "description": "Настоящий сбой Keycloak — тот же числитель, что у Login SLI на 01 (1 − Login SLI), только с окном 5m вместо 30d: эта карточка про «сейчас», не про месячный бюджет.",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "options": { "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit", "noValue": "N/A",
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 0.01 },
+                { "color": "red", "value": 0.05 }
+              ]}
+            }
+          },
+          "gridPos": { "h": 5, "w": 4, "x": 12, "y": 1 },
+          "targets": [
+            { "expr": "(sum(rate(http_server_requests_seconds_count{namespace=\"keycloak\",uri=\"/realms/{realm}/protocol/{protocol}/token\",outcome=\"SERVER_ERROR\"}[5m])) or vector(0)) / sum(rate(http_server_requests_seconds_count{namespace=\"keycloak\",uri=\"/realms/{realm}/protocol/{protocol}/token\"}[5m]))" }
+          ]
+        },
+        {
+          "id": 6,
+          "type": "stat",
+          "title": "p99 latency",
+          "description": "Требует http-metrics-histograms-enabled (keycloak.yaml) — без бакетов была бы только _sum/_count, то есть среднее, а не перцентиль.",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "options": { "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 1 },
+                { "color": "red", "value": 3 }
+              ]}
+            }
+          },
+          "gridPos": { "h": 5, "w": 4, "x": 16, "y": 1 },
+          "targets": [
+            { "expr": "histogram_quantile(0.99, sum by (le) (rate(http_server_requests_seconds_bucket{namespace=\"keycloak\",uri=\"/realms/{realm}/protocol/{protocol}/token\"}[5m])))" }
+          ]
+        },
+        {
+          "id": 7,
+          "type": "stat",
+          "title": "DB pool %",
+          "description": "agroal_active_count / (active + available) — та же формула и та же оговорка, что на 05 · Capacity: не in_use/max, Agroal не отдаёт poolMaxSize=10 (keycloak.yaml) отдельной метрикой.",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "options": { "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 0.7 },
+                { "color": "red", "value": 0.9 }
+              ]}
+            }
+          },
+          "gridPos": { "h": 5, "w": 4, "x": 20, "y": 1 },
+          "targets": [
+            { "expr": "sum(agroal_active_count{namespace=\"keycloak\",datasource=\"default\"}) / clamp_min(sum(agroal_active_count{namespace=\"keycloak\",datasource=\"default\"}) + sum(agroal_available_count{namespace=\"keycloak\",datasource=\"default\"}), 1)" }
+          ]
+        },
+        {
+          "id": 8,
+          "type": "row",
+          "title": "Deep-dive",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 6 }
+        },
+        {
+          "id": 9,
+          "type": "timeseries",
+          "title": "Auth requests by outcome",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "options": {
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max", "mean"] },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          },
+          "fieldConfig": {
+            "defaults": { "unit": "reqps", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } },
+            "overrides": [
+              { "matcher": { "id": "byName", "options": "SUCCESS" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } } ] },
+              { "matcher": { "id": "byName", "options": "CLIENT_ERROR" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } } ] },
+              { "matcher": { "id": "byName", "options": "SERVER_ERROR" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } } ] }
+            ]
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 7 },
+          "targets": [
+            { "expr": "sum by (outcome) (rate(http_server_requests_seconds_count{namespace=\"keycloak\",uri=\"/realms/{realm}/protocol/{protocol}/token\"}[5m]))", "legendFormat": "{{outcome}}" }
+          ]
+        },
+        {
+          "id": 10,
+          "type": "timeseries",
+          "title": "Latency: p50 / p95 / p99",
+          "description": "Цветовая конвенция пакета: p50 приглушённый, p95 сильнее, p99 самый насыщенный — та же семантика, что на 01/02/03.",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "options": {
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max", "mean"] },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          },
+          "fieldConfig": {
+            "defaults": { "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } },
+            "overrides": [
+              { "matcher": { "id": "byName", "options": "p50" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "light-blue" } } ] },
+              { "matcher": { "id": "byName", "options": "p95" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } } ] },
+              { "matcher": { "id": "byName", "options": "p99" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "dark-blue" } } ] }
+            ]
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 7 },
+          "targets": [
+            { "expr": "histogram_quantile(0.50, sum by (le) (rate(http_server_requests_seconds_bucket{namespace=\"keycloak\",uri=\"/realms/{realm}/protocol/{protocol}/token\"}[5m])))", "legendFormat": "p50" },
+            { "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_requests_seconds_bucket{namespace=\"keycloak\",uri=\"/realms/{realm}/protocol/{protocol}/token\"}[5m])))", "legendFormat": "p95" },
+            { "expr": "histogram_quantile(0.99, sum by (le) (rate(http_server_requests_seconds_bucket{namespace=\"keycloak\",uri=\"/realms/{realm}/protocol/{protocol}/token\"}[5m])))", "legendFormat": "p99" }
+          ]
+        },
+        {
+          "id": 11,
+          "type": "timeseries",
+          "title": "DB pool: active vs available",
+          "description": "datasource=\"default\" — единственный datasource Keycloak (realm.yaml db.vendor: postgres). available — сейчас открытые, но свободные соединения, не запас до poolMaxSize=10.",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "options": {
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          },
+          "fieldConfig": { "defaults": { "unit": "short", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } } },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
+          "targets": [
+            { "expr": "sum(agroal_active_count{namespace=\"keycloak\",datasource=\"default\"})", "legendFormat": "active" },
+            { "expr": "sum(agroal_available_count{namespace=\"keycloak\",datasource=\"default\"})", "legendFormat": "available" }
+          ]
+        },
+        {
+          "id": 12,
+          "type": "timeseries",
+          "title": "Process CPU % / heap used %",
+          "description": "process_cpu_usage — доля CPU самого JVM-процесса (0..1), отдельная метрика от cAdvisor-based CPU на 05 · Capacity (та считает по cgroup container limit, эта — по видимым процессу ядрам). jvm_memory_used_bytes{area=\"heap\"} / jvm_memory_max_bytes{area=\"heap\"} — heap saturation, не container memory limit.",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "options": {
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 },
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 0.8 },
+                { "color": "red", "value": 0.95 }
+              ]}
+            }
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
+          "targets": [
+            { "expr": "process_cpu_usage{namespace=\"keycloak\"}", "legendFormat": "process CPU" },
+            { "expr": "sum(jvm_memory_used_bytes{namespace=\"keycloak\",area=\"heap\"}) / clamp_min(sum(jvm_memory_max_bytes{namespace=\"keycloak\",area=\"heap\"}), 1)", "legendFormat": "heap used" }
+          ]
+        },
+        {
+          "id": 13,
+          "type": "text",
+          "title": "ℹ Scope",
+          "gridPos": { "h": 3, "w": 24, "x": 0, "y": 23 },
+          "options": {
+            "mode": "markdown",
+            "content": "Один uri — `/realms/{realm}/protocol/{protocol}/token` — несёт и логин (authorization_code → token), и `/auth/refresh` (refresh_token grant): Keycloak не размечает grant_type отдельной меткой в http_server_requests_seconds, и различить их здесь нельзя. Детальный разбор по grant_type — через события Keycloak (eventsEnabled в reconcile.yaml), не через эти метрики. CPU/Memory container-уровня (cAdvisor, restarts, OOM) — на 05 · Capacity, не здесь: эта панель про JVM-процесс изнутри, не про под снаружи."
+          }
+        }
+      ]
+    }
