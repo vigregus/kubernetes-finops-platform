@@ -1685,7 +1685,19 @@ spec:
             npx playwright test --project=canary 2>&1 | tee /tmp/canary-output.txt
             status="${PIPESTATUS[0]}"
             set -e
-            grep -o 'CANARY_METRICS failures=[0-9]*' /tmp/canary-output.txt | tail -1 |
+            # [0-9]+ (grep -E), не [0-9]* - на упавшем тесте Playwright печатает
+            # исходный код строки ассерта в error-context, а он буквально содержит
+            # `console.log(\`CANARY_METRICS failures=${failures}...\`)`: ту же
+            # фразу, но с шаблонной переменной вместо числа. С [0-9]* (ноль цифр
+            # допустим) это тоже совпадение - пустое, без единой цифры после "=" -
+            # и оно идёт в выводе ПОСЛЕ настоящей строки с реальным числом, то
+            # есть именно его забирает `tail -1`. Итог был обратным замыслу
+            # комментария выше: не "честно оставить пустым, когда правда
+            # неизвестна", а "затереть известное число пустым" - ровно на упавших
+            # прогонах, где реальное falures=N важнее всего. Найдено на живом
+            # прогоне (verify-limits-220413): canary.spec.ts напечатал
+            # "failures=21", а в summary.json долетел browser_canary_failures=None.
+            grep -oE 'CANARY_METRICS failures=[0-9]+' /tmp/canary-output.txt | tail -1 |
               grep -o '[0-9]*$' > /tmp/canary-failures || true
             exit "$status"
         resources:
