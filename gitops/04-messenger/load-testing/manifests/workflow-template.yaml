@@ -133,10 +133,28 @@ spec:
           # дожидается результатов обоих раньше reconciliation — это и есть
           # «Argo Workflow должен дождаться результатов обоих» из плана,
           # выраженное структурой DAG, а не отдельной синхронизацией.
+          #
+          # continueOn.failed — живой дефект: Playwright здесь содержит
+          # жёсткий assert (expect(failures).toBe(0)), и уже один отказавший
+          # обмен из canary_pairs роняет весь Pod с exit 1. Но reconciliation
+          # ниже явно спроектирован принимать canary_failures как метрику
+          # (пишет её в summary.json, см. load_run_browser_canary_failures) -
+          # не требовать нуля. Без continueOn обычный `dependencies:` в Argo
+          # Workflows требует Succeeded, не просто завершения, и при первом
+          # же ненулевом canary_failures reconciliation целиком пропускался
+          # ("Omitted: depends condition not met") — то есть ИМЕННО тот
+          # прогон, где деградация реально произошла и её стоило бы
+          # зафиксировать в summary.json, оставался без отчёта. Output-
+          # параметр canary_failures Argo сохраняет независимо от exit code
+          # пода (проверено живьём) — continueOn ничего не меняет в том,
+          # что именно пишется в summary, только в том, доходит ли DAG до
+          # reconciliation.
           - name: browser-canary
             template: browser-canary
             dependencies: [playwright-smoke]
             when: "{{workflow.parameters.profile}} != identity"
+            continueOn:
+              failed: true
             arguments:
               parameters:
                 - name: gateway_ip
