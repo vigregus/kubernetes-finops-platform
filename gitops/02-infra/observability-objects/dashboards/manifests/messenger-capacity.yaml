@@ -14,7 +14,7 @@ spec:
       "description": "USE (Utilization/Saturation/Errors, Brendan Gregg) поперёк компонентов на одном экране: отвечает «во что мы упираемся», а не «где тормозит» (02 · Journey) и не «есть ли проблема у пользователя» (01 · SLO). Current saturation и Compute остаются раскрытыми по умолчанию, остальные секции — collapsed: раскрывать по конкретному подозрению (например Redis memory % ушёл в красное), а не листать десятки графиков.",
       "tags": ["messenger", "use", "capacity"],
       "schemaVersion": 39,
-      "version": 6,
+      "version": 7,
       "editable": true,
       "time": { "from": "now-6h", "to": "now" },
       "links": [
@@ -47,7 +47,7 @@ spec:
           "id": 28,
           "type": "stat",
           "title": "CPU max %",
-          "description": "topk(1, ...) вместо max(): max() отдаёт голое число и теряет labels, а «94%» без имени пода не отвечает на вопрос «что именно ближе всего к пределу?» — topk сохраняет pod/container в имени серии, показанном рядом со значением. instant: true — снимок сейчас; без него Grafana считает topk(1) на каждой точке диапазона, и смена лидера за 6ч даёт несколько отдельных серий вместо одной.",
+          "description": "topk(1, ...) вместо max(): max() отдаёт голое число и теряет labels, а «94%» без имени пода не отвечает на вопрос «что именно ближе всего к пределу?» — topk сохраняет pod/container в имени серии, показанном рядом со значением. instant: true — снимок сейчас; без него Grafana считает topk(1) на каждой точке диапазона, и смена лидера за 6ч даёт несколько отдельных серий вместо одной. peak — худший под за весь выбранный диапазон (не обязательно тот же под, что лидирует сейчас): без него карточка показывала бы только текущее состояние и молчала о том, что было во время пика нагрузки несколько минут назад.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "options": { "graphMode": "area", "textMode": "value_and_name", "reduceOptions": { "calcs": ["lastNotNull"] } },
           "fieldConfig": {
@@ -60,12 +60,17 @@ spec:
               ]}
             }
           },
-          "gridPos": { "h": 4, "w": 3, "x": 0, "y": 1 },
+          "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
           "targets": [
             {
               "instant": true,
               "expr": "topk(1, sum by (pod, container) (node_namespace_pod_container:container_cpu_usage_seconds_total:sum_irate{namespace=~\"$namespace\"}) / sum by (pod, container) (namespace_pod_container:container_resource_limits_cpu_cores{namespace=~\"$namespace\"}))",
               "legendFormat": "{{pod}} / {{container}}"
+            },
+            {
+              "instant": true,
+              "expr": "topk(1, max_over_time((sum by (pod, container) (node_namespace_pod_container:container_cpu_usage_seconds_total:sum_irate{namespace=~\"$namespace\"}) / sum by (pod, container) (namespace_pod_container:container_resource_limits_cpu_cores{namespace=~\"$namespace\"}))[$__range:]))",
+              "legendFormat": "{{pod}} / {{container}} (peak)"
             }
           ]
         },
@@ -73,7 +78,7 @@ spec:
           "id": 29,
           "type": "stat",
           "title": "Memory max %",
-          "description": "topk(1, ...) — см. CPU max % рядом: имя pod/container сохраняется вместо голого максимума.",
+          "description": "topk(1, ...) — см. CPU max % рядом: имя pod/container сохраняется вместо голого максимума. peak — худший под за весь выбранный диапазон, не обязательно тот же под, что лидирует сейчас.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "options": { "graphMode": "area", "textMode": "value_and_name", "reduceOptions": { "calcs": ["lastNotNull"] } },
           "fieldConfig": {
@@ -86,12 +91,17 @@ spec:
               ]}
             }
           },
-          "gridPos": { "h": 4, "w": 3, "x": 3, "y": 1 },
+          "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
           "targets": [
             {
               "instant": true,
               "expr": "topk(1, sum by (pod, container) (node_namespace_pod_container:container_memory_working_set_bytes{namespace=~\"$namespace\"}) / sum by (pod, container) (namespace_pod_container:container_resource_limits_memory_bytes{namespace=~\"$namespace\"}))",
               "legendFormat": "{{pod}} / {{container}}"
+            },
+            {
+              "instant": true,
+              "expr": "topk(1, max_over_time((sum by (pod, container) (node_namespace_pod_container:container_memory_working_set_bytes{namespace=~\"$namespace\"}) / sum by (pod, container) (namespace_pod_container:container_resource_limits_memory_bytes{namespace=~\"$namespace\"}))[$__range:]))",
+              "legendFormat": "{{pod}} / {{container}} (peak)"
             }
           ]
         },
@@ -99,6 +109,7 @@ spec:
           "id": 30,
           "type": "stat",
           "title": "API DB pool %",
+          "description": "in_use / max, агрегировано по всем репликам service — 10/10 на одной реплике и 20/20 на двух выглядят здесь одинаково (100%), раздельные числа busy/max смотреть в развёрнутой секции PostgreSQL ниже (API DB pool: in_use vs idle vs max). peak — максимум за выбранный диапазон, не только текущий момент: пул мог упереться в 100% во время пика нагрузки и уже отпустить к моменту просмотра дашборда.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "options": { "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
           "fieldConfig": {
@@ -111,15 +122,17 @@ spec:
               ]}
             }
           },
-          "gridPos": { "h": 4, "w": 3, "x": 6, "y": 1 },
+          "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
           "targets": [
-            { "expr": "max(sum by (service) (messenger_db_pool_connections{namespace=~\"$namespace\",state=\"in_use\"}) / clamp_min(sum by (service) (messenger_db_pool_max_connections{namespace=~\"$namespace\"}), 1))" }
+            { "expr": "max(sum by (service) (messenger_db_pool_connections{namespace=~\"$namespace\",state=\"in_use\"}) / clamp_min(sum by (service) (messenger_db_pool_max_connections{namespace=~\"$namespace\"}), 1))", "legendFormat": "current" },
+            { "expr": "max_over_time((max(sum by (service) (messenger_db_pool_connections{namespace=~\"$namespace\",state=\"in_use\"}) / clamp_min(sum by (service) (messenger_db_pool_max_connections{namespace=~\"$namespace\"}), 1)))[$__range:])", "legendFormat": "peak" }
           ]
         },
         {
           "id": 31,
           "type": "stat",
           "title": "Redis memory %",
+          "description": "peak — максимум за выбранный диапазон, не только текущий момент.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "options": { "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
           "fieldConfig": {
@@ -132,9 +145,10 @@ spec:
               ]}
             }
           },
-          "gridPos": { "h": 4, "w": 3, "x": 9, "y": 1 },
+          "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
           "targets": [
-            { "expr": "max(redis_memory_used_bytes{namespace=~\"$namespace\"}) / clamp_min(max(namespace_pod_container:container_resource_limits_memory_bytes{namespace=~\"$namespace\",container=\"messenger-redis\"}), 1)" }
+            { "expr": "max(redis_memory_used_bytes{namespace=~\"$namespace\"}) / clamp_min(max(namespace_pod_container:container_resource_limits_memory_bytes{namespace=~\"$namespace\",container=\"messenger-redis\"}), 1)", "legendFormat": "current" },
+            { "expr": "max_over_time((max(redis_memory_used_bytes{namespace=~\"$namespace\"}) / clamp_min(max(namespace_pod_container:container_resource_limits_memory_bytes{namespace=~\"$namespace\",container=\"messenger-redis\"}), 1))[$__range:])", "legendFormat": "peak" }
           ]
         },
         {
@@ -154,12 +168,17 @@ spec:
               ]}
             }
           },
-          "gridPos": { "h": 4, "w": 3, "x": 12, "y": 1 },
+          "gridPos": { "h": 4, "w": 6, "x": 0, "y": 5 },
           "targets": [
             {
               "instant": true,
               "expr": "topk(1, sum by (consumergroup) (kafka_consumergroup_lag{consumergroup=~\"messenger-(realtime|unread)\"}))",
               "legendFormat": "{{consumergroup}}"
+            },
+            {
+              "instant": true,
+              "expr": "topk(1, max_over_time((sum by (consumergroup) (kafka_consumergroup_lag{consumergroup=~\"messenger-(realtime|unread)\"}))[$__range:]))",
+              "legendFormat": "{{consumergroup}} (peak)"
             }
           ]
         },
@@ -167,6 +186,7 @@ spec:
           "id": 33,
           "type": "stat",
           "title": "Outbox oldest age",
+          "description": "peak — максимум за выбранный диапазон, не только текущий момент.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "options": { "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
           "fieldConfig": {
@@ -179,16 +199,17 @@ spec:
               ]}
             }
           },
-          "gridPos": { "h": 4, "w": 3, "x": 15, "y": 1 },
+          "gridPos": { "h": 4, "w": 6, "x": 6, "y": 5 },
           "targets": [
-            { "expr": "max(messenger_outbox_oldest_age_seconds{namespace=~\"$namespace\"})" }
+            { "expr": "max(messenger_outbox_oldest_age_seconds{namespace=~\"$namespace\"})", "legendFormat": "current" },
+            { "expr": "max_over_time((max(messenger_outbox_oldest_age_seconds{namespace=~\"$namespace\"}))[$__range:])", "legendFormat": "peak" }
           ]
         },
         {
           "id": 37,
           "type": "stat",
           "title": "Keycloak 5xx %",
-          "description": "Keycloak живёт в namespace keycloak, отдельном от переменной $namespace (по умолчанию messenger) — остальные панели этого ряда его не видят ни при каком значении переменной, поэтому фильтр здесь намеренно статический, не $namespace. outcome=\"SERVER_ERROR\" — готовая классификация Micrometer/Quarkus (http.server.requests), не парсинг кода статуса вручную. Данные появляются только после PR, включившего metrics-enabled в additionalOptions Keycloak CR (до него /metrics отвечал 404).",
+          "description": "Keycloak живёт в namespace keycloak, отдельном от переменной $namespace (по умолчанию messenger) — остальные панели этого ряда его не видят ни при каком значении переменной, поэтому фильтр здесь намеренно статический, не $namespace. outcome=\"SERVER_ERROR\" — готовая классификация Micrometer/Quarkus (http.server.requests), не парсинг кода статуса вручную. peak — максимум за выбранный диапазон, не только текущий момент.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "options": { "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
           "fieldConfig": {
@@ -201,16 +222,17 @@ spec:
               ]}
             }
           },
-          "gridPos": { "h": 4, "w": 3, "x": 18, "y": 1 },
+          "gridPos": { "h": 4, "w": 6, "x": 12, "y": 5 },
           "targets": [
-            { "expr": "sum(rate(http_server_requests_seconds_count{namespace=\"keycloak\",outcome=\"SERVER_ERROR\"}[5m])) / clamp_min(sum(rate(http_server_requests_seconds_count{namespace=\"keycloak\"}[5m])), 1)" }
+            { "expr": "sum(rate(http_server_requests_seconds_count{namespace=\"keycloak\",outcome=\"SERVER_ERROR\"}[5m])) / clamp_min(sum(rate(http_server_requests_seconds_count{namespace=\"keycloak\"}[5m])), 1)", "legendFormat": "current" },
+            { "expr": "max_over_time((sum(rate(http_server_requests_seconds_count{namespace=\"keycloak\",outcome=\"SERVER_ERROR\"}[5m])) / clamp_min(sum(rate(http_server_requests_seconds_count{namespace=\"keycloak\"}[5m])), 1))[$__range:])", "legendFormat": "peak" }
           ]
         },
         {
           "id": 38,
           "type": "stat",
           "title": "Keycloak DB pool %",
-          "description": "agroal_active_count / (active + available) — доля сейчас занятых соединений из уже поднятого пула. Не in_use/max: Agroal не отдаёт настроенный максимум отдельной метрикой, а db.poolMaxSize=10 (keycloak.yaml) нигде не экспортируется как число — только фактически открытые (available) и занятые (active). Красный здесь означает «все открытые сейчас соединения заняты», что при poolMaxSize=10 и poolInitialSize=1 может означать и рост к пределу, и просто догонку пула под нагрузкой — для точного прочтения открывать deep-dive секцию Keycloak ниже.",
+          "description": "agroal_active_count / (active + available) — доля сейчас занятых соединений из уже поднятого пула. Не in_use/max: Agroal не отдаёт настроенный максимум отдельной метрикой, а db.poolMaxSize=10 (keycloak.yaml) нигде не экспортируется как число — только фактически открытые (available) и занятые (active). Красный здесь означает «все открытые сейчас соединения заняты», что при poolMaxSize=10 и poolInitialSize=1 может означать и рост к пределу, и просто догонку пула под нагрузкой — для точного прочтения открывать deep-dive секцию Keycloak ниже. peak — максимум за выбранный диапазон, не только текущий момент.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "options": { "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
           "fieldConfig": {
@@ -223,16 +245,17 @@ spec:
               ]}
             }
           },
-          "gridPos": { "h": 4, "w": 3, "x": 21, "y": 1 },
+          "gridPos": { "h": 4, "w": 6, "x": 18, "y": 5 },
           "targets": [
-            { "expr": "sum(agroal_active_count{namespace=\"keycloak\",datasource=\"default\"}) / clamp_min(sum(agroal_active_count{namespace=\"keycloak\",datasource=\"default\"}) + sum(agroal_available_count{namespace=\"keycloak\",datasource=\"default\"}), 1)" }
+            { "expr": "sum(agroal_active_count{namespace=\"keycloak\",datasource=\"default\"}) / clamp_min(sum(agroal_active_count{namespace=\"keycloak\",datasource=\"default\"}) + sum(agroal_available_count{namespace=\"keycloak\",datasource=\"default\"}), 1)", "legendFormat": "current" },
+            { "expr": "max_over_time((sum(agroal_active_count{namespace=\"keycloak\",datasource=\"default\"}) / clamp_min(sum(agroal_active_count{namespace=\"keycloak\",datasource=\"default\"}) + sum(agroal_available_count{namespace=\"keycloak\",datasource=\"default\"}), 1))[$__range:])", "legendFormat": "peak" }
           ]
         },
         {
           "id": 1,
           "type": "row",
           "title": "Compute",
-          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 }
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 }
         },
         {
           "id": 2,
@@ -245,7 +268,7 @@ spec:
           },
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "short", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } } },
-          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 10 },
           "targets": [
             {
               "expr": "sum by (pod, container) (node_namespace_pod_container:container_cpu_usage_seconds_total:sum_irate{namespace=~\"$namespace\"})",
@@ -274,7 +297,7 @@ spec:
               ]}
             }
           },
-          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 10 },
           "targets": [
             {
               "expr": "sum by (pod, container) (node_namespace_pod_container:container_cpu_usage_seconds_total:sum_irate{namespace=~\"$namespace\"}) / sum by (pod, container) (namespace_pod_container:container_resource_limits_cpu_cores{namespace=~\"$namespace\"})",
@@ -292,7 +315,7 @@ spec:
           },
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "bytes", "custom": { "lineWidth": 2, "fillOpacity": 10, "pointSize": 0 } } },
-          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 18 },
           "targets": [
             {
               "expr": "sum by (pod, container) (node_namespace_pod_container:container_memory_working_set_bytes{namespace=~\"$namespace\"})",
@@ -320,7 +343,7 @@ spec:
               ]}
             }
           },
-          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 18 },
           "targets": [
             {
               "expr": "sum by (pod, container) (node_namespace_pod_container:container_memory_working_set_bytes{namespace=~\"$namespace\"}) / sum by (pod, container) (namespace_pod_container:container_resource_limits_memory_bytes{namespace=~\"$namespace\"})",
@@ -339,7 +362,7 @@ spec:
           },
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "short", "custom": { "lineWidth": 2, "fillOpacity": 0, "pointSize": 4 } } },
-          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 22 },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 26 },
           "targets": [
             {
               "expr": "max by (pod, container) (namespace_pod_container:container_restarts_total{namespace=~\"$namespace\"})",
@@ -358,7 +381,7 @@ spec:
           },
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
           "fieldConfig": { "defaults": { "unit": "short", "min": 0, "max": 1, "custom": { "lineWidth": 2, "fillOpacity": 0, "pointSize": 4 } } },
-          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 22 },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 26 },
           "targets": [
             {
               "expr": "max by (pod, container) (namespace_pod_container:container_last_terminated_oomkilled{namespace=~\"$namespace\"})",
@@ -371,7 +394,7 @@ spec:
           "type": "row",
           "title": "PostgreSQL — API DB pool",
           "collapsed": true,
-          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 30 },
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 34 },
           "panels": [
             {
               "id": 9,
@@ -423,7 +446,7 @@ spec:
           "type": "row",
           "title": "Redis",
           "collapsed": true,
-          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 31 },
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 35 },
           "panels": [
             {
               "id": 12,
@@ -551,7 +574,7 @@ spec:
           "type": "row",
           "title": "Kafka",
           "collapsed": true,
-          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 32 },
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 36 },
           "panels": [
             {
               "id": 18,
@@ -588,7 +611,7 @@ spec:
           "type": "row",
           "title": "Outbox",
           "collapsed": true,
-          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 33 },
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 37 },
           "panels": [
             {
               "id": 21,
@@ -620,7 +643,7 @@ spec:
           "type": "row",
           "title": "Centrifugo",
           "collapsed": true,
-          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 34 },
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 38 },
           "panels": [
             {
               "id": 23,
@@ -648,7 +671,7 @@ spec:
           "title": "Keycloak — Identity",
           "description": "Deep-dive после того, как Keycloak 5xx % или Keycloak DB pool % в Current saturation выше ушли в жёлтое/красное — не для постоянного наблюдения.",
           "collapsed": true,
-          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 35 },
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 39 },
           "panels": [
             {
               "id": 40,
@@ -734,7 +757,7 @@ spec:
           "type": "row",
           "title": "Dependencies",
           "collapsed": true,
-          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 36 },
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 40 },
           "panels": [
             {
               "id": 25,
@@ -758,7 +781,7 @@ spec:
           "id": 26,
           "type": "text",
           "title": "ℹ Scope",
-          "gridPos": { "h": 3, "w": 24, "x": 0, "y": 37 },
+          "gridPos": { "h": 3, "w": 24, "x": 0, "y": 41 },
           "options": {
             "mode": "markdown",
             "content": "PgBouncer/postgres-exporter server-side pool, worker-level DB pool (только API instrumented), Kafka broker CPU/disk/network, Gateway (Envoy) — не построены здесь, детали в description каждой панели и в docs/messenger/06-observability.md. R_healthy/R_knee/R_collapse — сырые ряды для визуальной классификации, не автоклассификация (план §18 запрещает сворачивать в одно число)."
