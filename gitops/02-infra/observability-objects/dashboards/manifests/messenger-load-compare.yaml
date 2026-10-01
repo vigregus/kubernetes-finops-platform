@@ -10,11 +10,11 @@ spec:
   json: |
     {
       "uid": "messenger-load-compare",
-      "title": "04 · Load Compare",
-      "description": "docs/messenger/15-load-testing-platform.md, раздел 22 (Messenger / Load Compare) и раздел 28 (сравнение прогонов) — выбор двух конкретных прогонов по run_id, а не offset-приближение. Раздел 20 разметил k6-метрики и summary (раздел 21, load_run_*) лейблами run_id/git_sha/profile — этого хватает, чтобы сравнивать конкретный commit A с конкретным commit B по имени, как и требует раздел 28, а не по времени. Живо проверено: два прогона подряд с разными run_id, оба выбираются в переменных ниже.",
+      "title": "LT-02 · Load Compare",
+      "description": "docs/messenger/15-load-testing-platform.md, раздел 22 (Messenger / Load Compare) и раздел 28 (сравнение прогонов) — выбор двух конкретных прогонов по run_id, а не offset-приближение. Раздел 20 разметил k6-метрики и summary (раздел 21, load_run_*) лейблами run_id/git_sha/profile — этого хватает, чтобы сравнивать конкретный commit A с конкретным commit B по имени, как и требует раздел 28, а не по времени. Живо проверено: два прогона подряд с разными run_id, оба выбираются в переменных ниже. Переименован из «04 · Load Compare» — старый номер конфликтовал с «04 · Realtime», нагрузочные дашборды теперь отдельная группа LT-01/LT-02. Capacity headroom (новая секция) — одинаковый throughput между current и baseline ещё не значит «не стало хуже»: новый commit мог прийти к тому же числу сообщений/сек заметно ближе к пределу ресурсов.",
       "tags": ["messenger", "load-testing"],
       "schemaVersion": 39,
-      "version": 1,
+      "version": 2,
       "editable": true,
       "time": { "from": "now-6h", "to": "now" },
       "templating": {
@@ -225,6 +225,205 @@ spec:
           "fieldConfig": { "defaults": { "unit": "short" } },
           "gridPos": { "h": 5, "w": 6, "x": 18, "y": 16 },
           "targets": [{ "expr": "load_run_max_kafka_lag{run_id=\"$run_id_baseline\"}" }]
+        },
+        {
+          "id": 21,
+          "type": "row",
+          "title": "Capacity headroom",
+          "description": "Если baseline и current показывают одинаковый throughput, это ещё не значит, что новый commit не стал хуже: он мог прийти к тому же числу сообщений/сек заметно ближе к пределу (выше CPU/DB pool), просто предел ещё не задет. load_run_*_peak — те же peak-expr, что уже на 05 · Capacity/LT-01 Load Run, пушатся шагом reconciliation с теми же run_id/git_sha/profile, что и остальные load_run_* метрики этого дашборда.",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 21 }
+        },
+        {
+          "id": 22,
+          "type": "stat",
+          "title": "API CPU peak — current",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 0.8 },
+                { "color": "red", "value": 1 }
+              ]}
+            }
+          },
+          "gridPos": { "h": 5, "w": 4, "x": 0, "y": 22 },
+          "targets": [{ "expr": "load_run_api_cpu_peak{run_id=\"$run_id_current\"}" }]
+        },
+        {
+          "id": 23,
+          "type": "stat",
+          "title": "API CPU peak — baseline",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "percentunit" } },
+          "gridPos": { "h": 5, "w": 4, "x": 4, "y": 22 },
+          "targets": [{ "expr": "load_run_api_cpu_peak{run_id=\"$run_id_baseline\"}" }]
+        },
+        {
+          "id": 24,
+          "type": "stat",
+          "title": "API Memory peak — current",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 0.8 },
+                { "color": "red", "value": 0.95 }
+              ]}
+            }
+          },
+          "gridPos": { "h": 5, "w": 4, "x": 8, "y": 22 },
+          "targets": [{ "expr": "load_run_api_memory_peak{run_id=\"$run_id_current\"}" }]
+        },
+        {
+          "id": 25,
+          "type": "stat",
+          "title": "API Memory peak — baseline",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "percentunit" } },
+          "gridPos": { "h": 5, "w": 4, "x": 12, "y": 22 },
+          "targets": [{ "expr": "load_run_api_memory_peak{run_id=\"$run_id_baseline\"}" }]
+        },
+        {
+          "id": 26,
+          "type": "stat",
+          "title": "API DB pool peak — current",
+          "description": "Worst pod за время прогона, не агрегат по репликам (тот же фикс, что в 05 · Capacity #105).",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 0.7 },
+                { "color": "red", "value": 0.9 }
+              ]}
+            }
+          },
+          "gridPos": { "h": 5, "w": 4, "x": 16, "y": 22 },
+          "targets": [{ "expr": "load_run_api_db_pool_peak{run_id=\"$run_id_current\"}" }]
+        },
+        {
+          "id": 27,
+          "type": "stat",
+          "title": "API DB pool peak — baseline",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "percentunit" } },
+          "gridPos": { "h": 5, "w": 4, "x": 20, "y": 22 },
+          "targets": [{ "expr": "load_run_api_db_pool_peak{run_id=\"$run_id_baseline\"}" }]
+        },
+        {
+          "id": 28,
+          "type": "stat",
+          "title": "Keycloak CPU peak — current",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 0.8 },
+                { "color": "red", "value": 1 }
+              ]}
+            }
+          },
+          "gridPos": { "h": 5, "w": 4, "x": 0, "y": 27 },
+          "targets": [{ "expr": "load_run_keycloak_cpu_peak{run_id=\"$run_id_current\"}" }]
+        },
+        {
+          "id": 29,
+          "type": "stat",
+          "title": "Keycloak CPU peak — baseline",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "percentunit" } },
+          "gridPos": { "h": 5, "w": 4, "x": 4, "y": 27 },
+          "targets": [{ "expr": "load_run_keycloak_cpu_peak{run_id=\"$run_id_baseline\"}" }]
+        },
+        {
+          "id": 30,
+          "type": "stat",
+          "title": "Keycloak DB pool peak — current",
+          "description": "active / (active + available), не доля от poolMaxSize (та же оговорка, что в 05 · Capacity #105).",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 0.7 },
+                { "color": "red", "value": 0.9 }
+              ]}
+            }
+          },
+          "gridPos": { "h": 5, "w": 4, "x": 8, "y": 27 },
+          "targets": [{ "expr": "load_run_keycloak_db_pool_peak{run_id=\"$run_id_current\"}" }]
+        },
+        {
+          "id": 31,
+          "type": "stat",
+          "title": "Keycloak DB pool peak — baseline",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "percentunit" } },
+          "gridPos": { "h": 5, "w": 4, "x": 12, "y": 27 },
+          "targets": [{ "expr": "load_run_keycloak_db_pool_peak{run_id=\"$run_id_baseline\"}" }]
+        },
+        {
+          "id": 32,
+          "type": "stat",
+          "title": "Keycloak p99 peak — current",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 1 },
+                { "color": "red", "value": 3 }
+              ]}
+            }
+          },
+          "gridPos": { "h": 5, "w": 4, "x": 16, "y": 27 },
+          "targets": [{ "expr": "load_run_keycloak_p99_peak_seconds{run_id=\"$run_id_current\"}" }]
+        },
+        {
+          "id": 33,
+          "type": "stat",
+          "title": "Keycloak p99 peak — baseline",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "s" } },
+          "gridPos": { "h": 5, "w": 4, "x": 20, "y": 27 },
+          "targets": [{ "expr": "load_run_keycloak_p99_peak_seconds{run_id=\"$run_id_baseline\"}" }]
+        },
+        {
+          "id": 34,
+          "type": "stat",
+          "title": "Keycloak 5xx peak — current",
+          "description": "Та же P0-формула, что исправлена в 05 · Capacity #105: or vector(0), без clamp_min на знаменателе-ставке.",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit", "noValue": "N/A",
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 0.01 },
+                { "color": "red", "value": 0.05 }
+              ]}
+            }
+          },
+          "gridPos": { "h": 5, "w": 6, "x": 0, "y": 32 },
+          "targets": [{ "expr": "load_run_keycloak_5xx_peak{run_id=\"$run_id_current\"}" }]
+        },
+        {
+          "id": 35,
+          "type": "stat",
+          "title": "Keycloak 5xx peak — baseline",
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "fieldConfig": { "defaults": { "unit": "percentunit", "noValue": "N/A" } },
+          "gridPos": { "h": 5, "w": 6, "x": 6, "y": 32 },
+          "targets": [{ "expr": "load_run_keycloak_5xx_peak{run_id=\"$run_id_baseline\"}" }]
         }
       ]
     }
