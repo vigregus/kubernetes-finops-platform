@@ -49,3 +49,26 @@ server:
 workflow:
   serviceAccount:
     create: true
+
+# Раздел 24 плана (docs/messenger/15-load-testing-platform.md) — "не
+# полагаться только на Argo stdout". Без artifactRepository шаги с
+# outputs.artifacts падают с "artifact storage is not configured" -
+# живой дефект, пойманный первым же прогоном после появления
+# summary.json (reconciliation, load-testing/manifests/workflow-
+# template.yaml). Бакет - в уже работающем MinIO Tenant messenger-
+# objects (load-testing/manifests/artifact-repository-bootstrap.yaml
+# копирует root-креды в load-testing namespace, где Argo их резолвит:
+# секрет для артефакт-репозитория по умолчанию читается из namespace
+# самого workflow, не из namespace контроллера).
+artifactRepository:
+  archiveLogs: false
+  s3:
+    bucket: load-testing-artifacts
+    endpoint: messenger-objects-hl.messenger.svc.cluster.local:9000
+    insecure: true
+    accessKeySecret:
+      name: load-testing-minio-artifact-repo
+      key: accesskey
+    secretKeySecret:
+      name: load-testing-minio-artifact-repo
+      key: secretkey
