@@ -969,7 +969,49 @@ spec:
                   )
                   max_kafka_lag = await vm_query(
                       client,
-                      f'max(max_over_time(kafka_consumergroup_lag{{consumergroup="messenger-realtime"}}[{DURATION}]))',
+                      # Обе consumer group — messenger-realtime и messenger-unread,
+                      # раньше здесь считалась только первая (тот же пробел,
+                      # что уже закрыт в 05 · Capacity/LT-01 Load Run для
+                      # визуализации; здесь — для summary-метрики, которую
+                      # сравнивает LT-02 Load Compare).
+                      f'max(max_over_time(kafka_consumergroup_lag{{consumergroup=~"messenger-(realtime|unread)"}}[{DURATION}]))',
+                  )
+
+                  # Раздел про "Capacity headroom" LT-02 Load Compare — те же
+                  # peak-expr, что уже проверены живьём на 05 · Capacity/LT-01
+                  # Load Run (worst-pod DB pool, container="keycloak" для
+                  # идентификации самого identity-сервера среди postgres/
+                  # operator/reconcile-джобов того же namespace, корректная
+                  # формула 5xx без clamp_min на знаменателе-ставке). [{DURATION}]
+                  # — то же окно прогона, что у остальных load_run_* метрик
+                  # выше, не произвольный диапазон дашборда.
+                  api_cpu_peak = await vm_query(
+                      client,
+                      f'max(max_over_time((sum by (pod, container) (node_namespace_pod_container:container_cpu_usage_seconds_total:sum_irate{{namespace="messenger"}}) / sum by (pod, container) (namespace_pod_container:container_resource_limits_cpu_cores{{namespace="messenger"}}))[{DURATION}]))',
+                  )
+                  api_memory_peak = await vm_query(
+                      client,
+                      f'max(max_over_time((sum by (pod, container) (node_namespace_pod_container:container_memory_working_set_bytes{{namespace="messenger"}}) / sum by (pod, container) (namespace_pod_container:container_resource_limits_memory_bytes{{namespace="messenger"}}))[{DURATION}]))',
+                  )
+                  api_db_pool_peak = await vm_query(
+                      client,
+                      f'max(max_over_time((sum by (pod) (messenger_db_pool_connections{{namespace="messenger",state="in_use"}}) / clamp_min(sum by (pod) (messenger_db_pool_max_connections{{namespace="messenger"}}), 1))[{DURATION}]))',
+                  )
+                  keycloak_cpu_peak = await vm_query(
+                      client,
+                      f'max(max_over_time((sum by (pod, container) (node_namespace_pod_container:container_cpu_usage_seconds_total:sum_irate{{namespace="keycloak",container="keycloak"}}) / sum by (pod, container) (namespace_pod_container:container_resource_limits_cpu_cores{{namespace="keycloak",container="keycloak"}}))[{DURATION}]))',
+                  )
+                  keycloak_db_pool_peak = await vm_query(
+                      client,
+                      f'max_over_time((sum(agroal_active_count{{namespace="keycloak",datasource="default"}}) / clamp_min(sum(agroal_active_count{{namespace="keycloak",datasource="default"}}) + sum(agroal_available_count{{namespace="keycloak",datasource="default"}}), 1))[{DURATION}])',
+                  )
+                  keycloak_p99_peak = await vm_query(
+                      client,
+                      f'max_over_time((histogram_quantile(0.99, sum by (le) (rate(http_server_requests_seconds_bucket{{namespace="keycloak",uri="/realms/{{realm}}/protocol/{{protocol}}/token"}}[5m]))))[{DURATION}])',
+                  )
+                  keycloak_5xx_peak = await vm_query(
+                      client,
+                      f'max_over_time(((sum(rate(http_server_requests_seconds_count{{namespace="keycloak",outcome="SERVER_ERROR"}}[5m])) or vector(0)) / sum(rate(http_server_requests_seconds_count{{namespace="keycloak"}}[5m])))[{DURATION}])',
                   )
 
                   missing = max(ACCEPTED - persisted, 0)
@@ -983,6 +1025,13 @@ spec:
                       f"load_run_delivery_p95_seconds{{{labels}}} {delivery_p95}",
                       f"load_run_max_outbox_age_seconds{{{labels}}} {max_outbox_age}",
                       f"load_run_max_kafka_lag{{{labels}}} {max_kafka_lag}",
+                      f"load_run_api_cpu_peak{{{labels}}} {api_cpu_peak}",
+                      f"load_run_api_memory_peak{{{labels}}} {api_memory_peak}",
+                      f"load_run_api_db_pool_peak{{{labels}}} {api_db_pool_peak}",
+                      f"load_run_keycloak_cpu_peak{{{labels}}} {keycloak_cpu_peak}",
+                      f"load_run_keycloak_db_pool_peak{{{labels}}} {keycloak_db_pool_peak}",
+                      f"load_run_keycloak_p99_peak_seconds{{{labels}}} {keycloak_p99_peak}",
+                      f"load_run_keycloak_5xx_peak{{{labels}}} {keycloak_5xx_peak}",
                   ]
                   # Раздел 19 — recovery-check выполняется только для
                   # profile=recovery (DAG `when`); для остальных профилей
