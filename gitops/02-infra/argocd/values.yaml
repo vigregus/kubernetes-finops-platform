@@ -28,3 +28,22 @@
 configs:
   params:
     server.insecure: "true"
+
+# controller - это application-controller: он держит в памяти полное
+# дерево live-ресурсов каждого Application и пересчитывает diff при
+# каждом sync. Без лимитов он один съедает CPU-бюджет единственного
+# узла ровно тогда, когда это больнее всего: сразу после merge-triggered
+# sync `messenger-load-testing`/`grafana-dashboards`, впритык к старту
+# нагрузочного теста - того самого, который уже показал перегрузку узла
+# по CPU (node_cpu_seconds_total доходил до 96-99% во время прогона,
+# см. gitops/04-messenger/load-testing). Live-замер в покое (kubectl
+# top): 988Mi RAM / 25m CPU - limits ниже взяты с запасом под всплеск
+# синка, а не под это значение в покое.
+controller:
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 2Gi
