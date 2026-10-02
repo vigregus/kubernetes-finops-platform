@@ -89,6 +89,13 @@ def _client_event(fact: dict[str, Any], content: dict[str, Any]) -> dict[str, An
     }
     if fact.get("client_message_id") is not None:
         event["client_message_id"] = fact["client_message_id"]
+    # G3-008: t1 для настоящего T_delivery. Это то же `occurred_at`, что уже
+    # используется чуть ниже для серверного приближения
+    # (`metrics.message_delivery_duration`) — не новое поле времени, а то же
+    # самое, доехавшее теперь и до браузера-получателя, которому иначе не от
+    # чего отсчитывать `delivery_ack`.
+    if fact.get("occurred_at") is not None:
+        event["occurred_at"] = fact["occurred_at"]
     return event
 
 

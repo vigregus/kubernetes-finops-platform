@@ -28,6 +28,12 @@ import type { ResendVerificationEmail } from "../auth/components/EmailVerificati
 import { ConnectionStatusLine } from "../realtime/components/ConnectionStatusLine"
 import type { CentrifugeFactory } from "../realtime/realtimeClient"
 import { useRealtimeConnection } from "../realtime/useRealtimeConnection"
+import type { ConnectionEvent, ConnectionMachineState } from "../realtime/connectionMachine"
+import {
+  INITIAL_CONNECTION_TELEMETRY_CONTEXT,
+  mapConnectionEvent,
+} from "../telemetry/connectionTelemetry"
+import type { TelemetryClient } from "../telemetry/telemetryClient"
 import { MessengerLayout } from "../../shared/ui/MessengerLayout"
 import type {
   ChatMessage,
@@ -144,6 +150,8 @@ interface ChatPageProps {
   resendVerificationEmail: ResendVerificationEmail
   /** Подмена SDK — для компонентных тестов; в production не задаётся. */
   createCentrifuge?: CentrifugeFactory
+  /** G3-008: приёмник best-effort телеметрии доставки. */
+  telemetry: Pick<TelemetryClient, "record">
 }
 
 /**
@@ -212,6 +220,7 @@ export function ChatPage({
   createConversation,
   resendVerificationEmail,
   createCentrifuge,
+  telemetry,
 }: ChatPageProps) {
   // Ленивая инициализация, а не `?? conversations[0]` в рендере: запасного
   // значения у настоящих данных нет, а пустой список — законный ответ сервера.
@@ -525,6 +534,7 @@ export function ChatPage({
             // Снимает очередь, а решает лента: вопрос «что подтверждено» знает
             // `eventMerge`, вопрос «что снять» — `confirmedClientIds`.
             onConfirmed={outbox.settle}
+            telemetry={telemetry}
           />
         )}
       </MessengerLayout>
@@ -572,6 +582,8 @@ interface ConversationPaneProps {
   onFeedReady: (entry: FeedEntry | null) => void
   /** Подтверждённое дошло до ленты — вот его `client_message_id`. */
   onConfirmed: (clientMessageIds: ReadonlySet<string>) => void
+  /** G3-008: приёмник best-effort телеметрии доставки. */
+  telemetry: Pick<TelemetryClient, "record">
 }
 
 /**
@@ -604,6 +616,7 @@ function ConversationPane({
   onReconcile,
   onFeedReady,
   onConfirmed,
+  telemetry,
 }: ConversationPaneProps) {
   /**
    * Лента этого окна — в ссылке, потому что публикации достаются обработчику,
@@ -667,7 +680,39 @@ function ConversationPane({
         // Звук — только чужому сообщению: своё уже названо отправкой (D13),
         // и звонок по нему сообщил бы человеку о том, что он только что
         // сделал сам.
-        if (message.authorId !== "me") playIncomingMessageSound()
+        if (message.authorId !== "me") {
+          playIncomingMessageSound()
+          // G3-008: t6 - получено по WS. `t7` (`delivery_ack`) - двойной
+          // `requestAnimationFrame`: первый кадр после коммита состояния в
+          // `historyRef`, второй - после того, как браузер его отрисовал.
+          // Это приближение «отрисовано», не доказательство видимости в
+          // вьюпорте (та проверка - у `MessageList`, по другому поводу,
+          // квитанции прочтения); честное имя для него - `message_rendered`,
+          // не `message_received` второй раз.
+          telemetry.record({
+            type: "message_received",
+            occurredAt: new Date(),
+            messageId: message.id,
+            conversationId: conversation.id,
+          })
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              const renderedAt = new Date()
+              telemetry.record({
+                type: "message_rendered",
+                occurredAt: renderedAt,
+                messageId: message.id,
+                conversationId: conversation.id,
+              })
+              telemetry.record({
+                type: "delivery_ack",
+                occurredAt: renderedAt,
+                messageId: message.id,
+                conversationId: conversation.id,
+              })
+            })
+          })
+        }
         return
       }
 
@@ -689,7 +734,22 @@ function ConversationPane({
       // двигает ни одно число.
       setPeer((current) => advance(current, receipt))
     },
-    [currentUserId, peerUserId],
+    [currentUserId, peerUserId, conversation.id, telemetry],
+  )
+
+  // G3-008: контекст телеметрии соединения живёт здесь, не в чистом
+  // мапере (`mapConnectionEvent` остаётся функцией без памяти, тем же
+  // доводом, что и у `connectionMachine` самого). Ссылка, а не `useState`:
+  // смена контекста не должна перерисовывать панель.
+  const connectionTelemetryContext = useRef(INITIAL_CONNECTION_TELEMETRY_CONTEXT)
+
+  const onObservedEvent = useCallback(
+    (event: ConnectionEvent, before: ConnectionMachineState) => {
+      const mapped = mapConnectionEvent(event, before, connectionTelemetryContext.current)
+      connectionTelemetryContext.current = mapped.context
+      for (const telemetryEvent of mapped.events) telemetry.record(telemetryEvent)
+    },
+    [telemetry],
   )
 
   const connection = useRealtimeConnection({
@@ -706,6 +766,7 @@ function ConversationPane({
     onPublication,
     onUserPublication: onUnreadPublication,
     createCentrifuge,
+    onObservedEvent,
   })
 
   const { notify } = connection

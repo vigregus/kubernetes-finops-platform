@@ -23,6 +23,7 @@ tags:
   - name: messages
   - name: attachments
   - name: sessions
+  - name: telemetry
 
 paths:
   /auth/callback:
@@ -653,6 +654,35 @@ paths:
         '204': { description: Сессия отозвана или уже не была активной }
         '401': { $ref: '#/components/responses/Unauthorized' }
 
+  /telemetry/browser:
+    post:
+      tags: [telemetry]
+      summary: Пачка клиентских событий доставки (G3-008)
+      description: |
+        Best-effort и `sampled` (`06-observability.md`, "Телеметрия браузера
+        обязательна"): отказ этой точки не должен быть виден пользователю
+        и не влияет на отправку/доставку сообщений, которые идут своим,
+        независимым путём. Поэтому `202`, а не `200`/`204` с гарантией
+        записи — тело принято, учёт best-effort.
+
+        `delivery_ack` с `message_id` — то, из чего считается настоящий
+        `T_delivery` (`t7 − t1`, где `t1` — момент коммита в Postgres,
+        уже известный сообщению): сервер смотрит `created_at` у
+        `message_id` и сравнивает с `occurred_at` события. Запись без
+        `message_id` на `delivery_ack` отвергается — без него не с чем
+        сверить `t1`.
+      operationId: ingestBrowserTelemetry
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BrowserTelemetryBatch'
+      responses:
+        '202': { description: Пачка принята к учёту (best-effort) }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
 components:
   securitySchemes:
     bearerAuth:
@@ -731,6 +761,55 @@ components:
           schema: { $ref: '#/components/schemas/Problem' }
 
   schemas:
+    BrowserTelemetryEvent:
+      type: object
+      additionalProperties: false
+      required: [type, occurred_at]
+      properties:
+        type:
+          type: string
+          enum:
+            - ws_connected
+            - ws_disconnected
+            - ws_reconnected
+            - gap_detected
+            - message_received
+            - message_rendered
+            - delivery_ack
+            - recovery_success
+            - recovery_failed
+            - sync_started
+            - sync_finished
+            - js_error
+        occurred_at:
+          type: string
+          format: date-time
+          description: Момент на клиентских часах — не серверное время.
+        message_id:
+          type: string
+          format: uuid
+          description: Обязателен у message_received/message_rendered/delivery_ack.
+        conversation_id:
+          type: string
+          format: uuid
+        detail:
+          type: string
+          maxLength: 200
+          description: >-
+            Короткий контекст (код разрыва WS, имя ошибки) — не стектрейс
+            и не текст, введённый пользователем.
+    BrowserTelemetryBatch:
+      type: object
+      additionalProperties: false
+      required: [events]
+      properties:
+        events:
+          type: array
+          # Верхняя граница пачки — часть контракта, а не детали реализации
+          # сервера: без неё "best-effort, sampled" (06-observability.md)
+          # превращается в обещание, которое нечем ограничить на входе.
+          maxItems: 50
+          items: { $ref: '#/components/schemas/BrowserTelemetryEvent' }
     SetReceiptsRequest:
       type: object
       additionalProperties: false

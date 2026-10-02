@@ -335,6 +335,9 @@ function setup({
       resendVerificationEmail={resend}
       outboxStore={outboxStore}
       createCentrifuge={fake.factory}
+      // G3-008: эти тесты не проверяют телеметрию - `record` молча ничего
+      // не делает, настоящий приёмник собирается в `main.tsx`.
+      telemetry={{ record: () => {} }}
     />
   );
 

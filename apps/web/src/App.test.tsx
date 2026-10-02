@@ -153,6 +153,9 @@ function shell(state: BootState, api: HistoryApi = historyApi) {
     readCentrifugoUrl: () => "wss://rt.example.test/connection/websocket",
     issueTicket: async () => "ticket-for-the-hunt",
     createCentrifuge: givenFakeCentrifuge().factory,
+    // G3-008: эти тесты не проверяют телеметрию — `record` молча ничего не
+    // делает, и это честно: настоящий приёмник собирается в `main.tsx`.
+    telemetry: { record: () => {} },
   };
 }
 

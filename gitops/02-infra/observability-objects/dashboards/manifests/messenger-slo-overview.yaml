@@ -14,7 +14,7 @@ spec:
       "description": "docs/messenger/06-observability.md, часть 5 - главный дашборд, читается за десять секунд: строка 1 отвечает \"проблема есть?\", остальное - \"где она?\". Ссылка из victoria-stack/rules/messenger-slo.yaml (dashboard_url) ведёт сюда по этому uid — uid НЕ менять при редактировании.",
       "tags": ["messenger", "slo"],
       "schemaVersion": 39,
-      "version": 4,
+      "version": 5,
       "editable": true,
       "time": { "from": "now-6h", "to": "now" },
       "links": [
@@ -141,15 +141,23 @@ spec:
         {
           "id": 4,
           "type": "stat",
-          "title": "p99 T_delivery (approx)",
-          "description": "occurred_at → публикация в Centrifugo, не ack браузера получателя (телеметрии браузера ещё нет, G3). Диагностика, не полноценный SLI — см. messenger-slo.yaml, MessageDeliveryHighLatencyP99Approx.",
+          "title": "p99 T_delivery",
+          "description": "Два числа рядом, не замена одного другим: «approx» — occurred_at → публикация в Centrifugo (серверный участок, t1→t5, был единственным до G3-008 и остаётся диагностикой для разбора пайплайна отдельно от клиента). «browser-confirmed» — настоящий T_delivery (t7−t1, delivery_ack), G3-008, строится только там, где у клиентов включена телеметрия (sampled). См. messenger-slo.yaml, MessageDeliveryHighLatencyP99Approx.",
           "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-          "options": { "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "options": {
+            "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] },
+            "textMode": "value_and_name"
+          },
           "fieldConfig": { "defaults": { "unit": "s" } },
           "gridPos": { "h": 5, "w": 8, "x": 0, "y": 6 },
           "targets": [
             {
-              "expr": "histogram_quantile(0.99, sum by (le) (rate(messenger_message_delivery_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])))"
+              "expr": "histogram_quantile(0.99, sum by (le) (rate(messenger_message_delivery_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])))",
+              "legendFormat": "approx (server t1→t5)"
+            },
+            {
+              "expr": "histogram_quantile(0.99, sum by (le) (rate(messenger_browser_delivery_e2e_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])))",
+              "legendFormat": "browser-confirmed (t1→t7, G3-008)"
             }
           ]
         },
