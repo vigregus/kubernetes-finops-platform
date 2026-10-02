@@ -41,6 +41,8 @@ URL = f"/conversations/{CONVERSATION_ID}/messages"
 class Runtime:
     keys = None
     oidc_settings = None
+    # G4: у этих тестов объектного хранилища нет, вложения не затрагиваются.
+    object_store = None
 
     @asynccontextmanager
     async def connection(self):

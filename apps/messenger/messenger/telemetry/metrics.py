@@ -456,3 +456,31 @@ def browser_delivery_duration(seconds: float) -> None:
     BROWSER_DELIVERY_DURATION.labels(service=SERVICE).observe(
         seconds, exemplar=_exemplar()
     )
+
+
+# G4: конвейер вложений. Исход обработки (`ready`/`rejected`/`failed`/
+# `deferred`) — тем же способом, что у `messenger_realtime_delivery_total`:
+# доля `rejected` и `deferred` и есть сигнал «сканер или хранилище болеют».
+ATTACHMENT_PROCESSED = Counter(
+    "messenger_attachment_processed_total",
+    "Исход обработки вложения воркером (G4)",
+    ["service", "result"],
+)
+
+
+def attachment_processed(result: str) -> None:
+    ATTACHMENT_PROCESSED.labels(service=SERVICE, result=result).inc()
+
+
+# Возраст самого старого вложения в `processing` — для вложений то же, что
+# `messenger_outbox_oldest_age_seconds` для доставки: жив ли конвейер, видно
+# по тому, что очередь не стареет, а не по пробе.
+ATTACHMENT_PROCESSING_AGE = Gauge(
+    "messenger_attachment_processing_oldest_age_seconds",
+    "Возраст самого старого вложения в состоянии processing",
+    ["service"],
+)
+
+
+def attachment_processing_age(seconds: float) -> None:
+    ATTACHMENT_PROCESSING_AGE.labels(service=SERVICE).set(seconds)

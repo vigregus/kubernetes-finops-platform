@@ -21,8 +21,10 @@ from messenger.domain.message import (
     Message,
     MessageKind,
     MessagePayload,
+    validate_attachments,
     validate_message_payload,
 )
+from messenger.repositories import attachments as attachments_repo
 from messenger.repositories import conversations, messages, outbox
 from messenger.telemetry import metrics, tracing
 
@@ -68,6 +70,7 @@ async def send_message(
 
     # Негодный запрос не должен ждать занятую строку беседы.
     validate_message_payload(kind, payload)
+    validate_attachments(kind, len(set(attachment_ids)))
 
     origin = {
         **({"trace_id": trace_id} if trace_id else {}),
@@ -110,6 +113,20 @@ async def send_message(
                 if existing is not None:
                     return SendMessageResult(message=existing, created=False)
 
+                # Вложения проверяются и блокируются **до** выдачи номера: отказ
+                # здесь не должен стоить дыры в последовательности беседы, а
+                # блокировка держит вложение за этим сообщением до коммита.
+                # Повтор уже принятого сообщения сюда не доходит (ветка
+                # `existing` выше): вложение к тому моменту `attached`.
+                if attachment_ids:
+                    locked = await attachments_repo.lock_ready_for_message(
+                        conn, ids=attachment_ids, uploader_id=sender_id
+                    )
+                    if len(locked) != len(set(attachment_ids)) or any(
+                        item.kind is not kind for item in locked
+                    ):
+                        return SendMessageResult(rejection=Reason.ATTACHMENT_NOT_READY)
+
                 sequence = await messages.allocate_sequence(
                     conn, conversation_id=conversation_id
                 )
@@ -124,6 +141,11 @@ async def send_message(
                         kind=kind,
                         payload=payload,
                         reply_to_message_id=reply_to_message_id,
+                    )
+
+                if attachment_ids:
+                    await attachments_repo.attach(
+                        conn, ids=attachment_ids, message_id=message.message_id
                     )
 
                 members = await conversations.list_active_members(

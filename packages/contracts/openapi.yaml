@@ -614,6 +614,13 @@ paths:
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
+
+  /attachments/{attachment_id}:
+    parameters:
+      - name: attachment_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
     get:
       tags: [attachments]
       summary: Состояние вложения

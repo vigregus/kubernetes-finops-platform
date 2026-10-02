@@ -22,7 +22,7 @@ from enum import Enum
 
 import asyncpg
 
-from messenger.adapters import centrifugo, keycloak, oidc, ratelimit
+from messenger.adapters import centrifugo, keycloak, object_store, oidc, ratelimit
 from messenger.repositories import postgres
 from messenger.services.login import LoginSettings
 from messenger.telemetry import metrics
@@ -235,6 +235,9 @@ class Runtime:
     admin: keycloak.AdminClient | None = None
     limiter: ratelimit.RateLimiter | None = None
     centrifugo: centrifugo.CentrifugoClient | None = None
+    # `None`, когда объектное хранилище не настроено: вложения тогда отвечают
+    # 503, а остальное живёт (`adapters/object_store.py`).
+    object_store: object_store.ObjectStore | None = None
     backchannel_audience: str = field(
         default_factory=lambda: os.getenv("OIDC_BACKCHANNEL_AUDIENCE", "messenger-web")
     )
@@ -250,6 +253,10 @@ class Runtime:
             self.limiter = ratelimit.RateLimiter(settings=limit_settings_from_env())
         if self.centrifugo is None:
             self.centrifugo = centrifugo_client_from_env()
+        if self.object_store is None:
+            store_settings = object_store.ObjectStoreSettings.from_env()
+            if store_settings is not None:
+                self.object_store = object_store.ObjectStore(store_settings)
 
     async def start(self) -> None:
         """Пытается открыть пул и прогреть ключи. Неудача — не повод
@@ -293,6 +300,8 @@ class Runtime:
             metrics.dependency_up(POSTGRES, up=False)
         if self.limiter is not None:
             await self.limiter.close()
+        if self.object_store is not None:
+            await self.object_store.close()
 
     async def ensure_pool(self) -> asyncpg.Pool | None:
         """Открывает пул, если его ещё нет. Повторная попытка — на каждой пробе.
