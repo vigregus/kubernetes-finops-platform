@@ -540,6 +540,13 @@ paths:
               properties:
                 content_type: { type: string }
                 size_bytes: { type: integer, format: int64, minimum: 1 }
+                file_name:
+                  type: string
+                  minLength: 1
+                  maxLength: 255
+                  description: >-
+                    Исходное имя файла для показа. На ключ объекта не влияет:
+                    ключ строит сервер, и имя от клиента в него не попадает.
       responses:
         '201':
           description: Ссылка на загрузку выдана
@@ -552,11 +559,76 @@ paths:
                   attachment_id: { type: string, format: uuid }
                   upload_url: { type: string, format: uri }
                   expires_at: { type: string, format: date-time }
-        '415':
-          description: Тип содержимого не разрешён
+                  upload_headers:
+                    type: object
+                    additionalProperties: { type: string }
+                    description: >-
+                      Заголовки, которые клиент обязан передать в `PUT` как
+                      есть: они входят в подпись, и любое расхождение
+                      хранилище отвергнет.
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413':
+          description: Размер выше предела для этого типа — ссылка не выдана
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
+        '415':
+          description: Тип содержимого не разрешён — ссылка не выдана
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '429':
+          description: Слишком много инициаций за единицу времени
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /attachments/{attachment_id}/complete:
+    parameters:
+      - name: attachment_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [attachments]
+      summary: Сообщить, что файл загружен
+      description: |
+        Вызывается браузером после успешного `PUT`. Сервер проверяет, что
+        объект действительно лёг и его размер совпал с заявленным, и ставит
+        вложение в очередь обработки (`processing`). Ответ `202`: обработка
+        идёт в фоне, и готовность клиент узнаёт чтением вложения, а не из
+        этого ответа.
+
+        Повторный вызов безопасен: уже принятое вложение возвращает то же
+        состояние. Чужое и несуществующее вложение неразличимы (`404`).
+      operationId: completeAttachment
+      responses:
+        '202':
+          description: Принято к обработке (или уже обрабатывается)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AttachmentStatus' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Объект в хранилище не найден или размер не совпал
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+    get:
+      tags: [attachments]
+      summary: Состояние вложения
+      description: |
+        Клиент опрашивает его после `complete`, пока оно `processing`.
+        `ready` — можно прикрепить к сообщению; `rejected` — файл не принят,
+        `rejection_code` называет причину для человека.
+      operationId: getAttachmentStatus
+      responses:
+        '200':
+          description: Текущее состояние
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AttachmentStatus' }
+        '404': { $ref: '#/components/responses/NotFound' }
 
   /realtime/token:
     post:
@@ -1132,10 +1204,29 @@ components:
         attachment_id: { type: string, format: uuid }
         content_type: { type: string }
         size_bytes: { type: integer, format: int64 }
+        file_name:
+          type: string
+          description: Исходное имя файла; необязательно у вложений без имени.
         download_url:
           type: string
           format: uri
           description: Предподписанная ссылка с ограниченным сроком.
+
+    AttachmentStatus:
+      type: object
+      required: [attachment_id, state]
+      properties:
+        attachment_id: { type: string, format: uuid }
+        state:
+          type: string
+          enum: [pending, processing, ready, rejected, failed, attached]
+          description: >-
+            `orphaned` и `erased` наружу не отдаются: для клиента такого
+            вложения уже нет.
+        rejection_code:
+          type: string
+          enum: [type_mismatch, malware, too_large, storage_error]
+          description: Только у `rejected`/`failed`.
 
     Session:
       type: object
