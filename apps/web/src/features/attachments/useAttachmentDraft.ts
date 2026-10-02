@@ -29,6 +29,12 @@ export interface UseAttachmentDraft {
   readonly draft: AttachmentDraft
   pick(file: File): void
   clear(): void
+  /**
+   * Снять черновик, только если он всё ещё **этот** готовый файл. Ответ на
+   * отправку приходит позже, чем человек успел выбрать следующий файл, и
+   * безусловный `clear()` стёр бы уже новый черновик.
+   */
+  clearIfReady(attachmentId: string): void
 }
 
 export function useAttachmentDraft(
@@ -89,5 +95,13 @@ export function useAttachmentDraft(
     setDraft({ state: "empty" })
   }, [])
 
-  return { draft, pick, clear }
+  const clearIfReady = useCallback((attachmentId: string) => {
+    setDraft((current) => {
+      if (current.state !== "ready" || current.attachmentId !== attachmentId) return current
+      generation.current += 1
+      return { state: "empty" }
+    })
+  }, [])
+
+  return { draft, pick, clear, clearIfReady }
 }

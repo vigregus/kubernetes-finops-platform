@@ -843,7 +843,7 @@ function ConversationPane({
   // G4: черновик вложения и отправка сообщения-вложения.
   const attachmentDraft = useAttachmentDraft(attachments?.ops)
   const draftValue = attachmentDraft.draft
-  const clearDraft = attachmentDraft.clear
+  const clearDraftIfReady = attachmentDraft.clearIfReady
   // Тождество логической отправки живёт в ссылке и привязано к вложению: повтор
   // после сбоя шлёт **тот же** `client_message_id` (D3), и сервер ответит `200`
   // с тем же сообщением, а не заведёт второе.
@@ -864,7 +864,7 @@ function ConversationPane({
           attachmentId,
         })
         .then((response) => {
-          clearDraft()
+          clearDraftIfReady(attachmentId)
           // Ответ кладётся тем же путём, что и публикация (`adaptMessage` →
           // `acceptPublication`): второго способа слияния не заводится. Если
           // публикация о том же сообщении уже пришла, дубль по номеру
@@ -876,7 +876,7 @@ function ConversationPane({
           // повтор нажатия «Send» уйдёт с тем же тождеством.
         })
     },
-    [attachments, draftValue, conversation.id, currentUserId, clearDraft],
+    [attachments, draftValue, conversation.id, currentUserId, clearDraftIfReady],
   )
 
   /**
@@ -1070,7 +1070,7 @@ function ConversationPane({
             : {
                 draft: draftValue,
                 onPick: attachmentDraft.pick,
-                onClear: clearDraft,
+                onClear: attachmentDraft.clear,
                 onSend: sendAttachment,
               }
         }
