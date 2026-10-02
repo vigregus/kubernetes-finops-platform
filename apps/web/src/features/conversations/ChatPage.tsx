@@ -6,7 +6,12 @@ import type { CreateConversation, SearchUser } from "./components/NewConversatio
 import { adaptConversation, adaptConversations, withSentPreview } from "./adapter"
 import { adaptUnreadChanged, withUnreadOverlay } from "./unreadOverlay"
 import type { Conversation as ConversationDto, ConversationListPage, Message } from "../../api/generated"
-import { adaptMessage, adaptPublication, adaptReadReceipt } from "../messages/message-adapter"
+import {
+  adaptMessage,
+  adaptPublication,
+  adaptReadReceipt,
+  attachmentCountOf,
+} from "../messages/message-adapter"
 import { playIncomingMessageSound } from "../messages/notificationSound"
 import { confirmedClientIds } from "../messages/eventMerge"
 import { MessageComposer } from "../messages/components/MessageComposer"
@@ -34,6 +39,8 @@ import {
   mapConnectionEvent,
 } from "../telemetry/connectionTelemetry"
 import type { TelemetryClient } from "../telemetry/telemetryClient"
+import type { AttachmentClient } from "../attachments/attachmentUpload"
+import { useAttachmentDraft } from "../attachments/useAttachmentDraft"
 import { MessengerLayout } from "../../shared/ui/MessengerLayout"
 import type {
   ChatMessage,
@@ -152,6 +159,8 @@ interface ChatPageProps {
   createCentrifuge?: CentrifugeFactory
   /** G3-008: приёмник best-effort телеметрии доставки. */
   telemetry: Pick<TelemetryClient, "record">
+  /** G4: вложения. Без него композер остаётся прежним, только текст. */
+  attachments?: AttachmentClient
 }
 
 /**
@@ -221,6 +230,7 @@ export function ChatPage({
   resendVerificationEmail,
   createCentrifuge,
   telemetry,
+  attachments,
 }: ChatPageProps) {
   // Ленивая инициализация, а не `?? conversations[0]` в рендере: запасного
   // значения у настоящих данных нет, а пустой список — законный ответ сервера.
@@ -535,6 +545,7 @@ export function ChatPage({
             // `eventMerge`, вопрос «что снять» — `confirmedClientIds`.
             onConfirmed={outbox.settle}
             telemetry={telemetry}
+            attachments={attachments}
           />
         )}
       </MessengerLayout>
@@ -584,6 +595,7 @@ interface ConversationPaneProps {
   onConfirmed: (clientMessageIds: ReadonlySet<string>) => void
   /** G3-008: приёмник best-effort телеметрии доставки. */
   telemetry: Pick<TelemetryClient, "record">
+  attachments?: AttachmentClient
 }
 
 /**
@@ -617,6 +629,7 @@ function ConversationPane({
   onFeedReady,
   onConfirmed,
   telemetry,
+  attachments,
 }: ConversationPaneProps) {
   /**
    * Лента этого окна — в ссылке, потому что публикации достаются обработчику,
@@ -674,6 +687,26 @@ function ConversationPane({
   const onPublication = useCallback(
     (payload: unknown) => {
       const message = adaptPublication(payload, currentUserId)
+
+      if (message !== null && attachmentCountOf(payload) > 0) {
+        // G4: сообщение с вложением. Голая публикация показала бы подпись
+        // без файла, а ссылка на файл в канал не едет (`attachmentCountOf`),
+        // поэтому за ним идёт история: тот же `startSync`, что у разрыва
+        // номеров, но без смены состояния соединения — расхождения нет, есть
+        // недостающее содержимое. Номер в ленту не кладётся заранее: сошедшаяся
+        // догрузка положит сообщение целиком, а не дважды.
+        void historyRef.current?.startSync()
+        if (message.authorId !== "me") {
+          playIncomingMessageSound()
+          telemetry.record({
+            type: "message_received",
+            occurredAt: new Date(),
+            messageId: message.id,
+            conversationId: conversation.id,
+          })
+        }
+        return
+      }
 
       if (message !== null) {
         historyRef.current?.acceptPublication(message)
@@ -806,6 +839,45 @@ function ConversationPane({
   useEffect(() => {
     historyRef.current = conversationHistory
   })
+
+  // G4: черновик вложения и отправка сообщения-вложения.
+  const attachmentDraft = useAttachmentDraft(attachments?.ops)
+  const draftValue = attachmentDraft.draft
+  const clearDraftIfReady = attachmentDraft.clearIfReady
+  // Тождество логической отправки живёт в ссылке и привязано к вложению: повтор
+  // после сбоя шлёт **тот же** `client_message_id` (D3), и сервер ответит `200`
+  // с тем же сообщением, а не заведёт второе.
+  const attachmentSendId = useRef<{ attachmentId: string; clientMessageId: string } | null>(null)
+  const sendAttachment = useCallback(
+    (caption: string) => {
+      if (attachments === undefined || draftValue.state !== "ready") return
+      const { attachmentId, kind } = draftValue
+      if (attachmentSendId.current?.attachmentId !== attachmentId) {
+        attachmentSendId.current = { attachmentId, clientMessageId: crypto.randomUUID() }
+      }
+      void attachments
+        .send({
+          conversationId: conversation.id,
+          clientMessageId: attachmentSendId.current.clientMessageId,
+          kind,
+          caption,
+          attachmentId,
+        })
+        .then((response) => {
+          clearDraftIfReady(attachmentId)
+          // Ответ кладётся тем же путём, что и публикация (`adaptMessage` →
+          // `acceptPublication`): второго способа слияния не заводится. Если
+          // публикация о том же сообщении уже пришла, дубль по номеру
+          // отбрасывает лента.
+          historyRef.current?.acceptPublication(adaptMessage(response, currentUserId, new Date()))
+        })
+        .catch(() => {
+          // Сбой отправки не стирает черновик: вложение остаётся `ready`, и
+          // повтор нажатия «Send» уйдёт с тем же тождеством.
+        })
+    },
+    [attachments, draftValue, conversation.id, currentUserId, clearDraftIfReady],
+  )
 
   /**
    * Лента говорит очереди, кто она, — и умолкает, когда её больше нет.
@@ -989,7 +1061,20 @@ function ConversationPane({
         `blocked` композера остаётся непроизведённой, и выдавать её за
         исполняемое правило не будем.
       */}
-      <MessageComposer recipientName={conversation.name} onSend={onSend} />
+      <MessageComposer
+        recipientName={conversation.name}
+        onSend={onSend}
+        attachment={
+          attachments === undefined
+            ? undefined
+            : {
+                draft: draftValue,
+                onPick: attachmentDraft.pick,
+                onClear: attachmentDraft.clear,
+                onSend: sendAttachment,
+              }
+        }
+      />
     </div>
   )
 }

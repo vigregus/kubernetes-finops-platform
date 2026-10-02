@@ -33,8 +33,16 @@ export function AttachmentBubble({ attachment, own }: AttachmentBubbleProps) {
     )
   }
 
+  // Готовый файл — ссылка на скачивание: предподписанный адрес с коротким
+  // сроком, поэтому открывается он сразу, а не сохраняется на потом.
+  const Shell = state === "ready" && attachment.url ? "a" : "div"
+  const link =
+    Shell === "a"
+      ? { href: attachment.url, target: "_blank", rel: "noopener noreferrer", "data-attachment-link": "" }
+      : {}
+
   return (
-    <div className={shell}>
+    <Shell className={shell} {...link}>
       <div
         className={clsx(
           "flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl",
@@ -58,6 +66,6 @@ export function AttachmentBubble({ attachment, own }: AttachmentBubbleProps) {
       )}
       {state === "rejected" && <Icon name="error_outline" size={18} className="flex-shrink-0 text-status-error" />}
       {state === "ready" && kind === "voice" && <Icon name="play_arrow" size={20} className="flex-shrink-0" />}
-    </div>
+    </Shell>
   )
 }

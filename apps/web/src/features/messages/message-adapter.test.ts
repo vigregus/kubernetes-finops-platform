@@ -13,7 +13,13 @@
 import { describe, expect, it } from "vitest"
 
 import type { Attachment as AttachmentDto, Message as MessageDto } from "../../api/generated"
-import { adaptMessage, adaptMessages, adaptPublication, adaptReadReceipt } from "./message-adapter"
+import {
+  adaptMessage,
+  adaptMessages,
+  adaptPublication,
+  adaptReadReceipt,
+  attachmentCountOf,
+} from "./message-adapter"
 
 const NOW = new Date("2026-09-20T18:00:00Z")
 const EN = { locale: "en-US", timeZone: "UTC" } as const
@@ -132,8 +138,29 @@ describe("вложение", () => {
     expect(of("text/plain")).toBe("file")
   })
 
+  it("имя, которое назвал отправитель, показывается как есть (G4)", () => {
+    const adapted = adapt(
+      message({ type: "file", attachments: [attachment({ fileName: "договор.pdf", contentType: "application/pdf" })] }),
+    )
+    expect(adapted.attachment?.name).toBe("договор.pdf")
+  })
+
+  it("превью картинки — сама ссылка; у файла превью нет", () => {
+    const image = adapt(
+      message({ type: "image", attachments: [attachment({ downloadUrl: "https://cdn/i" })] }),
+    )
+    const file = adapt(
+      message({
+        type: "file",
+        attachments: [attachment({ contentType: "application/pdf", downloadUrl: "https://cdn/f" })],
+      }),
+    )
+    expect(image.attachment?.previewUrl).toBe("https://cdn/i")
+    expect(file.attachment?.previewUrl).toBeUndefined()
+  })
+
   it("имя — название вида, а не выдуманное имя файла", () => {
-    // В `Attachment` нет ни `name`, ни `file_name` — подставляется вид.
+    // Когда отправитель имени не назвал, подставляется вид.
     const name = (contentType: string) =>
       adapt(message({ type: "file", attachments: [attachment({ contentType })] })).attachment?.name
 
@@ -417,5 +444,23 @@ describe("разбор квитанции собеседника", () => {
     expect(adaptReadReceipt(undefined)).toBeNull()
     expect(adaptReadReceipt("message.read")).toBeNull()
     expect(adaptReadReceipt([])).toBeNull()
+  })
+})
+
+describe("attachmentCountOf", () => {
+  it("читает число вложений из публикации message.created", () => {
+    expect(attachmentCountOf({ type: "message.created", payload: { attachment_count: 1 } })).toBe(1)
+  })
+
+  it.each([
+    [{ type: "message.created", payload: { text: "привет" } }],
+    [{ type: "message.created", payload: { attachment_count: 0 } }],
+    [{ type: "message.created", payload: { attachment_count: "1" } }],
+    [{ type: "message.created", payload: { attachment_count: 1.5 } }],
+    [{ type: "message.read", payload: { attachment_count: 1 } }],
+    [null],
+    ["строка"],
+  ])("нечисловое и чужое событие — ноль: %j", (event) => {
+    expect(attachmentCountOf(event)).toBe(0)
   })
 })

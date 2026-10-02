@@ -19,6 +19,7 @@ import type { BootState } from "./api/client";
 import type { SessionState } from "./features/auth/sessionState";
 import type { ResendVerificationEmail } from "./features/auth/components/EmailVerificationBanner";
 import type { TelemetryClient } from "./features/telemetry/telemetryClient";
+import type { AttachmentClient } from "./features/attachments/attachmentUpload";
 
 interface AppProps {
   session: SessionState;
@@ -127,6 +128,11 @@ interface AppProps {
    * цикла, `main.tsx`), им нужен только способ записать факт.
    */
   telemetry: Pick<TelemetryClient, "record">;
+  /**
+   * G4: вложения. Необязательно: без него композер остаётся прежним,
+   * только текст, — так же будет, если у стенда вложения выключены.
+   */
+  attachments?: AttachmentClient;
 }
 
 /** Состояние готовности: данные `/me` и списка бесед в одном снимке. */
@@ -157,6 +163,7 @@ export function App({
   issueTicket,
   createCentrifuge,
   telemetry,
+  attachments,
 }: AppProps) {
   const state = useSyncExternalStore(session.subscribe, session.getSnapshot);
 
@@ -208,6 +215,7 @@ export function App({
           issueTicket={issueTicket}
           createCentrifuge={createCentrifuge}
           telemetry={telemetry}
+          attachments={attachments}
         />
       );
   }
@@ -227,6 +235,7 @@ interface ReadyScreenProps {
   issueTicket: RealtimeTicketIssuer;
   createCentrifuge?: CentrifugeFactory;
   telemetry: Pick<TelemetryClient, "record">;
+  attachments?: AttachmentClient;
 }
 
 function ReadyScreen({
@@ -243,6 +252,7 @@ function ReadyScreen({
   issueTicket,
   createCentrifuge,
   telemetry,
+  attachments,
 }: ReadyScreenProps) {
   const viewer = useMemo(() => adaptMe(state.account), [state.account]);
 
@@ -298,6 +308,7 @@ function ReadyScreen({
       issueTicket={issueTicket}
       createCentrifuge={createCentrifuge}
       telemetry={telemetry}
+      attachments={attachments}
     />
   );
 }

@@ -133,7 +133,10 @@ function attachmentOf(dto: MessageDto, attachment: AttachmentDto): MessageAttach
 
   return {
     kind,
-    name: ATTACHMENT_NAME[kind],
+    // Имя, которое назвал отправитель (`file_name`, G4), а когда его нет —
+    // название **вида**: у вложений без имени (и у записей до G4) выдуманного
+    // имени по-прежнему не появляется.
+    name: attachment.fileName ?? ATTACHMENT_NAME[kind],
 
     /**
      * `state: "ready"` — это **не** «мы знаем, что проверка прошла», а «нет
@@ -165,6 +168,11 @@ function attachmentOf(dto: MessageDto, attachment: AttachmentDto): MessageAttach
     // показа и не годится для хранения. В поле модели она попадает как есть:
     // другого адреса у клиента нет, а выдумать постоянный он не может.
     url: attachment.downloadUrl,
+
+    // Превью картинки — сама ссылка: миниатюр в этом срезе нет (следующий
+    // срез G4), и браузер ужимает оригинал (`max-h-72` у пузыря). Без этого
+    // поля `<img>` рисовался без `src` — пустой рамкой.
+    ...(kind === "image" ? { previewUrl: attachment.downloadUrl } : {}),
 
     // Длительность приходит в миллисекундах, а модель и пузырь считают в
     // секундах. Усечение, а не округление: 14.8 с — это четырнадцать секунд
@@ -451,4 +459,22 @@ export function adaptReadReceipt(event: unknown): ReadReceipt | null {
     ...(readSeq === undefined ? {} : { readSeq }),
     ...(deliveredSeq === undefined ? {} : { deliveredSeq }),
   }
+}
+
+/**
+ * Сколько вложений несёт публикация `message.created` (G4).
+ *
+ * Публикация вложений **не несёт**: ссылка на скачивание живёт минуты и
+ * выдаётся только тому, кто прошёл проверку доступа, — то есть REST'ом, а
+ * не каналом (`adaptPublication` выше, граница «attachment»). В канал уезжает
+ * лишь число (`payload.attachment_count`, `message.content.v1`), и по нему
+ * клиент решает, достаточно ли голой публикации или за сообщением надо идти
+ * в историю.
+ */
+export function attachmentCountOf(event: unknown): number {
+  if (!isRecord(event) || event.type !== "message.created") return 0
+  const payload = event.payload
+  if (!isRecord(payload)) return 0
+  const count = payload.attachment_count
+  return typeof count === "number" && Number.isInteger(count) && count > 0 ? count : 0
 }
