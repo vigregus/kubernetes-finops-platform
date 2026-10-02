@@ -349,7 +349,7 @@ services:
     terminationGracePeriodSeconds: 30
     image:
       # Заполняется тегом образа, в котором этот модуль уже есть.
-      spec: PLACEHOLDER_IMAGE_SPEC
+      spec: ghcr.io/vigregus/messenger-api:9a1f3ff593e8fa9aa07a46e328cbd415aac7876e
     resources:
       requests: {cpu: 25m, memory: 128Mi}
       # 512Mi, а не 256: сканер получает файл целиком (до 25 МиБ), и запас
