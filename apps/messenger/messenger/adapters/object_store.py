@@ -38,6 +38,14 @@ class ObjectStoreSettings:
     bucket: str = "messenger-attachments"
     region: str = "us-east-1"
     timeout_seconds: float = 10.0
+    # Префикс **в адресе ссылки**, которого нет в подписи: шлюз снимает его
+    # (`URLRewrite`) и отдаёт MinIO путь без него. Так браузер ходит за
+    # файлами на тот же origin, что и страница (`app.finops.local/storage/…`),
+    # и ему не нужно доверять ещё одному хосту: подгрузка картинок фоном
+    # не умеет спрашивать про сертификат, и на отдельном `s3.finops.local` с
+    # локальным CA они были пустой рамкой. Подпись считается от пути **после**
+    # снятия префикса — того, что увидит MinIO.
+    public_path_prefix: str = ""
 
     @classmethod
     def from_env(cls) -> ObjectStoreSettings | None:
@@ -58,6 +66,7 @@ class ObjectStoreSettings:
             access_key=access,
             secret_key=secret,
             bucket=os.getenv("S3_BUCKET", "messenger-attachments"),
+            public_path_prefix=os.getenv("S3_PUBLIC_PATH_PREFIX", "").rstrip("/"),
         )
 
 
@@ -144,7 +153,10 @@ class ObjectStore:
         signature = hmac.new(
             _signing_key(s.secret_key, date, s.region), string_to_sign.encode(), hashlib.sha256
         ).hexdigest()
-        return f"{s.public_endpoint}{path}?{canonical_query}&X-Amz-Signature={signature}"
+        return (
+            f"{s.public_endpoint}{s.public_path_prefix}{path}"
+            f"?{canonical_query}&X-Amz-Signature={signature}"
+        )
 
     def presign_put(
         self, key: str, content_type: str, expires_seconds: int, now: datetime | None = None

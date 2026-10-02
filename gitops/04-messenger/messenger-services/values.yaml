@@ -81,7 +81,12 @@ dependencies:
     # файла, удаление). Служба `minio` создаётся оператором MinIO.
     internalEndpoint: http://minio.messenger.svc.cluster.local:80
     # Публичный: от него считается подпись ссылок, которые получает браузер.
-    publicEndpoint: https://s3.finops.local
+    # Тот же origin, что у страницы, а не `s3.finops.local`: путь `/storage`
+    # шлюз ведёт в MinIO (`messenger-routes`), и браузеру не нужно доверять
+    # второму хосту с локальным CA — картинки, грузимые фоном, не умеют
+    # спрашивать про сертификат.
+    publicEndpoint: https://app.finops.local
+    publicPathPrefix: /storage
     bucket: messenger-attachments
     # Secret с `access-key`/`secret-key` — производный от
     # `messenger-minio-env`, его делает джоб messenger-secrets-bootstrap.

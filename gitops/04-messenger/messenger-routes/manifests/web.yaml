@@ -45,6 +45,26 @@ spec:
           name: api
           port: 80
           weight: 1
+    # Объектное хранилище на том же origin (G4). Предподписанные ссылки на
+    # вложения ведут сюда, и префикс снимается: MinIO считает подпись от
+    # пути `/<bucket>/<key>`, а не `/storage/<bucket>/<key>`. Заголовок
+    # `Host` остаётся `app.finops.local` — он и подписан.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /storage
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /
+      backendRefs:
+        - group: ""
+          kind: Service
+          name: minio
+          port: 80
+          weight: 1
     # Всё остальное — статика. SPA-fallback на index.html живёт внутри
     # образа: `/callback` и любой неизвестный путь отдаёт index.html,
     # `/healthz` — статический ответ самого nginx.
