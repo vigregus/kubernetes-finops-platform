@@ -133,7 +133,10 @@ function attachmentOf(dto: MessageDto, attachment: AttachmentDto): MessageAttach
 
   return {
     kind,
-    name: ATTACHMENT_NAME[kind],
+    // Имя, которое назвал отправитель (`file_name`, G4), а когда его нет —
+    // название **вида**: у вложений без имени (и у записей до G4) выдуманного
+    // имени по-прежнему не появляется.
+    name: attachment.fileName ?? ATTACHMENT_NAME[kind],
 
     /**
      * `state: "ready"` — это **не** «мы знаем, что проверка прошла», а «нет
@@ -165,6 +168,11 @@ function attachmentOf(dto: MessageDto, attachment: AttachmentDto): MessageAttach
     // показа и не годится для хранения. В поле модели она попадает как есть:
     // другого адреса у клиента нет, а выдумать постоянный он не может.
     url: attachment.downloadUrl,
+
+    // Превью картинки — сама ссылка: миниатюр в этом срезе нет (следующий
+    // срез G4), и браузер ужимает оригинал (`max-h-72` у пузыря). Без этого
+    // поля `<img>` рисовался без `src` — пустой рамкой.
+    ...(kind === "image" ? { previewUrl: attachment.downloadUrl } : {}),
 
     // Длительность приходит в миллисекундах, а модель и пузырь считают в
     // секундах. Усечение, а не округление: 14.8 с — это четырнадцать секунд

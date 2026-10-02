@@ -81,7 +81,22 @@ export function MessageBubble({ message, onRetry }: MessageBubbleProps) {
 
   const body =
     message.kind === "attachment" && message.attachment ? (
-      <AttachmentBubble attachment={message.attachment} own={isOwn} />
+      <>
+        <AttachmentBubble attachment={message.attachment} own={isOwn} />
+        {message.text && (
+          // Подпись к вложению (G4): текст, который человек набрал вместе с
+          // файлом. Без неё он исчезал бы — сообщение показывало бы только файл.
+          <p
+            data-attachment-caption
+            className={clsx(
+              "mt-1 max-w-full whitespace-pre-wrap break-words text-sm",
+              isOwn ? "text-right text-text-charcoal" : "text-text-charcoal",
+            )}
+          >
+            {message.text}
+          </p>
+        )}
+      </>
     ) : (
       <div
         className={clsx(

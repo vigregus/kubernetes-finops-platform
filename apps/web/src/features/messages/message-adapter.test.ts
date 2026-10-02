@@ -138,8 +138,29 @@ describe("вложение", () => {
     expect(of("text/plain")).toBe("file")
   })
 
+  it("имя, которое назвал отправитель, показывается как есть (G4)", () => {
+    const adapted = adapt(
+      message({ type: "file", attachments: [attachment({ fileName: "договор.pdf", contentType: "application/pdf" })] }),
+    )
+    expect(adapted.attachment?.name).toBe("договор.pdf")
+  })
+
+  it("превью картинки — сама ссылка; у файла превью нет", () => {
+    const image = adapt(
+      message({ type: "image", attachments: [attachment({ downloadUrl: "https://cdn/i" })] }),
+    )
+    const file = adapt(
+      message({
+        type: "file",
+        attachments: [attachment({ contentType: "application/pdf", downloadUrl: "https://cdn/f" })],
+      }),
+    )
+    expect(image.attachment?.previewUrl).toBe("https://cdn/i")
+    expect(file.attachment?.previewUrl).toBeUndefined()
+  })
+
   it("имя — название вида, а не выдуманное имя файла", () => {
-    // В `Attachment` нет ни `name`, ни `file_name` — подставляется вид.
+    // Когда отправитель имени не назвал, подставляется вид.
     const name = (contentType: string) =>
       adapt(message({ type: "file", attachments: [attachment({ contentType })] })).attachment?.name
 
