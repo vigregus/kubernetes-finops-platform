@@ -452,3 +452,21 @@ export function adaptReadReceipt(event: unknown): ReadReceipt | null {
     ...(deliveredSeq === undefined ? {} : { deliveredSeq }),
   }
 }
+
+/**
+ * Сколько вложений несёт публикация `message.created` (G4).
+ *
+ * Публикация вложений **не несёт**: ссылка на скачивание живёт минуты и
+ * выдаётся только тому, кто прошёл проверку доступа, — то есть REST'ом, а
+ * не каналом (`adaptPublication` выше, граница «attachment»). В канал уезжает
+ * лишь число (`payload.attachment_count`, `message.content.v1`), и по нему
+ * клиент решает, достаточно ли голой публикации или за сообщением надо идти
+ * в историю.
+ */
+export function attachmentCountOf(event: unknown): number {
+  if (!isRecord(event) || event.type !== "message.created") return 0
+  const payload = event.payload
+  if (!isRecord(payload)) return 0
+  const count = payload.attachment_count
+  return typeof count === "number" && Number.isInteger(count) && count > 0 ? count : 0
+}

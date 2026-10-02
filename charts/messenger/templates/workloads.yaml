@@ -187,6 +187,30 @@ spec:
                   name: {{ $.Values.dependencies.centrifugo.secret }}
                   key: CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY
             {{- end }}
+            {{- if $svc.objectStorage }}
+            # Объектное хранилище (G4, вложения). Отдельный признак, а не
+            # часть `backendEnv`, по тому же закрытому умолчанию: ключи
+            # хранилища нужны двум нагрузкам из шести, и остальные не должны
+            # их видеть. Два адреса — по назначению: внутренний для запросов
+            # сервера, публичный для предподписанных ссылок, которые идут
+            # браузеру (от него считается подпись, `adapters/object_store.py`).
+            - name: S3_ENDPOINT_INTERNAL
+              value: {{ $.Values.dependencies.objectStorage.internalEndpoint | quote }}
+            - name: S3_ENDPOINT_PUBLIC
+              value: {{ $.Values.dependencies.objectStorage.publicEndpoint | quote }}
+            - name: S3_BUCKET
+              value: {{ $.Values.dependencies.objectStorage.bucket | quote }}
+            - name: S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.dependencies.objectStorage.secret }}
+                  key: access-key
+            - name: S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.dependencies.objectStorage.secret }}
+                  key: secret-key
+            {{- end }}
             {{- with $svc.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

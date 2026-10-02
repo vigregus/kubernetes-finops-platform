@@ -4,6 +4,7 @@ import "./index.css";
 import App from "./App.tsx";
 import { createApiClient, withUnwrappedErrors } from "./api/client";
 import {
+  AttachmentsApi,
   AuthApi,
   ConversationsApi,
   MessagesApi,
@@ -14,6 +15,7 @@ import {
 import { createRealtimeTicketIssuer } from "./api/realtimeToken";
 import { bootStateOf, completeLogin } from "./features/auth/callback";
 import { createTelemetryClient } from "./features/telemetry/telemetryClient";
+import type { AttachmentClient } from "./features/attachments/attachmentUpload";
 import { ensureDeviceId, loadDeviceId, saveDeviceId } from "./features/auth/deviceId";
 import { CALLBACK_PATH } from "./features/auth/session";
 import { createSessionState } from "./features/auth/sessionState";
@@ -51,6 +53,7 @@ const authApi = withUnwrappedErrors(new AuthApi(client.configuration));
 const conversationsApi = withUnwrappedErrors(new ConversationsApi(client.configuration));
 const messagesApi = withUnwrappedErrors(new MessagesApi(client.configuration));
 const usersApi = withUnwrappedErrors(new UsersApi(client.configuration));
+const attachmentsApi = withUnwrappedErrors(new AttachmentsApi(client.configuration));
 
 /**
  * G3-008, одна константа на приложение — тем же доводом, что у
@@ -157,6 +160,43 @@ const sendMessage: SendMessage = (request) =>
       payload: { text: request.text },
     },
   });
+
+/**
+ * Вложения (G4): операции рядом с остальными клиентами API, по той же причине —
+ * у панели нет ни адреса, ни токена.
+ *
+ * `put` — **не** через клиент API, и это главное в этом блоке: ссылка в
+ * хранилище уже подписана, и `Authorization` или cookie на ней — чужие для
+ * него заголовки. `credentials: "omit"` назван явно, а не оставлен умолчанию:
+ * `PUT` идёт на другой origin (`s3.finops.local`), и приложенная cookie была
+ * бы утечкой, а не помощью.
+ */
+const attachmentClient: AttachmentClient = {
+  ops: {
+    create: (request) =>
+      attachmentsApi.createAttachment({
+        createAttachmentRequest: {
+          contentType: request.contentType,
+          sizeBytes: request.sizeBytes,
+          fileName: request.fileName,
+        },
+      }),
+    complete: (attachmentId) => attachmentsApi.completeAttachment({ attachmentId }),
+    status: (attachmentId) => attachmentsApi.getAttachmentStatus({ attachmentId }),
+    put: (url, headers, body) =>
+      fetch(url, { method: "PUT", headers, body, credentials: "omit", mode: "cors" }),
+  },
+  send: (request) =>
+    messagesApi.sendMessage({
+      conversationId: request.conversationId,
+      sendMessageRequest: {
+        clientMessageId: request.clientMessageId,
+        type: request.kind === "image" ? SendMessageRequestTypeEnum.Image : SendMessageRequestTypeEnum.File,
+        payload: request.caption === "" ? {} : { text: request.caption },
+        attachmentIds: [request.attachmentId],
+      },
+    }),
+};
 
 /**
  * Поиск человека по адресу (`GET /users?email=`) — операция рядом с прочими, и по
@@ -286,6 +326,7 @@ createRoot(document.getElementById("root")!).render(
       readCentrifugoUrl={readCentrifugoUrl}
       issueTicket={issueTicket}
       telemetry={telemetryClient}
+      attachments={attachmentClient}
     />
   </StrictMode>,
 );

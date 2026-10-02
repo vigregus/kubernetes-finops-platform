@@ -111,6 +111,33 @@ spec:
                 echo "messenger-minio-env: создан"
               fi
 
+              # Производный секрет для приложения: те же учётные данные, но
+              # плоскими ключами, потому что `config.env` — файл оболочки, и
+              # `secretKeyRef` его не читает. Берётся из `messenger-minio-env`
+              # при **каждом** синке, если производного ещё нет, — так он
+              # появляется и на кластерах, где исходный секрет уже стоит.
+              #
+              # Корневая учётная запись MinIO у приложения — названный долг
+              # локального стенда: настоящий путь — отдельный пользователь
+              # с политикой только на бакет `messenger-attachments`, и в
+              # облаке его заменит IAM-роль, а не ключи.
+              if have messenger-minio-api; then
+                echo "messenger-minio-api: уже есть, не трогаю"
+              else
+                kubectl -n messenger get secret messenger-minio-env \
+                  -o jsonpath='{.data.config\.env}' | base64 -d > /tmp/minio-env.sh
+                user=$(sed -n 's/^export MINIO_ROOT_USER=//p' /tmp/minio-env.sh)
+                pass=$(sed -n 's/^export MINIO_ROOT_PASSWORD=//p' /tmp/minio-env.sh)
+                [ -n "$user" ] && [ -n "$pass" ] || {
+                  echo "в messenger-minio-env нет учётных данных" >&2
+                  exit 1
+                }
+                kubectl -n messenger create secret generic messenger-minio-api \
+                  --from-literal=access-key="$user" \
+                  --from-literal=secret-key="$pass"
+                echo "messenger-minio-api: создан"
+              fi
+
               if have messenger-centrifugo; then
                 echo "messenger-centrifugo: уже есть, не трогаю"
               else

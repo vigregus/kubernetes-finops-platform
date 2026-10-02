@@ -76,6 +76,16 @@ dependencies:
   centrifugo:
     apiUrl: http://messenger-centrifugo.messenger.svc.cluster.local:9000/api
     secret: messenger-centrifugo
+  objectStorage:
+    # Внутренний адрес: запросы сервера (проверка объекта, чтение начала
+    # файла, удаление). Служба `minio` создаётся оператором MinIO.
+    internalEndpoint: http://minio.messenger.svc.cluster.local:80
+    # Публичный: от него считается подпись ссылок, которые получает браузер.
+    publicEndpoint: https://s3.finops.local
+    bucket: messenger-attachments
+    # Secret с `access-key`/`secret-key` — производный от
+    # `messenger-minio-env`, его делает джоб messenger-secrets-bootstrap.
+    secret: messenger-minio-api
 
 web:
   # Откуда приходит страница. Проверяется на точках обмена: cookie
@@ -109,6 +119,9 @@ services:
     # ложь, и «у web снято» не должно быть следствием забытого ключа, а
     # «у api есть» — следствием прежнего безусловного поведения шаблона.
     backendEnv: true
+    # Ключи объектного хранилища: API выдаёт предподписанные ссылки и
+    # проверяет загруженный объект (G4).
+    objectStorage: true
     # Метрики снимаются со службы: у нагрузки есть входящие запросы.
     # Умолчание у признака — истина, поэтому true здесь нужен не для
     # работы, а чтобы снятие ключа у соседа не выглядело нормой.
@@ -311,6 +324,37 @@ services:
     resources:
       requests: {cpu: 50m, memory: 128Mi}
       limits: {cpu: "1", memory: 512Mi}
+
+  attachment-processor:
+    # G4: обработка вложений (сверка сигнатуры, сканер) и уборка
+    # неприкреплённых. Нагрузка включается вместе с образом, где есть модуль
+    # `messenger.workers.attachment_processor`: прежний образ упал бы на
+    # импорте, как и у соседей выше.
+    enabled: true
+    component: worker
+    # Kafka не нужна: воркер ходит только в базу и в хранилище. База и Redis
+    # — весь backend-набор, как у presence-sweeper.
+    backendEnv: true
+    objectStorage: true
+    metrics: true
+    metricsPort: 9100
+    command: ["python", "-m", "messenger.workers.attachment_processor"]
+    replicas: 1
+    minAvailable: 0
+    # Ниже API и доставки: при нехватке CPU планировщик вытеснит сначала
+    # обработку файлов (`03-v1-scope.md`, «лестница деградации»). Вложение
+    # от этого становится ready позже, а сообщения не отстают.
+    priorityClass: messenger-background
+    preStopSeconds: 0
+    terminationGracePeriodSeconds: 30
+    image:
+      # Заполняется тегом образа, в котором этот модуль уже есть.
+      spec: PLACEHOLDER_IMAGE_SPEC
+    resources:
+      requests: {cpu: 25m, memory: 128Mi}
+      # 512Mi, а не 256: сканер получает файл целиком (до 25 МиБ), и запас
+      # нужен под самый большой разрешённый.
+      limits: {cpu: 500m, memory: 512Mi}
 
   presence-sweeper:
     # Включена коммитом продвижения, и порядок тут был не формальностью —

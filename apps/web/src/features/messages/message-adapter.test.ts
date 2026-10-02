@@ -13,7 +13,13 @@
 import { describe, expect, it } from "vitest"
 
 import type { Attachment as AttachmentDto, Message as MessageDto } from "../../api/generated"
-import { adaptMessage, adaptMessages, adaptPublication, adaptReadReceipt } from "./message-adapter"
+import {
+  adaptMessage,
+  adaptMessages,
+  adaptPublication,
+  adaptReadReceipt,
+  attachmentCountOf,
+} from "./message-adapter"
 
 const NOW = new Date("2026-09-20T18:00:00Z")
 const EN = { locale: "en-US", timeZone: "UTC" } as const
@@ -417,5 +423,23 @@ describe("разбор квитанции собеседника", () => {
     expect(adaptReadReceipt(undefined)).toBeNull()
     expect(adaptReadReceipt("message.read")).toBeNull()
     expect(adaptReadReceipt([])).toBeNull()
+  })
+})
+
+describe("attachmentCountOf", () => {
+  it("читает число вложений из публикации message.created", () => {
+    expect(attachmentCountOf({ type: "message.created", payload: { attachment_count: 1 } })).toBe(1)
+  })
+
+  it.each([
+    [{ type: "message.created", payload: { text: "привет" } }],
+    [{ type: "message.created", payload: { attachment_count: 0 } }],
+    [{ type: "message.created", payload: { attachment_count: "1" } }],
+    [{ type: "message.created", payload: { attachment_count: 1.5 } }],
+    [{ type: "message.read", payload: { attachment_count: 1 } }],
+    [null],
+    ["строка"],
+  ])("нечисловое и чужое событие — ноль: %j", (event) => {
+    expect(attachmentCountOf(event)).toBe(0)
   })
 })

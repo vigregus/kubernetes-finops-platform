@@ -72,6 +72,14 @@ spec:
           manifestTargets:
             helm:
               spec: services.presence-sweeper.image.spec
+        - alias: attachmentprocessor
+          imageName: ghcr.io/vigregus/messenger-api
+          commonUpdateSettings:
+            updateStrategy: newest-build
+            allowTags: "regexp:^[0-9a-f]{40}$"
+          manifestTargets:
+            helm:
+              spec: services.attachment-processor.image.spec
         - alias: web
           imageName: ghcr.io/vigregus/messenger-web
           commonUpdateSettings:
