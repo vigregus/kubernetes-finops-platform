@@ -20,6 +20,7 @@ import type { SessionState } from "./features/auth/sessionState";
 import type { ResendVerificationEmail } from "./features/auth/components/EmailVerificationBanner";
 import type { TelemetryClient } from "./features/telemetry/telemetryClient";
 import type { AttachmentClient } from "./features/attachments/attachmentUpload";
+import type { PushSubscriptionApi } from "./features/notifications/pushClient";
 
 interface AppProps {
   session: SessionState;
@@ -133,6 +134,8 @@ interface AppProps {
    * только текст, — так же будет, если у стенда вложения выключены.
    */
   attachments?: AttachmentClient;
+  /** Подписка Web Push (G4). Нет — баннера уведомлений нет. */
+  pushSubscriptions?: PushSubscriptionApi;
 }
 
 /** Состояние готовности: данные `/me` и списка бесед в одном снимке. */
@@ -164,6 +167,7 @@ export function App({
   createCentrifuge,
   telemetry,
   attachments,
+  pushSubscriptions,
 }: AppProps) {
   const state = useSyncExternalStore(session.subscribe, session.getSnapshot);
 
@@ -216,6 +220,7 @@ export function App({
           createCentrifuge={createCentrifuge}
           telemetry={telemetry}
           attachments={attachments}
+          pushSubscriptions={pushSubscriptions}
         />
       );
   }
@@ -236,6 +241,8 @@ interface ReadyScreenProps {
   createCentrifuge?: CentrifugeFactory;
   telemetry: Pick<TelemetryClient, "record">;
   attachments?: AttachmentClient;
+  /** Подписка Web Push (G4). Нет — баннера уведомлений нет. */
+  pushSubscriptions?: PushSubscriptionApi;
 }
 
 function ReadyScreen({
@@ -253,6 +260,7 @@ function ReadyScreen({
   createCentrifuge,
   telemetry,
   attachments,
+  pushSubscriptions,
 }: ReadyScreenProps) {
   const viewer = useMemo(() => adaptMe(state.account), [state.account]);
 
@@ -309,6 +317,7 @@ function ReadyScreen({
       createCentrifuge={createCentrifuge}
       telemetry={telemetry}
       attachments={attachments}
+      pushSubscriptions={pushSubscriptions}
     />
   );
 }
