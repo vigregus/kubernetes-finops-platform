@@ -38,6 +38,35 @@ spec:
   redisConfig:
     additionalRedisConfig: messenger-redis-config
 
+  # Проверки Redis оператор по умолчанию строит так: `redis-cli -h $(hostname)
+  # ping` с таймаутом 1 с и тремя провалами. Имя пода — это DNS, и на узле,
+  # который подтормаживает, проверка не укладывалась в секунду; а при замирании
+  # узла целиком проваливались три подряд. Итог: 36 перезапусков за неделю, хотя
+  # сам Redis простаивал (7 МиБ). Здесь: адрес без DNS (`127.0.0.1`), таймаут
+  # 5 с, а живость терпит около двух минут (12 провалов по 10 с).
+  livenessProbe:
+    exec:
+      command:
+        - sh
+        - -ec
+        - 'RESP="$(redis-cli -h 127.0.0.1 -p ${REDIS_PORT} ping)"; [ "$RESP" = "PONG" ]'
+    initialDelaySeconds: 1
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 12
+    successThreshold: 1
+  readinessProbe:
+    exec:
+      command:
+        - sh
+        - -ec
+        - 'RESP="$(redis-cli -h 127.0.0.1 -p ${REDIS_PORT} ping)"; [ "$RESP" = "PONG" ]'
+    initialDelaySeconds: 1
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+    successThreshold: 1
+
   # До этого Redis не наблюдался вообще: ни memory/evictions/ops/clients,
   # ни keyspace hit-rate — только слово "Redis" в карте дашбордов. Оператор
   # заводит sidecar с oliver006/redis_exporter сам, порт 9121 — снимает его

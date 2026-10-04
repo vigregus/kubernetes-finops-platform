@@ -24,6 +24,17 @@ resources:
     cpu: 200m
     memory: 128Mi
 
+# Терпит замирание узла до двух минут (12 провалов по 10 с) — по той же
+# причине, что и база: на одном узле minikube пауза виртуальной машины Docker
+# проваливает все проверки разом, и kubelet убивал сток писем (5 перезапусков).
+livenessProbe:
+  enabled: true
+  initialDelaySeconds: 2
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 12
+  successThreshold: 1
+
 service:
   smtp:
     # 1025, а не 25: порты ниже 1024 требуют прав, которых у пода нет,
