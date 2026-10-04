@@ -159,6 +159,36 @@ describe("вложение", () => {
     expect(file.attachment?.previewUrl).toBeUndefined()
   })
 
+  it("в ленте показывается миниатюра, оригинал остаётся по ссылке; размеры резервируют место", () => {
+    const adapted = adapt(
+      message({
+        type: "image",
+        attachments: [
+          attachment({
+            downloadUrl: "https://cdn/original",
+            thumbnailUrl: "https://cdn/thumb",
+            width: 2000,
+            height: 1000,
+          }),
+        ],
+      }),
+    )
+    expect(adapted.attachment).toMatchObject({
+      previewUrl: "https://cdn/thumb",
+      url: "https://cdn/original",
+      width: 2000,
+      height: 1000,
+    })
+  })
+
+  it("у картинки без миниатюры (до их появления) показывается оригинал", () => {
+    const adapted = adapt(
+      message({ type: "image", attachments: [attachment({ downloadUrl: "https://cdn/original" })] }),
+    )
+    expect(adapted.attachment?.previewUrl).toBe("https://cdn/original")
+    expect(adapted.attachment?.width).toBeUndefined()
+  })
+
   it("имя — название вида, а не выдуманное имя файла", () => {
     // Когда отправитель имени не назвал, подставляется вид.
     const name = (contentType: string) =>

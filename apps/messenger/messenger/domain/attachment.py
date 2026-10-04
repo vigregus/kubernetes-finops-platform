@@ -38,6 +38,8 @@ class RejectionCode(str, Enum):
     STORAGE_ERROR = "storage_error"
     # Голосовое с неправдоподобной длительностью или битрейтом (`ATT-004`).
     INVALID_AUDIO = "invalid_audio"
+    # Изображение, которое не разбирается или слишком велико по пикселям.
+    INVALID_IMAGE = "invalid_image"
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +135,53 @@ def validate_init(content_type: str, size_bytes: int) -> AllowedType:
     return allowed
 
 
+# Миниатюра (G4): сторона по большей стороне и предел по числу пикселей.
+# Предел нужен потому, что файл в десять мегабайт может распаковаться в
+# гигабайты («бомба сжатия»): воркер упирается в память раньше, чем в размер.
+THUMBNAIL_MAX_PX = 480
+MAX_SOURCE_PIXELS = 25_000_000
+
+
+def fit_within(width: int, height: int, limit: int) -> tuple[int, int]:
+    """Размер миниатюры: большая сторона не выше `limit`, пропорции сохранены.
+
+    Не увеличивает: маленькая картинка остаётся маленькой, увеличение дало бы
+    больше байт и худшее качество. Сторона не становится нулём — у очень
+    вытянутого изображения это был бы невозможный размер.
+    """
+    longest = max(width, height)
+    if longest <= limit:
+        return width, height
+    scale = limit / longest
+    return max(1, round(width * scale)), max(1, round(height * scale))
+
+
+def thumbnail_key(object_key: str) -> str:
+    """Ключ миниатюры строит сервер из ключа объекта, как и сам ключ."""
+    return f"{object_key}.thumb"
+
+
+class UnreadableImage(Exception):
+    """Файл прошёл сверку сигнатуры, но как изображение не разбирается."""
+
+
+@dataclass(frozen=True, slots=True)
+class Thumbnail:
+    data: bytes
+    content_type: str
+    width: int
+    height: int
+    # Размеры оригинала **как он показывается**: после поворота по EXIF.
+    source_width: int
+    source_height: int
+
+
+class Thumbnailer(Protocol):
+    def make(self, content: bytes) -> Thumbnail:
+        """Синхронная и тяжёлая по CPU; воркер зовёт её вне цикла событий."""
+        ...
+
+
 class InvalidVoice(Exception):
     """Длительность отсутствует, вне пределов или не сходится с размером."""
 
@@ -218,6 +267,9 @@ class Attachment:
     attempts: int = 0
     duration_ms: int | None = None
     bitrate_kbps: int | None = None
+    thumbnail_key: str | None = None
+    width: int | None = None
+    height: int | None = None
 
     @property
     def kind(self) -> MessageKind:

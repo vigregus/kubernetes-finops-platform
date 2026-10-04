@@ -47,3 +47,21 @@ def test_имя_файла_с_кириллицей_в_rfc6266():
     disposition = parse_qs(urlsplit(url).query)["response-content-disposition"][0]
     assert "filename*=UTF-8''" in disposition
     assert 'filename="' in disposition
+
+
+def test_запись_сервера_подписывает_хэш_тела_и_тип():
+    import hashlib
+
+    data = b"thumbnail-bytes"
+    headers = store()._headers(
+        "PUT", "k", {"content-type": "image/webp"}, now=NOW,
+        payload_sha256=hashlib.sha256(data).hexdigest(),
+    )
+    assert headers["x-amz-content-sha256"] == hashlib.sha256(data).hexdigest()
+    assert "content-type" in headers["authorization"]
+    # Другое тело — другая подпись: подмена содержимого по пути не пройдёт.
+    other = store()._headers(
+        "PUT", "k", {"content-type": "image/webp"}, now=NOW,
+        payload_sha256=hashlib.sha256(b"other").hexdigest(),
+    )
+    assert headers["authorization"] != other["authorization"]

@@ -131,3 +131,26 @@ def test_голосовое_сообщение_требует_ровно_одн�
         validate_attachments(MessageKind.VOICE, 0)
     with pytest.raises(ValueError):
         validate_attachments(MessageKind.VOICE, 2)
+
+
+# --- миниатюры (G4) -------------------------------------------------------------
+
+
+def test_размер_миниатюры_вписывается_в_предел_и_сохраняет_пропорции():
+    assert domain.fit_within(4000, 3000, 480) == (480, 360)
+    assert domain.fit_within(3000, 4000, 480) == (360, 480)
+    assert domain.fit_within(1000, 1000, 480) == (480, 480)
+
+
+def test_малое_изображение_не_увеличивается():
+    assert domain.fit_within(100, 50, 480) == (100, 50)
+    assert domain.fit_within(480, 480, 480) == (480, 480)
+
+
+def test_вытянутое_изображение_не_схлопывается_в_ноль():
+    # 10000x10 → сторона 480 даёт высоту меньше пикселя: не ноль, а единица.
+    assert domain.fit_within(10_000, 10, 480) == (480, 1)
+
+
+def test_ключ_миниатюры_строится_из_ключа_объекта():
+    assert domain.thumbnail_key("u/1/2") == "u/1/2.thumb"

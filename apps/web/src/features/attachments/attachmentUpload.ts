@@ -150,7 +150,9 @@ export function failureMessage(failure: UploadFailure): string {
           ? "The file doesn't match its type."
           : failure.code === "invalid_audio"
             ? "This recording can't be sent. Try recording again."
-            : "This file was rejected."
+            : failure.code === "invalid_image"
+              ? "This image can't be read or is too large."
+              : "This file was rejected."
   }
 }
 

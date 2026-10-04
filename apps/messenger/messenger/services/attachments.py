@@ -9,7 +9,9 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -27,6 +29,8 @@ from messenger.domain.attachment import (
     RejectionCode,
     Scanner,
     ScanVerdict,
+    Thumbnailer,
+    UnreadableImage,
 )
 from messenger.domain.errors import Reason
 from messenger.domain.ids import AttachmentId, MessageId, UserId
@@ -218,6 +222,7 @@ async def status(
 class AttachmentView:
     attachment: Attachment
     download_url: str
+    thumbnail_url: str | None = None
 
 
 async def views_for_messages(
@@ -245,6 +250,15 @@ async def views_for_messages(
                     file_name=item.file_name,
                     content_type=item.content_type,
                 ),
+                thumbnail_url=(
+                    store.presign_get(
+                        item.thumbnail_key,
+                        domain.DOWNLOAD_URL_TTL_SECONDS,
+                        content_type="image/webp",
+                    )
+                    if item.thumbnail_key
+                    else None
+                ),
             )
             for item in items
         ]
@@ -267,14 +281,21 @@ async def process_batch(
     scanner: Scanner,
     owner: str,
     limit: int = 10,
+    thumbnailer: Thumbnailer | None = None,
 ) -> ProcessOutcome:
-    """Одна пачка обработки: сигнатура, сканер, итог. Для воркера и тестов."""
+    """Одна пачка обработки: сигнатура, сканер, миниатюра, итог. Для воркера и тестов.
+
+    Без `thumbnailer` миниатюры не делаются — вложение просто `ready`, и клиент
+    показывает оригинал: отсутствие миниатюры не отказ.
+    """
     async with conn.transaction():
         claimed = await repo.claim_processing(conn, owner=owner, lease=LEASE, limit=limit)
 
     ready = rejected = failed = deferred = 0
     for item in claimed:
-        result = await _process_one(conn, store=store, scanner=scanner, item=item)
+        result = await _process_one(
+            conn, store=store, scanner=scanner, thumbnailer=thumbnailer, item=item
+        )
         metrics.attachment_processed(result)
         if result == "ready":
             ready += 1
@@ -320,7 +341,12 @@ async def _reject(
 
 
 async def _process_one(
-    conn: asyncpg.Connection, *, store: ObjectStore, scanner: Scanner, item: Attachment
+    conn: asyncpg.Connection,
+    *,
+    store: ObjectStore,
+    scanner: Scanner,
+    thumbnailer: Thumbnailer | None,
+    item: Attachment,
 ) -> str:
     try:
         head = await store.read_range(item.object_key, domain.SNIFF_BYTES)
@@ -352,11 +378,34 @@ async def _process_one(
         )
         return "deferred"
 
+    thumbnail_key: str | None = None
+    width = height = None
+    if thumbnailer is not None and item.kind is MessageKind.IMAGE:
+        started = time.perf_counter()
+        try:
+            # Разбор тяжёлый по CPU: вне цикла событий, иначе воркер перестал бы
+            # продлевать аренду и отвечать на остановку.
+            thumb = await asyncio.to_thread(thumbnailer.make, content)
+        except UnreadableImage:
+            return await _reject(
+                conn, store, item, RejectionCode.INVALID_IMAGE, item.content_type
+            )
+        metrics.attachment_thumbnail(time.perf_counter() - started)
+        key = domain.thumbnail_key(item.object_key)
+        try:
+            await store.put(key, thumb.data, thumb.content_type)
+        except (httpx.HTTPError, OSError) as exc:
+            return await _storage_failure(conn, item, exc)
+        thumbnail_key, width, height = key, thumb.source_width, thumb.source_height
+
     await repo.finish(
         conn,
         attachment_id=item.attachment_id,
         state=AttachmentState.READY,
         detected_content_type=item.content_type,
+        thumbnail_key=thumbnail_key,
+        width=width,
+        height=height,
     )
     return "ready"
 
@@ -402,6 +451,9 @@ async def cleanup_orphans(
         for item in orphans:
             try:
                 await store.delete(item.object_key)
+                if item.thumbnail_key:
+                    # Производное стирается вместе с источником.
+                    await store.delete(item.thumbnail_key)
             except (httpx.HTTPError, OSError):
                 # Не помечаем стёртым то, что не стёрто: уборщик вернётся.
                 failed += 1

@@ -61,3 +61,8 @@ opentelemetry-exporter-otlp-proto-grpc==1.44.0
 opentelemetry-instrumentation-asyncpg==0.65b0
 opentelemetry-instrumentation-httpx==0.65b0
 opentelemetry-instrumentation-redis==0.65b0
+
+# Миниатюры вложений-изображений (G4): разбор недоверенного файла делает
+# воркер обработки, а не API. Колёса содержат libwebp, системных пакетов в
+# образе не нужно.
+pillow==12.3.0

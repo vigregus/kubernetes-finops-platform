@@ -1226,6 +1226,21 @@ components:
         duration_ms:
           type: integer
           description: Длительность голосового, мс.
+        width:
+          type: integer
+          description: >-
+            Ширина изображения как оно показывается (после поворота по EXIF),
+            пикселей. Есть у изображений, прошедших обработку.
+        height:
+          type: integer
+          description: Высота изображения как оно показывается, пикселей.
+        thumbnail_url:
+          type: string
+          format: uri
+          description: >-
+            Предподписанная ссылка на миниатюру (WebP, большая сторона до 480
+            пикселей, без метаданных). Нет у изображений, обработанных до
+            появления миниатюр, — тогда показывается оригинал.
         download_url:
           type: string
           format: uri
@@ -1244,7 +1259,7 @@ components:
             вложения уже нет.
         rejection_code:
           type: string
-          enum: [type_mismatch, malware, too_large, storage_error, invalid_audio]
+          enum: [type_mismatch, malware, too_large, storage_error, invalid_audio, invalid_image]
           description: Только у `rejected`/`failed`.
 
     Session:

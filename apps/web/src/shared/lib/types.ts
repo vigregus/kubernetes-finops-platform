@@ -106,8 +106,14 @@ export interface MessageAttachment {
   name: string
   state: AttachmentState
   url?: string
-  /** for images */
+  /**
+   * for images: миниатюра, а если её нет (картинка обработана до миниатюр) —
+   * сам оригинал. В ленте показывается она, оригинал открывается по `url`.
+   */
   previewUrl?: string
+  /** for images: размеры оригинала как он показывается — место в ленте резервируется заранее */
+  width?: number
+  height?: number
   /** for voice, in seconds — shown before upload completes (ATT-004) */
   durationSeconds?: number
   sizeLabel?: string

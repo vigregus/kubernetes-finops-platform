@@ -126,5 +126,6 @@ describe("uploadAttachment", () => {
     expect(failureMessage({ kind: "rejected", code: "malware" })).toMatch(/unsafe/)
     expect(failureMessage({ kind: "rejected", code: "type_mismatch" })).toMatch(/doesn't match/)
     expect(failureMessage({ kind: "too-large" })).toMatch(/too large/)
+    expect(failureMessage({ kind: "rejected", code: "invalid_image" })).toMatch(/can't be read/)
   })
 })

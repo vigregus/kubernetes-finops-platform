@@ -169,10 +169,18 @@ function attachmentOf(dto: MessageDto, attachment: AttachmentDto): MessageAttach
     // другого адреса у клиента нет, а выдумать постоянный он не может.
     url: attachment.downloadUrl,
 
-    // Превью картинки — сама ссылка: миниатюр в этом срезе нет (следующий
-    // срез G4), и браузер ужимает оригинал (`max-h-72` у пузыря). Без этого
-    // поля `<img>` рисовался без `src` — пустой рамкой.
-    ...(kind === "image" ? { previewUrl: attachment.downloadUrl } : {}),
+    // Превью картинки — миниатюра, а у картинок без неё (обработанных до
+    // миниатюр) — сам оригинал: браузер ужимает его (`max-h-72` у пузыря).
+    // Без этого поля `<img>` рисовался без `src` — пустой рамкой. Размеры
+    // нужны, чтобы лента не прыгала, когда картинка догрузится.
+    ...(kind === "image"
+      ? {
+          previewUrl: attachment.thumbnailUrl ?? attachment.downloadUrl,
+          ...(attachment.width !== undefined && attachment.height !== undefined
+            ? { width: attachment.width, height: attachment.height }
+            : {}),
+        }
+      : {}),
 
     // Длительность приходит в миллисекундах, а модель и пузырь считают в
     // секундах. Усечение, а не округление: 14.8 с — это четырнадцать секунд
