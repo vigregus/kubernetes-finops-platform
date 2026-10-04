@@ -98,6 +98,14 @@ export default defineConfig({
 			testMatch: /g4-attachments\.spec\.ts$/,
 			dependencies: ["fixture"],
 			timeout: 300_000,
+			// Голосовое (`ATT-004`): настоящий `MediaRecorder` читает фейковый
+			// микрофон Chromium, а запрос разрешения закрывается самим браузером.
+			// Без этого запись в приёмке упёрлась бы в окно, которое некому нажать.
+			use: {
+				launchOptions: {
+					args: ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"],
+				},
+			},
 		},
 		{
 			// Раздел 16 плана load-testing — свой проект, без зависимости от

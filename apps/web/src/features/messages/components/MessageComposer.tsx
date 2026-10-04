@@ -25,7 +25,9 @@
 import { useRef, useState, type KeyboardEvent } from "react"
 import { Icon } from "../../../shared/ui/Icon"
 import { TextField } from "../../../shared/ui/TextField"
+import { formatDuration } from "../../attachments/formatDuration"
 import type { AttachmentDraft } from "../../attachments/useAttachmentDraft"
+import type { VoiceState } from "../../attachments/useVoiceRecorder"
 
 /**
  * Типы, которые принимает сервер (`domain/attachment.py`, `ALLOWED`). Список
@@ -41,7 +43,16 @@ const ACCEPT =
  * Вложение в композере (G4). Необязательное целиком: без него композер —
  * прежний, только текст.
  */
+export interface ComposerVoice {
+  state: VoiceState
+  onStart: () => void
+  onStop: () => void
+  onCancel: () => void
+}
+
 export interface ComposerAttachment {
+  /** Запись голоса. Нет у браузера без `MediaRecorder` — тогда кнопки нет вовсе. */
+  voice?: ComposerVoice
   draft: AttachmentDraft
   onPick: (file: File) => void
   onClear: () => void
@@ -75,6 +86,7 @@ export function MessageComposer({
   const [value, setValue] = useState("")
   const fileInput = useRef<HTMLInputElement>(null)
   const draft = attachment?.draft
+  const voice = attachment?.voice
 
   function submit() {
     if (disabled) return
@@ -120,13 +132,56 @@ export function MessageComposer({
       className="flex-shrink-0 bg-surface/90 p-4 shadow-[0_-2px_12px_rgba(41,37,36,0.03)] backdrop-blur-md"
     >
       <div className="mx-auto flex max-w-4xl flex-col gap-2">
+        {voice !== undefined && voice.state.state === "recording" && (
+          <div
+            data-recording-bar
+            className="flex items-center gap-2 rounded-xl bg-surface-container-low px-3 py-2 text-sm text-text-charcoal"
+          >
+            <span className="h-2 w-2 animate-pulse rounded-full bg-status-error" />
+            <span className="flex-1">Recording</span>
+            <span data-recording-timer className="tabular-nums text-text-warm-muted">
+              {formatDuration(voice.state.elapsedMs / 1000)}
+            </span>
+            <button
+              type="button"
+              aria-label="Cancel recording"
+              data-recording-cancel
+              onClick={voice.onCancel}
+              className="flex h-6 w-6 items-center justify-center rounded-full text-text-warm-muted hover:bg-surface-cream"
+            >
+              <Icon name="close" size={16} />
+            </button>
+            <button
+              type="button"
+              aria-label="Stop recording"
+              data-recording-stop
+              onClick={voice.onStop}
+              className="flex h-8 items-center gap-1 rounded-lg bg-accent-terracotta px-3 text-xs font-semibold text-on-primary"
+            >
+              <Icon name="stop" size={16} />
+              Stop
+            </button>
+          </div>
+        )}
+        {voice !== undefined && voice.state.state === "failed" && (
+          <div data-recording-error className="rounded-xl bg-error-container/40 px-3 py-2 text-sm text-status-error">
+            {voice.state.message}
+          </div>
+        )}
         {draft !== undefined && draft.state !== "empty" && (
           <div
             data-attachment-draft={draft.state}
             className="flex items-center gap-2 rounded-xl bg-surface-container-low px-3 py-2 text-sm text-text-charcoal"
           >
-            <Icon name="attach_file" size={16} />
-            <span className="min-w-0 flex-1 truncate">{draft.fileName}</span>
+            <Icon name={draft.state !== "failed" && draft.durationMs !== undefined ? "graphic_eq" : "attach_file"} size={16} />
+            <span className="min-w-0 flex-1 truncate">
+              {draft.state !== "failed" && draft.durationMs !== undefined ? "Voice message" : draft.fileName}
+            </span>
+            {draft.state !== "failed" && draft.durationMs !== undefined && (
+              <span data-attachment-duration className="tabular-nums text-text-charcoal">
+                {formatDuration(draft.durationMs / 1000)}
+              </span>
+            )}
             <span
               className={
                 draft.state === "failed" ? "text-status-error" : "text-text-warm-muted"
@@ -171,6 +226,18 @@ export function MessageComposer({
               >
                 <Icon name="attach_file" size={20} />
               </button>
+              {voice !== undefined && (
+                <button
+                  type="button"
+                  aria-label="Record voice message"
+                  data-composer-record
+                  disabled={voice.state.state === "recording"}
+                  onClick={voice.onStart}
+                  className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl text-text-warm-muted hover:bg-surface-container-low disabled:opacity-40"
+                >
+                  <Icon name="mic" size={20} />
+                </button>
+              )}
             </>
           )}
           <TextField

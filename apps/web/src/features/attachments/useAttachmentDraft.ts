@@ -15,19 +15,21 @@ import {
 
 export type AttachmentDraft =
   | { readonly state: "empty" }
-  | { readonly state: "uploading"; readonly fileName: string }
-  | { readonly state: "processing"; readonly fileName: string }
+  | { readonly state: "uploading"; readonly fileName: string; readonly durationMs?: number }
+  | { readonly state: "processing"; readonly fileName: string; readonly durationMs?: number }
   | {
       readonly state: "ready"
       readonly fileName: string
       readonly attachmentId: string
-      readonly kind: "image" | "file"
+      readonly kind: "image" | "file" | "voice"
+      readonly durationMs?: number
     }
   | { readonly state: "failed"; readonly fileName: string; readonly message: string }
 
 export interface UseAttachmentDraft {
   readonly draft: AttachmentDraft
-  pick(file: File): void
+  /** `durationMs` — только у записи голоса: человек видит длину до окончания загрузки. */
+  pick(file: File, meta?: { readonly durationMs?: number }): void
   clear(): void
   /**
    * Снять черновик, только если он всё ещё **этот** готовый файл. Ответ на
@@ -58,21 +60,23 @@ export function useAttachmentDraft(
   }, [])
 
   const pick = useCallback(
-    (file: File) => {
+    (file: File, meta?: { readonly durationMs?: number }) => {
       if (ops === undefined) return
       generation.current += 1
       const mine = generation.current
-      setDraft({ state: "uploading", fileName: file.name })
+      const durationMs = meta?.durationMs
+      const withDuration = durationMs === undefined ? {} : { durationMs }
+      setDraft({ state: "uploading", fileName: file.name, ...withDuration })
 
       void uploadAttachment(
         ops,
         file,
         (progress) => {
           if (mine === generation.current && mounted.current) {
-            setDraft({ state: progress, fileName: file.name })
+            setDraft({ state: progress, fileName: file.name, ...withDuration })
           }
         },
-        optionsRef.current,
+        { ...optionsRef.current, ...withDuration },
       ).then((outcome) => {
         if (mine !== generation.current || !mounted.current) return
         if (outcome.kind === "ready") {
@@ -80,7 +84,12 @@ export function useAttachmentDraft(
             state: "ready",
             fileName: file.name,
             attachmentId: outcome.attachmentId,
-            kind: file.type.startsWith("image/") ? "image" : "file",
+            kind: file.type.startsWith("image/")
+              ? "image"
+              : file.type.startsWith("audio/")
+                ? "voice"
+                : "file",
+            ...withDuration,
           })
         } else {
           setDraft({ state: "failed", fileName: file.name, message: failureMessage(outcome.failure) })

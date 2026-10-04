@@ -5,7 +5,7 @@ import { STATE_FILE, fixtureFor, signIn } from "./support/auth"
 import type { SignedIn, State } from "./support/auth"
 
 /**
- * Браузерная приёмка G4: вложения (`ATT-002`, `ATT-003`, `ATT-005`, `ATT-007`).
+ * Браузерная приёмка G4: вложения (`ATT-002`, `ATT-003`, `ATT-004`, `ATT-005`, `ATT-007`).
  *
  * Два настоящих браузера против стенда: человек A выбирает файл в композере,
  * браузер сам идёт в MinIO по предподписанной ссылке (`PUT` без токена), а B
@@ -102,6 +102,59 @@ test.describe("G4: вложения", () => {
 		await a.page.locator("[data-composer-send]").click()
 
 		await expect(b.page.getByText("договор.pdf").first()).toBeVisible({ timeout: 60_000 })
+	})
+
+	test("ATT-004: голосовое от A — длина видна до загрузки, B слушает и скачивает", async () => {
+		await a.context.grantPermissions(["microphone"])
+		const audio = b.page.locator("[data-attachment-audio]")
+		const before = await audio.count()
+
+		await a.page.locator("[data-composer-record]").click()
+		await expect(a.page.locator("[data-recording-bar]")).toBeVisible()
+		// Запись идёт настоящим временем: длительность считает рекордер по часам.
+		await a.page.waitForTimeout(2500)
+		await expect(a.page.locator("[data-recording-timer]")).not.toHaveText("0:00")
+		await a.page.locator("[data-recording-stop]").click()
+
+		// Длина записи видна в черновике сразу, в любом состоянии загрузки.
+		const duration = a.page.locator("[data-attachment-duration]")
+		await expect(duration).toBeVisible()
+		await expect(duration).toHaveText(/^0:0[2-5]$/)
+		await expect(draft(a)).toHaveAttribute("data-attachment-draft", "ready", { timeout: 60_000 })
+		await a.page.locator("[data-composer-send]").click()
+
+		await expect(audio).toHaveCount(before + 1, { timeout: 60_000 })
+		// То же у отправителя: своё голосовое играется в ленте, а не ссылкой
+		// в новую вкладку (ответ на отправку собирается другим путём, чем
+		// публикация, и ломаться может только он).
+		await expect(a.page.locator("[data-attachment-voice]").last().locator("audio")).toBeVisible()
+		await expect(
+			a.page.locator("[data-attachment-voice]").last().locator("a[data-attachment-link]"),
+		).toHaveCount(0)
+		const player = audio.last()
+		const src = await player.getAttribute("src")
+		expect(src, "у голосового есть ссылка на скачивание").toBeTruthy()
+		const downloaded = await b.page.request.get(src as string)
+		expect(downloaded.status()).toBe(200)
+		const body = await downloaded.body()
+		expect(body.length, "файл не пустой").toBeGreaterThan(1000)
+		// WebM (EBML): то, что записал `MediaRecorder` Chromium, а не заглушка.
+		expect(body.subarray(0, 4).toString("hex")).toBe("1a45dfa3")
+
+		// Длина в ленте у получателя та же, что показал рекордер отправителю.
+		const label = b.page.locator("[data-attachment-voice]").last()
+		await expect(label).toContainText(/0:0[2-5]/)
+		await expect(draft(a)).toHaveCount(0)
+
+		// После перезагрузки история несёт то же: плеер в ленте, а не ссылка.
+		await b.page.reload()
+		await openConversation(b, conversationId)
+		await expect(
+			b.page.locator("[data-attachment-voice]").last().locator("audio"),
+		).toBeVisible({ timeout: 30_000 })
+		await expect(
+			b.page.locator("[data-attachment-voice]").last().locator("a[data-attachment-link]"),
+		).toHaveCount(0)
 	})
 
 	test("ATT-005: неразрешённый тип отвергается сразу, до загрузки", async () => {

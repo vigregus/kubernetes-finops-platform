@@ -25,6 +25,15 @@ describe("useAttachmentDraft", () => {
     expect(result.current.draft).toMatchObject({ attachmentId: ID, kind: "image", fileName: "a.png" })
   })
 
+  it("запись голоса показывает длительность сразу и называет вид голосовым", async () => {
+    const { result } = renderHook(() => useAttachmentDraft(ops(), { sleep: async () => {} }))
+    act(() => result.current.pick(file("voice.webm", "audio/webm"), { durationMs: 7200 }))
+    // До окончания загрузки длина уже известна (ATT-004).
+    expect(result.current.draft).toMatchObject({ state: "uploading", durationMs: 7200 })
+    await waitFor(() => expect(result.current.draft.state).toBe("ready"))
+    expect(result.current.draft).toMatchObject({ kind: "voice", durationMs: 7200 })
+  })
+
   it("без операций вложение не выбирается вовсе", () => {
     const { result } = renderHook(() => useAttachmentDraft(undefined))
     act(() => result.current.pick(file()))

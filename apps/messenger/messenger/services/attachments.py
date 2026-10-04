@@ -30,6 +30,7 @@ from messenger.domain.attachment import (
 )
 from messenger.domain.errors import Reason
 from messenger.domain.ids import AttachmentId, MessageId, UserId
+from messenger.domain.message import MessageKind
 from messenger.repositories import attachments as repo
 from messenger.telemetry import metrics
 
@@ -81,6 +82,7 @@ async def init_upload(
     content_type: str,
     size_bytes: int,
     file_name: str | None,
+    duration_ms: int | None = None,
 ) -> InitResult:
     """Выдаёт ссылку на загрузку — или отказывает **до** её выдачи (`ATT-005`).
 
@@ -88,11 +90,22 @@ async def init_upload(
     строки `pending`, ни ссылки, которой можно воспользоваться.
     """
     try:
-        domain.validate_init(content_type, size_bytes)
+        allowed = domain.validate_init(content_type, size_bytes)
     except domain.NotAllowed:
         return InitResult(rejection=Reason.UNSUPPORTED_MEDIA_TYPE)
     except domain.TooLarge as exc:
         return InitResult(rejection=Reason.PAYLOAD_TOO_LARGE, limit_bytes=exc.limit)
+
+    # Длительность — только у голосового и обязательна у него (`ATT-004`).
+    # Размер здесь заявленный, и сверка с ним — ранний отказ до ссылки; ту же
+    # проверку по фактическому размеру повторяет `complete`.
+    if allowed.kind is MessageKind.VOICE:
+        try:
+            domain.validate_voice(duration_ms=duration_ms, size_bytes=size_bytes)
+        except domain.InvalidVoice:
+            return InitResult(rejection=Reason.INVALID_VOICE)
+    elif duration_ms is not None:
+        return InitResult(rejection=Reason.INVALID_VOICE)
 
     # Считаются только годные запросы: негодный не стоит ни строки, ни
     # подписи, и лимит на него лишь наказывал бы за опечатку. Отказ в
@@ -123,6 +136,7 @@ async def init_upload(
         content_type=normalized,
         size_bytes=size_bytes,
         file_name=domain.clean_file_name(file_name),
+        duration_ms=duration_ms,
     )
     presigned = store.presign_put(object_key, normalized, domain.UPLOAD_URL_TTL_SECONDS)
     attachment = await repo.fetch(conn, attachment_id=attachment_id)
@@ -155,23 +169,38 @@ async def complete(
         if actual is None:
             return StatusResult(rejection=Reason.ATTACHMENT_UPLOAD_MISSING)
 
-        limit = domain.ALLOWED[current.content_type].max_bytes
-        if actual > limit:
+        allowed = domain.ALLOWED[current.content_type]
+        limit = allowed.max_bytes
+        bitrate: int | None = None
+        invalid_voice = False
+        if allowed.kind is MessageKind.VOICE and actual <= limit:
+            # Заявленная длительность против фактического размера: сюда
+            # доходит «малая запись», под которую загрузили большой файл.
+            try:
+                bitrate = domain.validate_voice(
+                    duration_ms=current.duration_ms, size_bytes=actual
+                )
+            except domain.InvalidVoice:
+                invalid_voice = True
+        if actual > limit or invalid_voice:
             # Заявил малое, загрузил большое: белый список размеров не
             # обойти обещанием. Объект удаляется, вложение отклонено.
             await store.delete(current.object_key)
             await conn.execute(
                 """
                 UPDATE attachments
-                   SET state = 'rejected', rejection_reason = 'too_large',
+                   SET state = 'rejected', rejection_reason = $3,
                        size_bytes = $2, processed_at = now()
                  WHERE attachment_id = $1
                 """,
                 attachment_id,
                 actual,
+                (RejectionCode.INVALID_AUDIO if invalid_voice else RejectionCode.TOO_LARGE).value,
             )
         else:
-            await repo.mark_processing(conn, attachment_id=attachment_id, size_bytes=actual)
+            await repo.mark_processing(
+                conn, attachment_id=attachment_id, size_bytes=actual, bitrate_kbps=bitrate
+            )
         updated = await repo.fetch(conn, attachment_id=attachment_id)
     return StatusResult(attachment=updated)
 

@@ -41,6 +41,8 @@ import {
 import type { TelemetryClient } from "../telemetry/telemetryClient"
 import type { AttachmentClient } from "../attachments/attachmentUpload"
 import { useAttachmentDraft } from "../attachments/useAttachmentDraft"
+import { useVoiceRecorder } from "../attachments/useVoiceRecorder"
+import { browserVoiceDeps } from "../attachments/voiceRecorder"
 import { MessengerLayout } from "../../shared/ui/MessengerLayout"
 import type {
   ChatMessage,
@@ -844,6 +846,13 @@ function ConversationPane({
   const attachmentDraft = useAttachmentDraft(attachments?.ops)
   const draftValue = attachmentDraft.draft
   const clearDraftIfReady = attachmentDraft.clearIfReady
+  // Рекордер — один на панель беседы. Готовая запись идёт тем же путём, что и
+  // выбранный файл: черновик с длиной, загрузка, обработка, «Send».
+  const voiceDeps = useMemo(() => browserVoiceDeps(), [])
+  const voiceRecorder = useVoiceRecorder(
+    attachments === undefined ? null : voiceDeps,
+    attachmentDraft.pick,
+  )
   // Тождество логической отправки живёт в ссылке и привязано к вложению: повтор
   // после сбоя шлёт **тот же** `client_message_id` (D3), и сервер ответит `200`
   // с тем же сообщением, а не заведёт второе.
@@ -851,7 +860,7 @@ function ConversationPane({
   const sendAttachment = useCallback(
     (caption: string) => {
       if (attachments === undefined || draftValue.state !== "ready") return
-      const { attachmentId, kind } = draftValue
+      const { attachmentId, kind, durationMs } = draftValue
       if (attachmentSendId.current?.attachmentId !== attachmentId) {
         attachmentSendId.current = { attachmentId, clientMessageId: crypto.randomUUID() }
       }
@@ -862,6 +871,7 @@ function ConversationPane({
           kind,
           caption,
           attachmentId,
+          ...(durationMs === undefined ? {} : { durationMs }),
         })
         .then((response) => {
           clearDraftIfReady(attachmentId)
@@ -1069,6 +1079,15 @@ function ConversationPane({
             ? undefined
             : {
                 draft: draftValue,
+                voice:
+                  voiceDeps === null
+                    ? undefined
+                    : {
+                        state: voiceRecorder.voice,
+                        onStart: voiceRecorder.start,
+                        onStop: voiceRecorder.stop,
+                        onCancel: voiceRecorder.cancel,
+                      },
                 onPick: attachmentDraft.pick,
                 onClear: attachmentDraft.clear,
                 onSend: sendAttachment,

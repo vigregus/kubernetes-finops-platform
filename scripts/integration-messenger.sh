@@ -104,6 +104,12 @@ SECRET
 # Переменные те же, что у сервиса: проверка обязана ходить от роли
 # приложения, а не от суперпользователя. Права у них разные, и отказ
 # по правам должен находиться здесь, а не в проде.
+# `S3_*` нужны проверке вложений: без них она сама себя пропускает
+# («S3_* не заданы») и зелёный прогон ничего о вложениях не говорит. Оба
+# адреса — внутренние: под ходит в хранилище напрямую, а не через шлюз. Без
+# порта `:80` намеренно: подпись ссылки включает `Host`, а `httpx` у ссылки с
+# портом по умолчанию его отбрасывает, и `PUT` получал `SignatureDoesNotMatch`.
+# Браузеру это не грозит: он всегда шлёт `Host` как в адресе.
 # Метка `component: test` снимает вывод этого пода со сбора журналов:
 # он для человека в терминале, а не для хранилища.
 # Три переменные Centrifugo HTTP API нужны проверке квитанций: она поднимает
@@ -152,6 +158,10 @@ kubectl -n "$NS" run "$POD" --restart=Never \
         {"name":"CENTRIFUGO_API_URL","value":"http://messenger-centrifugo.messenger.svc.cluster.local:9000/api"},
         {"name":"CENTRIFUGO_HTTP_API_KEY","valueFrom":{"secretKeyRef":{"name":"messenger-centrifugo","key":"CENTRIFUGO_HTTP_API_KEY"}}},
         {"name":"CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY","valueFrom":{"secretKeyRef":{"name":"messenger-centrifugo","key":"CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY"}}},
+        {"name":"S3_ENDPOINT_INTERNAL","value":"http://minio.messenger.svc.cluster.local"},
+        {"name":"S3_ENDPOINT_PUBLIC","value":"http://minio.messenger.svc.cluster.local"},
+        {"name":"S3_ACCESS_KEY","valueFrom":{"secretKeyRef":{"name":"messenger-minio-api","key":"access-key"}}},
+        {"name":"S3_SECRET_KEY","valueFrom":{"secretKeyRef":{"name":"messenger-minio-api","key":"secret-key"}}},
         {"name":"INTEGRATION_ONLY","value":"${INTEGRATION_ONLY:-}"},
         {"name":"KEEP_ACCOUNTS","value":"${KEEP_ACCOUNTS:-}"},
         {"name":"BACKCHANNEL_TEST_URL","value":"${BACKCHANNEL_TEST_URL:-}"},

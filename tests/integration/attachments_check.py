@@ -10,7 +10,10 @@
 байты равны загруженным. `ATT-007`: исполняемый файл под видом картинки
 отклонён **при обработке**, объект удалён. `ATT-002`: тестовый файл EICAR
 отклонён, сообщение с ним не создаётся. `ATT-008`: недоступный сканер
-оставляет вложение в обработке, и прикрепить его нельзя. `ATT-001`:
+оставляет вложение в обработке, и прикрепить его нельзя. `ATT-004`:
+голосовое — длительность проверена при инициации, битрейт выведен из
+фактического размера, длительность сообщения берётся из вложения, а не от
+клиента; заявил малое, загрузил большое — отклонено. `ATT-001`:
 неприкреплённое старше срока исчезает вместе с объектом, прикреплённое
 не трогается.
 """
@@ -41,6 +44,8 @@ failures: list[str] = []
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
 EXE = b"MZ\x90\x00" + b"\x00" * 64
+# Голос: 40 000 байт за 10 с — 32 кбит/с, правдоподобный Opus.
+WEBM_VOICE = b"\x1a\x45\xdf\xa3" + b"\x00" * (40_000 - 4)
 # Тестовая строка антивирусов, собранная из частей — по той же причине, что
 # и в `adapters/scanner.py`: исходник сам не должен срабатывать.
 EICAR = (
@@ -87,10 +92,15 @@ class CountingLimiter:
 async def upload(http: httpx.AsyncClient, init, content: bytes) -> int:
     """Загрузка так, как её сделал бы браузер: по ссылке, с заголовками из ответа."""
     response = await http.put(init.upload_url, content=content, headers=init.upload_headers)
+    if response.status_code != 200:
+        # Причина отказа хранилища (подпись, хост, тип) — в теле ответа.
+        print(f"      PUT {response.status_code}: {response.text[:900]}")
     return response.status_code
 
 
-async def new_attachment(conn, store, http, user, *, content_type, content, name="f"):
+async def new_attachment(
+    conn, store, http, user, *, content_type, content, name="f", duration_ms=None
+):
     init = await service.init_upload(
         conn,
         store=store,
@@ -99,6 +109,7 @@ async def new_attachment(conn, store, http, user, *, content_type, content, name
         content_type=content_type,
         size_bytes=len(content),
         file_name=name,
+        duration_ms=duration_ms,
     )
     assert init.ok, init.rejection
     assert await upload(http, init, content) == 200
@@ -344,6 +355,89 @@ async def run() -> None:
                   liar_done.attachment.state.value == "rejected"
                   and liar_done.attachment.rejection_reason.value == "too_large"
                   and await store.head(liar.attachment.object_key) is None)
+
+            print("ATT-004: голосовое сообщение")
+            voice_init = await service.init_upload(
+                conn, store=store, limiter=CountingLimiter(10_000), user_id=alice.user_id,
+                content_type="audio/webm;codecs=opus", size_bytes=len(WEBM_VOICE),
+                file_name="voice.webm", duration_ms=10_000,
+            )
+            check("голосовое с длительностью получает ссылку", voice_init.ok)
+            no_duration = await service.init_upload(
+                conn, store=store, limiter=CountingLimiter(10_000), user_id=alice.user_id,
+                content_type="audio/webm", size_bytes=len(WEBM_VOICE), file_name="v.webm",
+            )
+            check("без длительности -> отказ до ссылки",
+                  no_duration.rejection is Reason.INVALID_VOICE and no_duration.upload_url is None)
+            absurd = await service.init_upload(
+                conn, store=store, limiter=CountingLimiter(10_000), user_id=alice.user_id,
+                content_type="audio/webm", size_bytes=5 * 1024 * 1024, file_name="v.webm",
+                duration_ms=1_000,
+            )
+            check("5 МиБ за секунду -> отказ до ссылки", absurd.rejection is Reason.INVALID_VOICE)
+
+            check("PUT голосового принят хранилищем",
+                  await upload(http, voice_init, WEBM_VOICE) == 200)
+            voice_id = voice_init.attachment.attachment_id
+            voice_done = await service.complete(
+                conn, store=store, user_id=alice.user_id, attachment_id=voice_id
+            )
+            check("complete -> processing, битрейт выведен: 32 кбит/с",
+                  voice_done.attachment.state.value == "processing"
+                  and voice_done.attachment.bitrate_kbps == 32
+                  and voice_done.attachment.duration_ms == 10_000,
+                  f"{voice_done.attachment.bitrate_kbps}")
+            await service.process_batch(
+                conn, store=store, scanner=StubScanner(), owner="attachments-check"
+            )
+            voice_sent = await message_service.send_message(
+                conn, sender_id=alice.user_id, conversation_id=conversation_id,
+                client_message_id=ClientMessageId(uuid.uuid4()), kind=MessageKind.VOICE,
+                # Клиент прислал другую цифру: в сообщении окажется проверенная.
+                payload=MessagePayload(duration_ms=99_000), attachment_ids=(voice_id,),
+            )
+            check("голосовое уходит сообщением", voice_sent.ok and voice_sent.created)
+            check("длительность сообщения — из вложения, а не от клиента",
+                  voice_sent.message.payload.duration_ms == 10_000,
+                  str(voice_sent.message.payload.duration_ms))
+            voice_views = await service.views_for_messages(
+                conn, store=store, message_ids=[voice_sent.message.message_id]
+            )
+            voice_view = voice_views[voice_sent.message.message_id][0]
+            voice_bytes = await http.get(voice_view.download_url)
+            check("скачанное голосовое равно загруженному",
+                  voice_bytes.status_code == 200 and voice_bytes.content == WEBM_VOICE)
+            check("в выдаче есть длительность", voice_view.attachment.duration_ms == 10_000)
+
+            liar_voice = await service.init_upload(
+                conn, store=store, limiter=CountingLimiter(10_000), user_id=alice.user_id,
+                content_type="audio/webm", size_bytes=len(WEBM_VOICE), file_name="lie.webm",
+                duration_ms=10_000,
+            )
+            await upload(http, liar_voice, b"\x1a\x45\xdf\xa3" + b"\x00" * (5 * 1024 * 1024))
+            liar_voice_done = await service.complete(
+                conn, store=store, user_id=alice.user_id,
+                attachment_id=liar_voice.attachment.attachment_id,
+            )
+            check("заявил 10 с, загрузил 5 МиБ -> rejected/invalid_audio, объект удалён",
+                  liar_voice_done.attachment.state.value == "rejected"
+                  and liar_voice_done.attachment.rejection_reason.value == "invalid_audio"
+                  and await store.head(liar_voice.attachment.object_key) is None)
+
+            exe_voice_id = await new_attachment(
+                conn, store, http, alice, content_type="audio/webm",
+                content=EXE + b"\x00" * 40_000, name="x.webm", duration_ms=10_000,
+            )
+            await service.complete(
+                conn, store=store, user_id=alice.user_id, attachment_id=exe_voice_id
+            )
+            await service.process_batch(
+                conn, store=store, scanner=StubScanner(), owner="attachments-check"
+            )
+            exe_voice = await service.status(conn, user_id=alice.user_id, attachment_id=exe_voice_id)
+            check("исполняемый под видом голосового -> rejected/type_mismatch",
+                  exe_voice.attachment.state.value == "rejected"
+                  and exe_voice.attachment.rejection_reason.value == "type_mismatch")
 
             missing = await service.init_upload(
                 conn, store=store, limiter=CountingLimiter(100), user_id=alice.user_id,

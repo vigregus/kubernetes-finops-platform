@@ -126,6 +126,13 @@ async def send_message(
                         item.kind is not kind for item in locked
                     ):
                         return SendMessageResult(rejection=Reason.ATTACHMENT_NOT_READY)
+                    if kind is MessageKind.VOICE and locked[0].duration_ms is not None:
+                        # Длительность в сообщении — та, что проверена при
+                        # инициации и сверена с размером, а не вторая цифра
+                        # от клиента: единственный источник.
+                        payload = MessagePayload(
+                            text=payload.text, duration_ms=locked[0].duration_ms
+                        )
 
                 sequence = await messages.allocate_sequence(
                     conn, conversation_id=conversation_id

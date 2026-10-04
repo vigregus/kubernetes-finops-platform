@@ -36,6 +36,8 @@ class RejectionCode(str, Enum):
     MALWARE = "malware"
     TOO_LARGE = "too_large"
     STORAGE_ERROR = "storage_error"
+    # Голосовое с неправдоподобной длительностью или битрейтом (`ATT-004`).
+    INVALID_AUDIO = "invalid_audio"
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +56,12 @@ _JPEG = (b"\xff\xd8\xff",)
 _PNG = (b"\x89PNG\r\n\x1a\n",)
 _GIF = (b"GIF87a", b"GIF89a")
 _ZIP = (b"PK\x03\x04",)
+# Контейнеры, в которых браузерный `MediaRecorder` пишет голос: WebM (EBML)
+# в Chrome и Firefox, Ogg в Firefox, MP4 в Safari. MP4 узнаётся по метке
+# `ftyp` в байтах 4–8, а не в начале, — её проверяет `sniff`.
+_WEBM = (b"\x1a\x45\xdf\xa3",)
+_OGG = (b"OggS",)
+_MP4 = (b"",)
 
 ALLOWED: dict[str, AllowedType] = {
     "image/jpeg": AllowedType(MessageKind.IMAGE, 10 * MIB, _JPEG),
@@ -74,7 +82,19 @@ ALLOWED: dict[str, AllowedType] = {
         MessageKind.FILE, 25 * MIB, _ZIP
     ),
     "text/plain": AllowedType(MessageKind.FILE, 5 * MIB, ()),
+    # Голос: пять минут при 128 кбит/с — меньше пяти мегабайт; с запасом на
+    # более щедрый кодек предел восемь.
+    "audio/webm": AllowedType(MessageKind.VOICE, 8 * MIB, _WEBM),
+    "audio/ogg": AllowedType(MessageKind.VOICE, 8 * MIB, _OGG),
+    "audio/mp4": AllowedType(MessageKind.VOICE, 8 * MIB, _MP4),
 }
+
+# Голосовое сообщение (`ATT-004`). Длительность заявляет клиент, а размер —
+# факт хранилища; битрейт выводится из них и обязан быть правдоподобным.
+MIN_VOICE_MS = 500
+MAX_VOICE_MS = 5 * 60 * 1000
+MIN_BITRATE_KBPS = 4
+MAX_BITRATE_KBPS = 512
 
 # Сколько байт начала файла читает обработка для сверки типа.
 SNIFF_BYTES = 8192
@@ -113,6 +133,28 @@ def validate_init(content_type: str, size_bytes: int) -> AllowedType:
     return allowed
 
 
+class InvalidVoice(Exception):
+    """Длительность отсутствует, вне пределов или не сходится с размером."""
+
+
+def validate_voice(*, duration_ms: int | None, size_bytes: int) -> int:
+    """Проверяет голосовое и возвращает битрейт, кбит/с.
+
+    Длительность в WebM, который пишет `MediaRecorder`, в заголовке обычно
+    не записана (поток без финализации), поэтому достоверно её из файла
+    не прочитать. Вместо этого берётся заявленная клиентом и сверяется с
+    **фактическим** размером: «десять мегабайт за секунду» и «байт за минуту»
+    — не голос, и обещание длительности нельзя использовать, чтобы пронести
+    большой файл или пустышку.
+    """
+    if duration_ms is None or not MIN_VOICE_MS <= duration_ms <= MAX_VOICE_MS:
+        raise InvalidVoice("длительность вне пределов")
+    bitrate = round(size_bytes * 8 / duration_ms)
+    if not MIN_BITRATE_KBPS <= bitrate <= MAX_BITRATE_KBPS:
+        raise InvalidVoice(f"битрейт {bitrate} кбит/с неправдоподобен")
+    return bitrate
+
+
 def normalize_content_type(content_type: str) -> str:
     return content_type.split(";", 1)[0].strip().lower()
 
@@ -142,6 +184,8 @@ def sniff(declared: str, head: bytes) -> bool:
         return False
     if declared == "image/webp":
         return head[8:12] == b"WEBP"
+    if declared == "audio/mp4":
+        return head[4:8] == b"ftyp"
     return True
 
 
@@ -172,6 +216,8 @@ class Attachment:
     detected_content_type: str | None = None
     rejection_reason: RejectionCode | None = None
     attempts: int = 0
+    duration_ms: int | None = None
+    bitrate_kbps: int | None = None
 
     @property
     def kind(self) -> MessageKind:
