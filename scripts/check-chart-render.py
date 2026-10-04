@@ -71,8 +71,25 @@ def base_template(base: str) -> str:
     return result.stdout
 
 
-def render(chart: Path) -> list[dict]:
-    cmd = ["helm", "template", "messenger", str(chart), "-f", str(VALUES)]
+# Признаки, которых в базовом шаблоне ещё нет. Новая возможность включается
+# значением у нагрузки, и вывод у неё меняется **по замыслу**; инвариант
+# проверки в другом: правка шаблона без включения признака ничего не меняет.
+# Поэтому оба рендера идут с values, где такие признаки сняты.
+NEW_OPT_IN_FLAGS = ["objectStorage"]
+
+
+def values_without_new_flags(workdir: Path) -> Path:
+    values = yaml.safe_load(VALUES.read_text(encoding="utf-8"))
+    for service in values.get("services", {}).values():
+        for flag in NEW_OPT_IN_FLAGS:
+            service.pop(flag, None)
+    path = workdir / "values.compared.yaml"
+    path.write_text(yaml.safe_dump(values, allow_unicode=True), encoding="utf-8")
+    return path
+
+
+def render(chart: Path, values: Path) -> list[dict]:
+    cmd = ["helm", "template", "messenger", str(chart), "-f", str(values)]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         print(f"  ✗ helm template не собрался ({chart}):")
@@ -113,8 +130,9 @@ def main() -> int:
         (base_chart / TEMPLATE).write_text(base_template(args.base), encoding="utf-8")
         print(f"  база: {args.base} — в её дереве подменён только {TEMPLATE}")
 
-        current = by_name(render(CHART))
-        based = by_name(render(base_chart))
+        values = values_without_new_flags(workdir)
+        current = by_name(render(CHART, values))
+        based = by_name(render(base_chart, values))
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
