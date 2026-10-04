@@ -471,6 +471,20 @@ def typing_event(result: str) -> None:
     TYPING_EVENTS.labels(service=SERVICE, result=result).inc()
 
 
+# Web Push (G4): исход одной попытки уведомить устройство. `skipped_online` —
+# устройство с живым соединением (уведомление было бы вторым путём доставки);
+# `gone` — подписка мертва и удалена; `retry`/`rejected` — отказ провайдера.
+PUSH_SENT = Counter(
+    "messenger_push_sent_total",
+    "Исход попытки отправить Web Push на устройство (G4)",
+    ["service", "result"],
+)
+
+
+def push_sent(result: str) -> None:
+    PUSH_SENT.labels(service=SERVICE, result=result).inc()
+
+
 # G4: конвейер вложений. Исход обработки (`ready`/`rejected`/`failed`/
 # `deferred`) — тем же способом, что у `messenger_realtime_delivery_total`:
 # доля `rejected` и `deferred` и есть сигнал «сканер или хранилище болеют».
