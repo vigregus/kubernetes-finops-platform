@@ -92,7 +92,12 @@ export async function detectState(env: PushEnv, api: PushSubscriptionApi): Promi
     return { kind: "on" }
   } catch (error) {
     if (statusOf(error) === 503) return { kind: "unavailable" }
-    return { kind: "error", message: "Couldn't check notifications." }
+    // Не удалось зарегистрировать worker или спросить подписку при загрузке —
+    // чаще всего страница на сертификате, которому браузер не доверяет (локальный
+    // CA без доверия: worker на такой странице не регистрируется). Это не
+    // сообщение человеку: уведомлений у него просто нет, как у браузера без
+    // поддержки. Ошибка показывается только на явное нажатие «Turn on».
+    return { kind: "unsupported" }
   }
 }
 

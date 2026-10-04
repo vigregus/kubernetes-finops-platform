@@ -88,6 +88,14 @@ describe("состояние при загрузке", () => {
     expect(await detectState(env, api)).toEqual({ kind: "off" })
   })
 
+  it("worker не регистрируется (недоверенный сертификат) — тишина, а не ошибка на каждой загрузке", async () => {
+    const { env, api } = setup({ permission: "granted" })
+    env.register = async () => {
+      throw new Error("SecurityError: An SSL certificate error occurred")
+    }
+    expect(await detectState(env, api)).toEqual({ kind: "unsupported" })
+  })
+
   it("сервер не настроил уведомления (503) — «недоступно», а не ошибка", async () => {
     const { env, api } = setup({
       permission: "granted", existing: subscription(), apiError: { status: 503 },
