@@ -28,7 +28,8 @@
             "pattern": { "const": "typing:{conversation_id}" },
             "presence": { "const": false },
             "history_size": { "const": 0 },
-            "payload": { "$ref": "#/$defs/typingEvent" }
+            "payload": { "$ref": "#/$defs/typingEvent" },
+            "client_message": { "$ref": "#/$defs/typingClientMessage" }
           }
         },
         "user": {
@@ -84,6 +85,14 @@
           "description": "G3-008: t1 — момент коммита сообщения в Postgres. Только у `message.created`; без него браузер-получатель не может отсчитать настоящий T_delivery (`delivery_ack`, `POST /telemetry/browser`) и остаётся на серверном приближении."
         },
         "payload": { "type": "object" }
+      }
+    },
+    "typingClientMessage": {
+      "type": "object",
+      "description": "Что клиент публикует в `typing:{conversation_id}`. Публикация идёт через publish-proxy API: автор берётся из соединения, срок задаёт сервер, а все остальные поля тела — `user_id`, `expires_in_ms` и любые другие — отбрасываются (RT-003). Не чаще 6 публикаций за 5 секунд на пользователя и беседу — остальное отвергается (RT-002).",
+      "required": ["state"],
+      "properties": {
+        "state": { "enum": ["typing", "stop"] }
       }
     },
     "typingEvent": {

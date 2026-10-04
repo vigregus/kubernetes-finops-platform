@@ -67,6 +67,7 @@ from messenger.services import realtime as realtime_service
 from messenger.services import receipts as receipts_service
 from messenger.services import runtime as runtime_service
 from messenger.services import session_management as session_service
+from messenger.services import typing as typing_service
 from messenger.services import unread as unread_service
 from messenger.services import user_lookup as user_lookup_service
 from messenger.services import verification as verification_service
@@ -538,6 +539,37 @@ def _centrifugo_proxy_authorized(request: Request) -> bool:
     return bool(supplied) and hmac.compare_digest(
         supplied, realtime.settings.api_key
     )
+
+
+class CentrifugoPublishRequest(BaseModel):
+    """Внутренний запрос publish-proxy: клиент публикует в `typing:{id}`."""
+
+    client: str = Field(min_length=1, max_length=128)
+    user: str = Field(min_length=1, max_length=128)
+    channel: str = Field(min_length=1, max_length=256)
+    data: object = None
+
+
+@app.post("/internal/centrifugo/publish")
+async def centrifugo_publish_proxy(
+    body: CentrifugoPublishRequest, request: Request
+) -> dict[str, object]:
+    """Решает, что уйдёт получателям «печатает», и обрывает флуд (`RT-002`, `RT-003`).
+
+    Автор — из аутентифицированного соединения (`user`), а не из тела: тело
+    клиента заменяется событием сервера. В Postgres маршрут не ходит вовсе —
+    только в счётчик лимита.
+    """
+    if not _centrifugo_proxy_authorized(request):
+        return {"error": {"code": 403, "message": "forbidden"}}
+    runtime = request.app.state.runtime
+    decision = await typing_service.authorize_publish(
+        limiter=runtime.limiter, user_id=body.user, channel=body.channel, data=body.data
+    )
+    if not decision.allowed or decision.payload is None:
+        return {"error": {"code": decision.error_code, "message": decision.result}}
+    # `skip_history`: набор не пишется в историю канала ни при каких настройках.
+    return {"result": {"data": decision.payload, "skip_history": True}}
 
 
 @app.post("/realtime/token", response_model=dict[str, object])

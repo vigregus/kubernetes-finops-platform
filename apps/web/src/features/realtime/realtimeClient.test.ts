@@ -20,6 +20,8 @@ const CENTRIFUGO = "wss://rt.finops.local/connection/websocket";
 const CHANNEL = "conversation:3f6b0d1e-0f4e-4a1f-9d2b-3ad0d1e6a111";
 /** Второй канал той же выдачи сервера: он подписывает клиента и на `user:{id}`. */
 const OTHER_CHANNEL = "user:8c1f2a34-5b6d-4e7f-8a90-1b2c3d4e5f60";
+/** Канал набора той же беседы — третий в выдаче сервера (`typing:{id}`). */
+const TYPING_CHANNEL = "typing:3f6b0d1e-0f4e-4a1f-9d2b-3ad0d1e6a111";
 
 /**
  * Адаптер с двойником и записью всего, что он отдаёт наружу.
@@ -49,6 +51,64 @@ function givenClient() {
 
   return { client, fake, tickets, events, publications, userPublications };
 }
+
+describe("«печатает»: канал набора", () => {
+  function givenTypingClient() {
+    const typingPublications: unknown[] = [];
+    const publications: unknown[] = [];
+    const fake = givenFakeCentrifuge();
+    const client = createRealtimeClient({
+      centrifugoUrl: CENTRIFUGO,
+      channel: CHANNEL,
+      userChannel: OTHER_CHANNEL,
+      typingChannel: TYPING_CHANNEL,
+      issueTicket: givenTicketIssuer().issueTicket,
+      onEvent: () => {},
+      onPublication: (payload) => publications.push(payload),
+      onUserPublication: () => {},
+      onTypingPublication: (payload) => typingPublications.push(payload),
+      createCentrifuge: fake.factory,
+    });
+    return { client, fake, typingPublications, publications };
+  }
+
+  it("публикация канала набора доходит до своего обработчика и только до него", () => {
+    const { fake, typingPublications, publications } = givenTypingClient();
+    const payload = { user_id: "u1", expires_in_ms: 5000 };
+    fake.clientHandlers["publication"]?.({ channel: TYPING_CHANNEL, data: payload });
+    expect(typingPublications).toEqual([payload]);
+    expect(publications).toEqual([]);
+  });
+
+  it("чужой канал набора не принимается", () => {
+    const { fake, typingPublications } = givenTypingClient();
+    fake.clientHandlers["publication"]?.({ channel: "typing:чужая", data: { user_id: "u" } });
+    expect(typingPublications).toEqual([]);
+  });
+
+  it("sendTyping публикует минимальное тело: автора и срок задаёт сервер (RT-003)", () => {
+    const { client, fake } = givenTypingClient();
+    client.sendTyping("typing");
+    client.sendTyping("stop");
+    expect(fake.published).toEqual([
+      { channel: TYPING_CHANNEL, data: { state: "typing" } },
+      { channel: TYPING_CHANNEL, data: { state: "stop" } },
+    ]);
+  });
+
+  it("отказ публикации (лимит, нет соединения) не показывается и не роняет вкладку", async () => {
+    const { client, fake } = givenTypingClient();
+    fake.publishError = new Error("rate limited");
+    expect(() => client.sendTyping("typing")).not.toThrow();
+    await Promise.resolve();
+  });
+
+  it("без канала набора «печатает» у клиента выключено, остальное работает", () => {
+    const { client, fake } = givenClient();
+    client.sendTyping("typing");
+    expect(fake.published).toEqual([]);
+  });
+});
 
 describe("свежий тикет на каждую попытку соединения", () => {
   // Детектор B5/B15. Тикет живёт 120 секунд, а переподключение после окна

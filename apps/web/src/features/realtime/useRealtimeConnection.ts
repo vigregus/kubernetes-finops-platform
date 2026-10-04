@@ -37,6 +37,10 @@ export interface UseRealtimeConnectionOptions {
    * непрочитанного — факт списка, и адресован он вкладке, а не открытой беседе.
    */
   readonly onUserPublication: (payload: unknown) => void;
+  /** Канал набора `typing:{id}`; без него «печатает» у клиента выключено. */
+  readonly typingChannel?: string;
+  /** Публикации канала набора — наружу, к `useTypingPeers`. Не толкуются здесь. */
+  readonly onTypingPublication?: (payload: unknown) => void;
   /** Подмена SDK — для тестов обвязки; в production не задаётся. */
   readonly createCentrifuge?: RealtimeClientOptions["createCentrifuge"];
   /**
@@ -88,6 +92,8 @@ export type ClientObservedEvent = Extract<
 export type RealtimeConnection = ConnectionMachineState & {
   /** Сообщить автомату факт, увиденный над SDK (см. `ClientObservedEvent`). */
   notify(event: ClientObservedEvent): void;
+  /** «Печатает» / «перестал» собеседникам. Стабильная ссылка. */
+  sendTyping(signal: "typing" | "stop"): void;
 };
 
 export function useRealtimeConnection(
@@ -119,6 +125,11 @@ export function useRealtimeConnection(
     userPublicationRef.current = options.onUserPublication;
   }, [options.onUserPublication]);
 
+  const typingPublicationRef = useRef(options.onTypingPublication);
+  useEffect(() => {
+    typingPublicationRef.current = options.onTypingPublication;
+  }, [options.onTypingPublication]);
+
   const clientRef = useRef<RealtimeClient | null>(null);
 
   const onObservedEventRef = useRef(options.onObservedEvent);
@@ -135,17 +146,20 @@ export function useRealtimeConnection(
     dispatch(event);
   }, []);
 
-  const { centrifugoUrl, channel, userChannel, issueTicket, createCentrifuge } = options;
+  const { centrifugoUrl, channel, userChannel, typingChannel, issueTicket, createCentrifuge } =
+    options;
 
   useEffect(() => {
     const client = createRealtimeClient({
       centrifugoUrl,
       channel,
       userChannel,
+      ...(typingChannel === undefined ? {} : { typingChannel }),
       issueTicket,
       onEvent: dispatchObserved,
       onPublication: (payload) => publicationRef.current(payload),
       onUserPublication: (payload) => userPublicationRef.current(payload),
+      onTypingPublication: (payload) => typingPublicationRef.current?.(payload),
       createCentrifuge,
     });
 
@@ -156,7 +170,15 @@ export function useRealtimeConnection(
       clientRef.current = null;
       client.stop();
     };
-  }, [centrifugoUrl, channel, userChannel, issueTicket, createCentrifuge, dispatchObserved]);
+  }, [
+    centrifugoUrl,
+    channel,
+    userChannel,
+    typingChannel,
+    issueTicket,
+    createCentrifuge,
+    dispatchObserved,
+  ]);
 
   useEffect(() => {
     const goOffline = () => dispatchObserved({ type: "browser-offline" });
@@ -190,5 +212,10 @@ export function useRealtimeConnection(
   // Объект собирается через `useMemo`, потому что от него зависит эффект
   // композиции («вошли в SYNCING — пойти за историей»): новая ссылка на каждом
   // рендере перезапускала бы его на каждом рендере.
-  return useMemo(() => ({ ...state, notify }), [state, notify]);
+  const sendTyping = useCallback(
+    (signal: "typing" | "stop") => clientRef.current?.sendTyping(signal),
+    [],
+  );
+
+  return useMemo(() => ({ ...state, notify, sendTyping }), [state, notify, sendTyping]);
 }

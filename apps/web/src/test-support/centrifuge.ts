@@ -50,6 +50,13 @@ export interface FakeCentrifuge {
    * внутри двойника.
    */
   calls: { connect: number; disconnect: number; newSubscription: number };
+  /**
+   * Клиентские публикации (`client.publish`) — для «печатает». Отказ
+   * публикации задаётся полем `publishError`: SDK отклоняет промис, когда нет
+   * соединения или сервер вернул ошибку (лимит).
+   */
+  published: { channel: string; data: unknown }[];
+  publishError: Error | null;
 }
 
 export function givenFakeCentrifuge(): FakeCentrifuge {
@@ -65,6 +72,8 @@ export function givenFakeCentrifuge(): FakeCentrifuge {
     getData: undefined as (() => Promise<unknown>) | undefined,
     clientHandlers: {} as Record<string, Handler>,
     calls: { connect: 0, disconnect: 0, newSubscription: 0 },
+    published: [] as { channel: string; data: unknown }[],
+    publishError: null as Error | null,
   } as unknown as FakeCentrifuge;
 
   fake.factory = (endpoint, options) => {
@@ -89,6 +98,11 @@ export function givenFakeCentrifuge(): FakeCentrifuge {
       },
       disconnect: () => {
         fake.calls.disconnect += 1;
+      },
+      publish: async (channel: string, data: unknown) => {
+        fake.published.push({ channel, data });
+        if (fake.publishError !== null) throw fake.publishError;
+        return {};
       },
     } as never;
   };
