@@ -147,6 +147,10 @@ spec:
               if have messenger-vapid; then
                 echo "messenger-vapid: уже есть, не трогаю"
               else
+                # В образе alpine/k8s нет openssl (проверено прогоном джоба): ставится
+                # из репозитория Alpine. Это локальный стенд с выходом в сеть; в
+                # облаке секрет приходит из хранилища (External Secrets), и джоба нет.
+                command -v openssl >/dev/null || apk add --no-cache openssl >/dev/null
                 openssl ecparam -name prime256v1 -genkey -noout -out /tmp/vapid.pem
                 pub=$(openssl ec -in /tmp/vapid.pem -pubout -outform DER 2>/dev/null \
                   | tail -c 65 | openssl base64 -A | tr '+/' '-_' | tr -d '=')
