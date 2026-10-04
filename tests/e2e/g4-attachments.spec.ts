@@ -113,9 +113,10 @@ test.describe("G4: вложения", () => {
 		const image = row.locator("img[alt='cat.png']")
 		await expect(image).toBeVisible({ timeout: 30_000 })
 
-		const src = await image.getAttribute("src")
-		expect(src, "у картинки есть ссылка на скачивание").toBeTruthy()
-		const downloaded = await b.page.request.get(src as string)
+		// В ленте миниатюра, а оригинал — по ссылке вокруг картинки.
+		const href = await row.locator("a[data-attachment-original]").getAttribute("href")
+		expect(href, "у картинки есть ссылка на оригинал").toBeTruthy()
+		const downloaded = await b.page.request.get(href as string)
 		expect(downloaded.status()).toBe(200)
 		expect(Buffer.compare(await downloaded.body(), PNG), "скачанное равно загруженному").toBe(0)
 
@@ -151,8 +152,11 @@ test.describe("G4: вложения", () => {
 		expect((await thumb.body()).length).toBeLessThan(original.length)
 		await expect(image).toHaveAttribute("width", "1200")
 		await expect(image).toHaveAttribute("height", "800")
-		const natural = await image.evaluate((el: HTMLImageElement) => [el.naturalWidth, el.naturalHeight])
-		expect(natural).toEqual([480, 320])
+		// Картинка грузится лениво (`loading="lazy"`): сначала показать, потом ждать.
+		await image.scrollIntoViewIfNeeded()
+		await expect
+			.poll(() => image.evaluate((el: HTMLImageElement) => [el.naturalWidth, el.naturalHeight]))
+			.toEqual([480, 320])
 
 		// Оригинал — по ссылке вокруг картинки, байт в байт.
 		const link = row.locator("a[data-attachment-original]")
