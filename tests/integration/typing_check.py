@@ -83,6 +83,32 @@ async def command(ws, frame_id: int, body: dict) -> dict:
     return {}
 
 
+async def flood(ws, channel: str, count: int) -> list[dict]:
+    """Шлёт `count` публикаций подряд без ожидания и собирает все ответы.
+
+    Читает один читатель: параллельные `recv` на одном сокете запрещены. Ответы
+    приходят пачками, а публикации-эхо отправителя откладываются.
+    """
+    for n in range(count):
+        await ws.send(json.dumps({"id": 1000 + n, "publish": {"channel": channel,
+                                                              "data": {"state": "typing"}}}))
+    replies: dict[int, dict] = {}
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 15.0
+    while len(replies) < count and loop.time() < deadline:
+        try:
+            raw = await asyncio.wait_for(ws.recv(), timeout=max(deadline - loop.time(), 0.1))
+        except (TimeoutError, asyncio.TimeoutError):
+            break
+        for frame in frames(raw):
+            frame_id = frame.get("id")
+            if isinstance(frame_id, int) and frame_id >= 1000:
+                replies[frame_id] = frame
+            else:
+                _pending.setdefault(id(ws), []).append(frame)
+    return list(replies.values())
+
+
 def _publication(frame: dict) -> dict | None:
     push = frame.get("push")
     pub = push.get("pub") if isinstance(push, dict) else None
@@ -218,17 +244,14 @@ async def run() -> None:
             # --- RT-002: флуд ------------------------------------------------
             await asyncio.sleep(6.0)  # окно лимита обнуляется
             await drain(ws_b, 0.3)
-            replies = await asyncio.gather(*[
-                command(ws_a, 100 + n, {"publish": {"channel": channel,
-                                                   "data": {"state": "typing"}}})
-                for n in range(100)
-            ])
+            replies = await flood(ws_a, channel, 100)
             accepted = sum(1 for r in replies if "error" not in r)
             rejected = sum(1 for r in replies if "error" in r)
             check(f"RT-002: из 100 публикаций принято не больше {LIMIT}",
                   1 <= accepted <= LIMIT, f"принято {accepted}, отвергнуто {rejected}")
             check("RT-002: остальные отвергнуты, а не потеряны молча",
-                  accepted + rejected == 100 and rejected >= 100 - LIMIT)
+                  accepted + rejected == 100 and rejected >= 100 - LIMIT,
+                  f"ответов {accepted + rejected}")
             delivered = await drain(ws_b, 2.0)
             check("RT-002: получателю дошло не больше лимита",
                   len(delivered) <= LIMIT, f"дошло {len(delivered)}")
