@@ -29,6 +29,9 @@ class Reason(str, Enum):
     PAYLOAD_TOO_LARGE = "payload_too_large"
     UNSUPPORTED_MEDIA_TYPE = "unsupported_media_type"
     ATTACHMENT_NOT_READY = "attachment_not_ready"
+    ATTACHMENT_NOT_FOUND = "attachment_not_found"
+    ATTACHMENT_UPLOAD_MISSING = "attachment_upload_missing"
+    ATTACHMENTS_UNAVAILABLE = "attachments_unavailable"
     RATE_LIMITED = "rate_limited"
     UNAUTHENTICATED = "unauthenticated"
     UPSTREAM_UNAVAILABLE = "upstream_unavailable"
@@ -69,6 +72,15 @@ _PUBLIC: dict[Reason, Problem] = {
     Reason.CONVERSATION_NOT_FOUND: _HIDDEN_NOT_FOUND,
     Reason.USER_NOT_FOUND: _HIDDEN_NOT_FOUND,
     Reason.MESSAGE_NOT_FOUND: _HIDDEN_NOT_FOUND,
+    # Чужое и несуществующее вложение неразличимы — по тому же доводу, что и
+    # чужая беседа: UUID не должен позволять перечислять чужие файлы.
+    Reason.ATTACHMENT_NOT_FOUND: _HIDDEN_NOT_FOUND,
+    Reason.ATTACHMENT_UPLOAD_MISSING: Problem(
+        409, "attachment_upload_missing", "Файл в хранилище не найден"
+    ),
+    Reason.ATTACHMENTS_UNAVAILABLE: Problem(
+        503, "attachments_unavailable", "Вложения временно недоступны"
+    ),
     Reason.BLOCKED: Problem(403, "forbidden", "Действие недоступно"),
     Reason.EMAIL_UNVERIFIED: Problem(403, "forbidden", "Действие недоступно"),
     Reason.SELF_CONVERSATION: Problem(403, "forbidden", "Действие недоступно"),

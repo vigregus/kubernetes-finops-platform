@@ -42,6 +42,8 @@ class Runtime:
 
     keys = None
     oidc_settings = None
+    # G4: у этих тестов объектного хранилища нет, вложения не затрагиваются.
+    object_store = None
 
     def __init__(self) -> None:
         self.opened = 0
