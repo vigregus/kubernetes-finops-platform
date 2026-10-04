@@ -50,7 +50,7 @@ export interface BrowserRegistration {
 
 export interface PushEnv {
   supported(): boolean
-  permission(): NotificationPermission
+  permission(): Promise<NotificationPermission>
   requestPermission(): Promise<NotificationPermission>
   /** Регистрирует (или находит) Service Worker и ждёт его готовности. */
   register(): Promise<BrowserRegistration>
@@ -80,7 +80,7 @@ function statusOf(error: unknown): number | undefined {
  */
 export async function detectState(env: PushEnv, api: PushSubscriptionApi): Promise<PushState> {
   if (!env.supported()) return { kind: "unsupported" }
-  const permission = env.permission()
+  const permission = await env.permission()
   if (permission === "denied") return { kind: "denied" }
   if (permission === "default") return { kind: "off" }
 
@@ -152,7 +152,17 @@ export function browserEnv(): PushEnv | null {
   }
   return {
     supported: () => window.isSecureContext,
-    permission: () => Notification.permission,
+    // Разрешение читается через Permissions API, а не только `Notification.permission`:
+    // в безголовом Chromium второе остаётся `denied` при выданном разрешении
+    // (измерено в приёмке), а первое отвечает верно. В обычном браузере они совпадают.
+    permission: async () => {
+      try {
+        const status = await navigator.permissions.query({ name: "notifications" })
+        return status.state === "prompt" ? "default" : status.state
+      } catch {
+        return Notification.permission
+      }
+    },
     requestPermission: () => Notification.requestPermission(),
     register: async () => {
       await navigator.serviceWorker.register("/sw.js")

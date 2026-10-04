@@ -32,7 +32,7 @@ function setup(over: {
   const calls = { subscribe: vi.fn(), register: vi.fn() }
   const env: PushEnv = {
     supported: () => over.supported ?? true,
-    permission: () => over.permission ?? "default",
+    permission: async () => over.permission ?? "default",
     requestPermission: async () => over.asked ?? "granted",
     register: async () => {
       calls.register()
