@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from messenger.adapters.ratelimit import LimitDecision, OnFailure
 from messenger.api.main import app
+from messenger.services import typing as typing_service
 
 USER = "11111111-1111-1111-1111-111111111111"
 CONVERSATION = uuid.UUID("22222222-2222-2222-2222-222222222222")
@@ -42,8 +43,7 @@ class Runtime:
 
     @asynccontextmanager
     async def connection(self, mode=None):
-        raise AssertionError("«печатает» не ходит в Postgres")
-        yield
+        yield None
 
 
 @pytest.fixture
@@ -51,8 +51,30 @@ def limiter():
     return Limiter()
 
 
+class Membership:
+    """Подмена походов в Postgres за членством: считает обращения."""
+
+    def __init__(self):
+        self.member = True
+        self.lookups = 0
+
+
+@pytest.fixture
+def membership(monkeypatch):
+    fake = Membership()
+
+    async def is_active_member(conn, user_id, conversation_id):
+        fake.lookups += 1
+        return fake.member
+
+    monkeypatch.setattr(typing_service, "is_active_member", is_active_member)
+    typing_service.reset_membership_cache()
+    yield fake
+    typing_service.reset_membership_cache()
+
+
 @pytest.fixture(autouse=True)
-def runtime(limiter):
+def runtime(limiter, membership):
     original = app.state.runtime
     app.state.runtime = Runtime(limiter)
     yield app.state.runtime
@@ -123,14 +145,50 @@ def test_флуд_обрывается_лимитом_до_публикации(
 
 def test_лимит_по_пользователю_и_беседе_закрывается_при_отказе_счётчика(client, limiter):
     publish(client, data={"state": "typing"})
-    (call,) = limiter.calls
-    assert call["key"] == f"typing:{USER}:{CONVERSATION}"
-    assert (call["limit"], call["window"]) == (6, 5)
+    overall, per_conversation = limiter.calls
+    # Сначала общий предел на пользователя, затем — на пару пользователь-беседа.
+    assert overall["key"] == f"typing:{USER}"
+    assert (overall["limit"], overall["window"]) == (60, 5)
+    assert per_conversation["key"] == f"typing:{USER}:{CONVERSATION}"
+    assert (per_conversation["limit"], per_conversation["window"]) == (6, 5)
     # Потерять набор нормально, а недоступный счётчик не повод открывать флуд.
-    assert call["on_failure"] is OnFailure.DENY
+    assert overall["on_failure"] is OnFailure.DENY
+    assert per_conversation["on_failure"] is OnFailure.DENY
 
 
 def test_выключенный_набор_отвечает_отказом(client, monkeypatch):
     monkeypatch.setenv("TYPING_ENABLED", "false")
     r = publish(client, data={"state": "typing"})
     assert r.json()["error"]["code"] == 503
+
+
+def test_не_участник_не_публикует_в_канал_набора(client, membership):
+    membership.member = False
+    r = publish(client, data={"state": "typing"})
+    assert r.json()["error"]["code"] == 403
+
+
+def test_членство_кешируется_на_ограниченное_время(client, membership):
+    for _ in range(5):
+        publish(client, data={"state": "typing"})
+    # Сердцебиение не ходит в Postgres на каждое сообщение.
+    assert membership.lookups == 1
+
+
+def test_исключённый_перестаёт_публиковать_не_позже_ttl(client, membership, monkeypatch):
+    import time as _time
+
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(_time, "monotonic", lambda: clock["now"])
+    # `authorize_publish` берёт часы по умолчанию при определении — подменяем сам кеш.
+    assert publish(client, data={"state": "typing"}).json().get("result")
+    membership.member = False
+    typing_service._MEMBERS.clear()  # noqa: SLF001 - имитация истёкшего TTL
+    assert publish(client, data={"state": "typing"}).json()["error"]["code"] == 403
+
+
+def test_перебор_каналов_упирается_в_общий_предел_до_похода_в_базу(client, limiter, membership):
+    limiter.allowed = False
+    r = publish(client, data={"state": "typing"})
+    assert r.json()["error"]["code"] == 429
+    assert membership.lookups == 0

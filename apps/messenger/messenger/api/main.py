@@ -563,8 +563,21 @@ async def centrifugo_publish_proxy(
     if not _centrifugo_proxy_authorized(request):
         return {"error": {"code": 403, "message": "forbidden"}}
     runtime = request.app.state.runtime
+
+    async def is_member(user_id: str, conversation_id: uuid.UUID) -> bool:
+        try:
+            async with runtime.connection() as conn:
+                return await typing_service.is_active_member(conn, user_id, conversation_id)
+        except ConnectionError:
+            # Не смогли проверить — не допускаем: потерять набор нормально.
+            return False
+
     decision = await typing_service.authorize_publish(
-        limiter=runtime.limiter, user_id=body.user, channel=body.channel, data=body.data
+        limiter=runtime.limiter,
+        user_id=body.user,
+        channel=body.channel,
+        data=body.data,
+        is_member=is_member,
     )
     if not decision.allowed or decision.payload is None:
         return {"error": {"code": decision.error_code, "message": decision.result}}

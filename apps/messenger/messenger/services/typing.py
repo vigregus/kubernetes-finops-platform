@@ -16,10 +16,17 @@
 from __future__ import annotations
 
 import os
+import time
+import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+
+import asyncpg
 
 from messenger.adapters.ratelimit import OnFailure, RateLimiter
 from messenger.domain import typing_indicator as domain
+from messenger.domain.ids import ConversationId, UserId
+from messenger.repositories import conversations as conversation_repo
 from messenger.telemetry import metrics
 
 
@@ -48,14 +55,68 @@ def enabled() -> bool:
     return os.getenv("TYPING_ENABLED", "true").strip().lower() not in ("0", "false", "no", "off")
 
 
+# Член ли пользователь беседы. Читает Postgres — вызывается только при промахе
+# кеша, поэтому приходит параметром, а не импортируется: сервису нечего знать
+# про соединения.
+IsMember = Callable[[str, uuid.UUID], Awaitable[bool]]
+
+_MEMBERS: dict[tuple[str, uuid.UUID], tuple[bool, float]] = {}
+_MEMBERS_MAX = 10_000
+
+
+async def is_active_member(
+    conn: asyncpg.Connection, user_id: str, conversation_id: uuid.UUID
+) -> bool:
+    """Действующий участник: запись есть и `left_at` пуст."""
+    try:
+        uid = UserId(uuid.UUID(user_id))
+    except ValueError:
+        return False
+    member = await conversation_repo.fetch_member(
+        conn, conversation_id=ConversationId(conversation_id), user_id=uid
+    )
+    return member is not None and member.left_at is None
+
+
+def reset_membership_cache() -> None:
+    _MEMBERS.clear()
+
+
+async def _member(
+    user_id: str, conversation_id: uuid.UUID, is_member: IsMember, now: Callable[[], float]
+) -> bool:
+    """Членство с кешем в памяти пода на `MEMBERSHIP_TTL_SECONDS`.
+
+    Подписку на `typing:{id}` Centrifugo выдаёт по тикету, но при включённом
+    publish-proxy он **делегирует** право публикации прокси и не требует
+    подписки (измерено: не участник публиковал в канал). Поэтому членство
+    проверяет сам прокси — без этого `SEC-008` не выполнен.
+    """
+    key = (user_id, conversation_id)
+    cached = _MEMBERS.get(key)
+    moment = now()
+    if cached is not None and cached[1] > moment:
+        return cached[0]
+    answer = await is_member(user_id, conversation_id)
+    if len(_MEMBERS) >= _MEMBERS_MAX:
+        _MEMBERS.clear()
+    _MEMBERS[key] = (answer, moment + domain.MEMBERSHIP_TTL_SECONDS)
+    return answer
+
+
 async def authorize_publish(
     *,
     limiter: RateLimiter,
     user_id: str,
     channel: str,
     data: object,
+    is_member: IsMember,
+    now: Callable[[], float] = time.monotonic,
 ) -> PublishDecision:
-    decision = await _decide(limiter=limiter, user_id=user_id, channel=channel, data=data)
+    decision = await _decide(
+        limiter=limiter, user_id=user_id, channel=channel, data=data,
+        is_member=is_member, now=now,
+    )
     metrics.typing_event(decision.result)
     return decision
 
@@ -66,6 +127,8 @@ async def _decide(
     user_id: str,
     channel: str,
     data: object,
+    is_member: IsMember,
+    now: Callable[[], float],
 ) -> PublishDecision:
     if not enabled():
         return PublishDecision(error_code=503, result="disabled")
@@ -78,9 +141,21 @@ async def _decide(
     if state is None:
         return PublishDecision(error_code=400, result="invalid")
 
-    # Подписку на `typing:{id}` Centrifugo выдаёт по тикету и разрешает
-    # публиковать только подписчику, поэтому членство здесь заново не
-    # проверяется: это был бы поход в Postgres на каждое сердцебиение.
+    # Сначала дешёвое и общее: предел на пользователя по всем беседам. Он
+    # ограничивает число походов в базу за членством, если кто-то перебирает
+    # случайные каналы.
+    overall = await limiter.take(
+        f"typing:{user_id}",
+        limit=domain.USER_RATE_LIMIT,
+        window_seconds=domain.RATE_WINDOW_SECONDS,
+        on_failure=OnFailure.DENY,
+    )
+    if not overall.allowed:
+        return PublishDecision(error_code=429, result="rate_limited")
+
+    if not await _member(user_id, conversation_id, is_member, now):
+        return PublishDecision(error_code=403, result="forbidden")
+
     decision = await limiter.take(
         f"typing:{user_id}:{conversation_id}",
         limit=domain.RATE_LIMIT,

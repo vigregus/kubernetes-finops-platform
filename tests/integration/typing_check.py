@@ -21,7 +21,6 @@ import uuid
 
 import httpx
 from login_check import API, ORIGIN, admin_token, create_user
-from realtime_receive_check import wait_publication
 from realtime_revoke_check import _auth_headers, _connect, _login
 from relay_check import pool_settings
 
@@ -41,24 +40,81 @@ def check(what: str, condition: bool, detail: str = "") -> None:
     failures.append(what)
 
 
+def frames(raw: str) -> list[dict]:
+    """Centrifugo склеивает несколько ответов и публикаций в один кадр через перевод строки.
+
+    Разбирать кадр целиком нельзя: ответ на публикацию приходит вместе с её
+    эхом, и `json.loads` на склейке падает — ответ пропадает без следа.
+    """
+    out: list[dict] = []
+    for line in raw.splitlines():
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(item, dict):
+            out.append(item)
+    return out
+
+
+# Публикации, пришедшие в одном кадре с ответом на команду, не теряются: они
+# откладываются здесь и отдаются следующему ожиданию публикации.
+_pending: dict[int, list[dict]] = {}
+
+
 async def command(ws, frame_id: int, body: dict) -> dict:
-    """Шлёт команду и ждёт ответ с тем же `id`; публикации по пути пропускаются."""
+    """Шлёт команду и ждёт ответ с тем же `id`; публикации по пути запоминаются."""
     await ws.send(json.dumps({"id": frame_id, **body}))
     loop = asyncio.get_running_loop()
     deadline = loop.time() + 10.0
     while loop.time() < deadline:
-        raw = await asyncio.wait_for(ws.recv(), timeout=max(deadline - loop.time(), 0.1))
         try:
-            frame = json.loads(raw)
-        except ValueError:
-            continue
-        if isinstance(frame, dict) and frame.get("id") == frame_id:
-            return frame
+            raw = await asyncio.wait_for(ws.recv(), timeout=max(deadline - loop.time(), 0.1))
+        except (TimeoutError, asyncio.TimeoutError):
+            break
+        reply: dict | None = None
+        for frame in frames(raw):
+            if frame.get("id") == frame_id:
+                reply = frame
+            else:
+                _pending.setdefault(id(ws), []).append(frame)
+        if reply is not None:
+            return reply
     return {}
 
 
+def _publication(frame: dict) -> dict | None:
+    push = frame.get("push")
+    pub = push.get("pub") if isinstance(push, dict) else None
+    return pub["data"] if isinstance(pub, dict) and isinstance(pub.get("data"), dict) else None
+
+
+async def wait_publication(ws, *, timeout: float) -> dict | None:
+    queue = _pending.setdefault(id(ws), [])
+    while queue:
+        data = _publication(queue.pop(0))
+        if data is not None:
+            return data
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        try:
+            raw = await asyncio.wait_for(ws.recv(), timeout=max(deadline - loop.time(), 0.1))
+        except (TimeoutError, asyncio.TimeoutError):
+            return None
+        for frame in frames(raw):
+            data = _publication(frame)
+            if data is not None:
+                queue.append({"push": {"pub": {"data": data}}})
+        while queue:
+            data = _publication(queue.pop(0))
+            if data is not None:
+                return data
+    return None
+
+
 async def drain(ws, seconds: float) -> list[dict]:
-    """Собирает все публикации за окно."""
+    """Собирает все публикации за окно, включая пришедшие пачкой."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + seconds
     got: list[dict] = []
@@ -124,8 +180,11 @@ async def run() -> None:
 
             sub_b = await command(ws_b, 2, {"subscribe": {"channel": channel}})
             sub_a = await command(ws_a, 2, {"subscribe": {"channel": channel}})
-            check("участники подписаны на канал набора (его выдал сервер)",
-                  "error" not in sub_a and "error" not in sub_b, f"{sub_a} {sub_b}")
+            # Повторная подписка отвечает `105 already subscribed`: канал выдан
+            # сервером по тикету, клиенту подписываться самому не нужно.
+            served = all(r.get("error", {}).get("code") == 105 for r in (sub_a, sub_b))
+            check("участники уже подписаны на канал набора: его выдал сервер", served,
+                  f"{sub_a} {sub_b}")
 
             # --- SEC-008: чужой ----------------------------------------------
             sub_c = await command(ws_c, 2, {"subscribe": {"channel": channel}})
@@ -176,7 +235,8 @@ async def run() -> None:
 
             # --- сообщения при флуде продолжают идти -------------------------
             sub_msg = await command(ws_b, 7, {"subscribe": {"channel": f"conversation:{conversation}"}})
-            check("B подписан на канал беседы", "error" not in sub_msg, str(sub_msg))
+            check("B уже подписан на канал беседы (выдан сервером)",
+                  sub_msg.get("error", {}).get("code") == 105, str(sub_msg))
             sent = await http.post(
                 f"{API}/conversations/{conversation}/messages",
                 json={"client_message_id": str(uuid.uuid4()), "type": "text",
