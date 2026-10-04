@@ -62,6 +62,14 @@ export interface RealtimeClientOptions {
    * который гейт и закрывает.
    */
   readonly userChannel: string;
+  /**
+   * Канал набора — `typing:{conversation_id}` (`channels.json`). Необязателен: без
+   * него «печатает» выключено у этого клиента, а остальное работает как прежде.
+   * Выдаёт его сервер тем же тикетом, что и канал беседы.
+   */
+  readonly typingChannel?: string;
+  /** Публикация канала набора — как пришла. Разбирает `typingState`, а не адаптер. */
+  readonly onTypingPublication?: (payload: unknown) => void;
   /** Свежий тикет на **каждую** попытку соединения (B5, B15). */
   readonly issueTicket: RealtimeTicketIssuer;
   /** Факты для автомата. Адаптер их не толкует. */
@@ -98,6 +106,12 @@ export interface RealtimeClient {
    */
   connect(): void;
   stop(): void;
+  /**
+   * Сообщить собеседникам «печатает» или «перестал». Fire-and-forget: событие
+   * эфемерное, терять его нормально, и отказ (нет соединения, лимит сервера)
+   * не показывается человеку и не повторяется.
+   */
+  sendTyping(signal: "typing" | "stop"): void;
 }
 
 export function createRealtimeClient(options: RealtimeClientOptions): RealtimeClient {
@@ -227,7 +241,13 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
       options.onPublication(ctx.data);
       return;
     }
-    if (ctx.channel === options.userChannel) options.onUserPublication(ctx.data);
+    if (ctx.channel === options.userChannel) {
+      options.onUserPublication(ctx.data);
+      return;
+    }
+    if (options.typingChannel !== undefined && ctx.channel === options.typingChannel) {
+      options.onTypingPublication?.(ctx.data);
+    }
   });
 
   return {
@@ -245,6 +265,14 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
     },
     stop() {
       client.disconnect();
+    },
+    sendTyping(signal) {
+      if (options.typingChannel === undefined) return;
+      // Тело — минимум: автора и срок задаёт сервер (publish-proxy, `RT-003`),
+      // и всё, что клиент добавил бы сверх `state`, он отбросит.
+      client.publish(options.typingChannel, { state: signal }).catch(() => {
+        // Нет соединения или лимит: набор терять нормально.
+      });
     },
   };
 }

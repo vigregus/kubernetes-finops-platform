@@ -43,7 +43,6 @@ FORBIDDEN = {
     # обязательных — пришло.
     "features/messages/components/MessageTimeline.tsx": "вне объёма G3-005 (B15)",
     "features/messages/components/ConnectionStateBanner.tsx": "вне объёма G3-005 (B15)",
-    "features/messages/components/TypingIndicator.tsx": "вне объёма G3-005 (B15)",
     "features/messages/components/SyncIndicator.tsx": "вне объёма G3-005 (B15)",
     "features/conversations/components/BlockedNotice.tsx": "вне объёма G3-005 (B15)",
     "features/auth/SettingsSessionsPage.tsx": "вне объёма G3-005 (B15)",
@@ -96,6 +95,11 @@ REQUIRED = (
     # выше: без неё «баннер объявлен рабочим, а не подключён» прошло бы
     # молча.
     "features/auth/components/EmailVerificationBanner.tsx",
+    # `G4` («печатает», `RT-001…003`) переводит `TypingIndicator` из закрытого
+    # списка B15 в обязательный production-path — двусторонне, как
+    # `MessageComposer`: индикатор рисует `MessageList`, а имя в `REQUIRED`
+    # гарантирует, что снятый импорт не пройдёт молча как «нарушений нет».
+    "features/messages/components/TypingIndicator.tsx",
 )
 
 

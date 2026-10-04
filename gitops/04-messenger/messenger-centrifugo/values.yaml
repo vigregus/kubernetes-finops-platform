@@ -43,6 +43,16 @@ config:
             X-Realtime-Proxy-Key: "${CENTRIFUGO_VAR_PROXY_SECRET}"
 
   channel:
+    proxy:
+      # Публикации клиента в `typing:{id}` проходят через API: он берёт автора
+      # из соединения (RT-003) и обрывает флуд лимитом (RT-002). Ограничение
+      # частоты самого Centrifugo — возможность платной редакции.
+      publish:
+        endpoint: http://api.messenger.svc.cluster.local/internal/centrifugo/publish
+        timeout: 1s
+        http:
+          static_headers:
+            X-Realtime-Proxy-Key: "${CENTRIFUGO_VAR_PROXY_SECRET}"
     namespaces:
       # История в Centrifugo - ограниченный эфемерный кеш, а не хранилище.
       # Она нужна ровно для одного: догрузить пропущенное за короткий разрыв
@@ -63,6 +73,10 @@ config:
         join_leave: false
         history_size: 0
         history_ttl: 0s
+        # Публикует подписчик (подписку выдаёт сервер по тикету, SEC-008), и
+        # каждая публикация идёт через API (`publish_proxy_enabled`).
+        allow_publish_for_subscriber: true
+        publish_proxy_enabled: true
       # Личный канал пользователя: уведомления о новых беседах, счётчики
       # непрочитанного, отзыв сессии при выходе на всех устройствах.
       - name: user
