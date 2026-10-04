@@ -113,12 +113,31 @@ def test_инициация_отдаёт_ссылку_и_заголовки(clie
     [
         (Reason.UNSUPPORTED_MEDIA_TYPE, 415, "unsupported_media_type"),
         (Reason.PAYLOAD_TOO_LARGE, 413, "payload_too_large"),
+        (Reason.INVALID_VOICE, 400, "invalid_voice"),
     ],
 )
 def test_отказ_по_типу_и_размеру(client, monkeypatch, отказ, reason, status, code):
     authenticated(monkeypatch)
     init_returns(monkeypatch, service.InitResult(rejection=reason))
     отказ(client.post("/attachments", json=BODY), status=status, code=code)
+
+
+def test_длительность_голосового_доходит_до_сервиса(client, monkeypatch):
+    authenticated(monkeypatch)
+    seen: dict = {}
+
+    async def _init(conn, **kwargs):
+        seen.update(kwargs)
+        return service.InitResult(
+            attachment=_attachment(AttachmentState.PENDING),
+            upload_url="https://app.finops.local/storage/x", upload_headers={},
+        )
+
+    monkeypatch.setattr(service, "init_upload", _init)
+    r = client.post("/attachments", json={
+        "content_type": "audio/webm", "size_bytes": 40000, "duration_ms": 10000})
+    assert r.status_code == 201
+    assert seen["duration_ms"] == 10000
 
 
 def test_лимит_инициаций_несёт_retry_after(client, monkeypatch):

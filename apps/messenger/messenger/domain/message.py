@@ -59,13 +59,13 @@ def validate_attachments(kind: MessageKind, attachment_count: int) -> None:
 
     В этом срезе у сообщения-картинки и сообщения-файла ровно одно вложение:
     несколько — отдельное решение о раскладке в ленте, а не побочный эффект
-    транспорта. Текст вложений не несёт, голосовые — следующий срез.
+    транспорта. Текст вложений не несёт.
     """
-    if kind in (MessageKind.IMAGE, MessageKind.FILE):
+    if kind in (MessageKind.IMAGE, MessageKind.FILE, MessageKind.VOICE):
         if attachment_count != 1:
             raise ValueError("сообщение-вложение требует ровно одно вложение")
     elif attachment_count:
-        raise ValueError("вложения разрешены только у изображения и файла")
+        raise ValueError("вложения разрешены только у изображения, файла и голосового")
 
 
 @dataclass(frozen=True, slots=True)

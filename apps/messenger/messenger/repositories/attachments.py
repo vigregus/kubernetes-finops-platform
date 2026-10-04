@@ -12,7 +12,7 @@ from messenger.domain.ids import AttachmentId, MessageId, UserId
 _COLUMNS = """
     attachment_id, uploader_id, message_id, state, bucket, object_key,
     content_type, size_bytes, created_at, file_name, detected_content_type,
-    rejection_reason, attempts
+    rejection_reason, attempts, duration_ms, bitrate_kbps
 """
 
 
@@ -36,6 +36,8 @@ def _to_attachment(row: asyncpg.Record) -> Attachment:
             RejectionCode(row["rejection_reason"]) if row["rejection_reason"] else None
         ),
         attempts=row["attempts"],
+        duration_ms=row["duration_ms"],
+        bitrate_kbps=row["bitrate_kbps"],
     )
 
 
@@ -49,14 +51,15 @@ async def insert_pending(
     content_type: str,
     size_bytes: int,
     file_name: str | None,
+    duration_ms: int | None = None,
 ) -> None:
     await conn.execute(
         """
         INSERT INTO attachments (
             attachment_id, uploader_id, state, bucket, object_key,
-            content_type, size_bytes, file_name
+            content_type, size_bytes, file_name, duration_ms
         )
-        VALUES ($1, $2, 'pending', $3, $4, $5, $6, $7)
+        VALUES ($1, $2, 'pending', $3, $4, $5, $6, $7, $8)
         """,
         attachment_id,
         uploader_id,
@@ -65,6 +68,7 @@ async def insert_pending(
         content_type,
         size_bytes,
         file_name,
+        duration_ms,
     )
 
 
@@ -80,7 +84,11 @@ async def fetch(
 
 
 async def mark_processing(
-    conn: asyncpg.Connection, *, attachment_id: AttachmentId, size_bytes: int
+    conn: asyncpg.Connection,
+    *,
+    attachment_id: AttachmentId,
+    size_bytes: int,
+    bitrate_kbps: int | None = None,
 ) -> bool:
     """`pending → processing`. `False`, если вложение уже не `pending`.
 
@@ -90,11 +98,12 @@ async def mark_processing(
     result = await conn.execute(
         """
         UPDATE attachments
-           SET state = 'processing', size_bytes = $2
+           SET state = 'processing', size_bytes = $2, bitrate_kbps = $3
          WHERE attachment_id = $1 AND state = 'pending'
         """,
         attachment_id,
         size_bytes,
+        bitrate_kbps,
     )
     return result.endswith(" 1")
 

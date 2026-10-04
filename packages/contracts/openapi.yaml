@@ -547,6 +547,15 @@ paths:
                   description: >-
                     Исходное имя файла для показа. На ключ объекта не влияет:
                     ключ строит сервер, и имя от клиента в него не попадает.
+                duration_ms:
+                  type: integer
+                  minimum: 1
+                  description: >-
+                    Длительность голосового, мс; обязательна для `audio/*` и
+                    запрещена для остальных (`400 invalid_voice`). От 0,5 до
+                    300 секунд; битрейт, выведенный из длительности и размера,
+                    должен лежать в пределах 4–512 кбит/с — иначе `400` при
+                    инициации или отклонение `invalid_audio` при завершении.
       responses:
         '201':
           description: Ссылка на загрузку выдана
@@ -1214,6 +1223,9 @@ components:
         file_name:
           type: string
           description: Исходное имя файла; необязательно у вложений без имени.
+        duration_ms:
+          type: integer
+          description: Длительность голосового, мс.
         download_url:
           type: string
           format: uri
@@ -1232,7 +1244,7 @@ components:
             вложения уже нет.
         rejection_code:
           type: string
-          enum: [type_mismatch, malware, too_large, storage_error]
+          enum: [type_mismatch, malware, too_large, storage_error, invalid_audio]
           description: Только у `rejected`/`failed`.
 
     Session:

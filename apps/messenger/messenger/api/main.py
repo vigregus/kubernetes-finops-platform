@@ -1271,6 +1271,8 @@ def _attachment_body(view: attachment_service.AttachmentView) -> dict[str, objec
     }
     if item.file_name:
         body["file_name"] = item.file_name
+    if item.duration_ms is not None:
+        body["duration_ms"] = item.duration_ms
     return body
 
 
@@ -2065,6 +2067,8 @@ class InitAttachment(BaseModel):
     content_type: str
     size_bytes: int = Field(ge=1)
     file_name: str | None = Field(default=None, min_length=1, max_length=255)
+    # Только у голосового (`ATT-004`): длительность, которую показал рекордер.
+    duration_ms: int | None = Field(default=None, ge=1)
 
 
 # Состояния, которых для клиента не существует: уборщик их уже забрал
@@ -2111,6 +2115,7 @@ async def create_attachment(
             content_type=body.content_type,
             size_bytes=body.size_bytes,
             file_name=body.file_name,
+            duration_ms=body.duration_ms,
         )
 
     if result.rejection is Reason.RATE_LIMITED:

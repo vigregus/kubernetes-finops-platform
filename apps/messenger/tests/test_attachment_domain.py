@@ -75,3 +75,59 @@ def test_вид_и_число_вложений(kind, count, ok):
     else:
         with pytest.raises(ValueError):
             validate_attachments(kind, count)
+
+
+# --- голосовые сообщения (ATT-004) ---------------------------------------------
+
+WEBM = b"\x1a\x45\xdf\xa3" + b"\x00" * 16
+OGG = b"OggS" + b"\x00" * 16
+MP4 = b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 16
+
+
+def test_голосовые_типы_в_белом_списке_как_голосовое():
+    for declared in ("audio/webm", "audio/ogg", "audio/mp4"):
+        assert domain.validate_init(declared, 10).kind is MessageKind.VOICE
+
+
+def test_параметр_кодека_не_меняет_голосовой_тип():
+    # MediaRecorder так и называет тип: `audio/webm;codecs=opus`.
+    assert domain.normalize_content_type("audio/webm;codecs=opus") == "audio/webm"
+    assert domain.validate_init("audio/webm;codecs=opus", 10).kind is MessageKind.VOICE
+
+
+def test_сигнатуры_аудиоконтейнеров():
+    assert domain.sniff("audio/webm", WEBM)
+    assert domain.sniff("audio/ogg", OGG)
+    assert domain.sniff("audio/mp4", MP4)
+    assert not domain.sniff("audio/webm", OGG)
+    assert not domain.sniff("audio/ogg", b"MZ\x90\x00")
+    assert not domain.sniff("audio/mp4", b"\x00\x00\x00\x18moovmp42")
+
+
+def test_длительность_голосового_обязательна_и_ограничена():
+    assert domain.validate_voice(duration_ms=5_000, size_bytes=20_000) > 0
+    for bad in (None, 0, -1, domain.MIN_VOICE_MS - 1, domain.MAX_VOICE_MS + 1):
+        with pytest.raises(domain.InvalidVoice):
+            domain.validate_voice(duration_ms=bad, size_bytes=20_000)
+
+
+def test_битрейт_считается_из_размера_и_длительности():
+    # 40 000 байт за 10 с = 32 кбит/с.
+    assert domain.validate_voice(duration_ms=10_000, size_bytes=40_000) == 32
+
+
+def test_невозможный_битрейт_отвергается():
+    # Десять мегабайт «за секунду» — не голос, а заявленная неправда.
+    with pytest.raises(domain.InvalidVoice):
+        domain.validate_voice(duration_ms=1_000, size_bytes=5 * domain.MIB)
+    # Один байт за минуту — пустая запись.
+    with pytest.raises(domain.InvalidVoice):
+        domain.validate_voice(duration_ms=60_000, size_bytes=10)
+
+
+def test_голосовое_сообщение_требует_ровно_одно_вложение():
+    validate_attachments(MessageKind.VOICE, 1)
+    with pytest.raises(ValueError):
+        validate_attachments(MessageKind.VOICE, 0)
+    with pytest.raises(ValueError):
+        validate_attachments(MessageKind.VOICE, 2)
