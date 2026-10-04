@@ -395,7 +395,7 @@ services:
     terminationGracePeriodSeconds: 60
     image:
       # Заполняется тегом образа, в котором этот модуль уже есть.
-      spec: ghcr.io/vigregus/messenger-api:3be340aa08121f3e4d6e59e9646a4e847bc467a3
+      spec: ghcr.io/vigregus/messenger-api:1db72f5a35250b7fe63d66da4631dc7ffe073dd6
     resources:
       requests: {cpu: 25m, memory: 128Mi}
       limits: {cpu: 500m, memory: 256Mi}
