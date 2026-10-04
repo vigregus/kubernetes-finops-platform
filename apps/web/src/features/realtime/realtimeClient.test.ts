@@ -55,6 +55,7 @@ function givenClient() {
 describe("«печатает»: канал набора", () => {
   function givenTypingClient() {
     const typingPublications: unknown[] = [];
+    const typingChannels: string[] = [];
     const publications: unknown[] = [];
     const fake = givenFakeCentrifuge();
     const client = createRealtimeClient({
@@ -66,23 +67,34 @@ describe("«печатает»: канал набора", () => {
       onEvent: () => {},
       onPublication: (payload) => publications.push(payload),
       onUserPublication: () => {},
-      onTypingPublication: (payload) => typingPublications.push(payload),
+      onTypingPublication: (channel, payload) => {
+        typingChannels.push(channel);
+        typingPublications.push(payload);
+      },
       createCentrifuge: fake.factory,
     });
-    return { client, fake, typingPublications, publications };
+    return { client, fake, typingPublications, typingChannels, publications };
   }
 
   it("публикация канала набора доходит до своего обработчика и только до него", () => {
-    const { fake, typingPublications, publications } = givenTypingClient();
+    const { fake, typingPublications, typingChannels, publications } = givenTypingClient();
     const payload = { user_id: "u1", expires_in_ms: 5000 };
     fake.clientHandlers["publication"]?.({ channel: TYPING_CHANNEL, data: payload });
+    expect(typingChannels).toEqual([TYPING_CHANNEL]);
     expect(typingPublications).toEqual([payload]);
     expect(publications).toEqual([]);
   });
 
-  it("чужой канал набора не принимается", () => {
+  it("публикации набора других бесед тоже доходят — с именем канала (список бесед)", () => {
+    const { fake, typingPublications, typingChannels } = givenTypingClient();
+    fake.clientHandlers["publication"]?.({ channel: "typing:другая-беседа", data: { user_id: "u2" } });
+    expect(typingChannels).toEqual(["typing:другая-беседа"]);
+    expect(typingPublications).toEqual([{ user_id: "u2" }]);
+  });
+
+  it("канал вне пространства typing: не уходит в обработчик набора", () => {
     const { fake, typingPublications } = givenTypingClient();
-    fake.clientHandlers["publication"]?.({ channel: "typing:чужая", data: { user_id: "u" } });
+    fake.clientHandlers["publication"]?.({ channel: "presence:x", data: { user_id: "u" } });
     expect(typingPublications).toEqual([]);
   });
 

@@ -68,8 +68,13 @@ export interface RealtimeClientOptions {
    * Выдаёт его сервер тем же тикетом, что и канал беседы.
    */
   readonly typingChannel?: string;
-  /** Публикация канала набора — как пришла. Разбирает `typingState`, а не адаптер. */
-  readonly onTypingPublication?: (payload: unknown) => void;
+  /**
+   * Публикация **любого** канала набора `typing:{id}` — с именем канала, как
+   * пришла. Каналов набора у соединения столько же, сколько бесед в тикете, и
+   * именно поэтому уходит имя: в списке бесед «печатает» нужно и у тех бесед,
+   * которые сейчас не открыты. Разбирает `typingState`, а не адаптер.
+   */
+  readonly onTypingPublication?: (channel: string, payload: unknown) => void;
   /** Свежий тикет на **каждую** попытку соединения (B5, B15). */
   readonly issueTicket: RealtimeTicketIssuer;
   /** Факты для автомата. Адаптер их не толкует. */
@@ -245,9 +250,9 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
       options.onUserPublication(ctx.data);
       return;
     }
-    if (options.typingChannel !== undefined && ctx.channel === options.typingChannel) {
-      options.onTypingPublication?.(ctx.data);
-    }
+    // Только пространство `typing:`: неизвестное имя по-прежнему не уходит
+    // никуда — третий канал не повод отдать публикацию первому обработчику.
+    if (ctx.channel.startsWith("typing:")) options.onTypingPublication?.(ctx.channel, ctx.data);
   });
 
   return {

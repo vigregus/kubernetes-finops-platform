@@ -40,7 +40,7 @@ export interface UseRealtimeConnectionOptions {
   /** Канал набора `typing:{id}`; без него «печатает» у клиента выключено. */
   readonly typingChannel?: string;
   /** Публикации канала набора — наружу, к `useTypingPeers`. Не толкуются здесь. */
-  readonly onTypingPublication?: (payload: unknown) => void;
+  readonly onTypingPublication?: (channel: string, payload: unknown) => void;
   /** Подмена SDK — для тестов обвязки; в production не задаётся. */
   readonly createCentrifuge?: RealtimeClientOptions["createCentrifuge"];
   /**
@@ -159,7 +159,7 @@ export function useRealtimeConnection(
       onEvent: dispatchObserved,
       onPublication: (payload) => publicationRef.current(payload),
       onUserPublication: (payload) => userPublicationRef.current(payload),
-      onTypingPublication: (payload) => typingPublicationRef.current?.(payload),
+      onTypingPublication: (channel, payload) => typingPublicationRef.current?.(channel, payload),
       createCentrifuge,
     });
 
