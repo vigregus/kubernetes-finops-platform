@@ -59,9 +59,13 @@ spec:
   authorization:
     type: simple
     acls:
+      # SEC-010: здесь намеренно нет messenger.content.v1. Уведомление Web Push
+      # несёт сигнал без текста (11-threat-model.md, Р-5): какое сообщение
+      # пришло, человек читает в приложении, а право на чужой текст
+      # потребителю уведомлений не нужно — значит, его и нет. Раньше здесь
+      # стояло чтение содержимого «на будущее предпросмотра»; предпросмотр
+      # будет делать сам Service Worker по правам человека, а не сервер.
       - resource: {type: topic, name: messenger.events.v1}
-        operations: [Read, Describe]
-      - resource: {type: topic, name: messenger.content.v1}
         operations: [Read, Describe]
       - resource: {type: group, name: messenger-notifications}
         operations: [Read, Describe]

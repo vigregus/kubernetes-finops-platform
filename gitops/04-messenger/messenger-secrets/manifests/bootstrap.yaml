@@ -138,6 +138,27 @@ spec:
                 echo "messenger-minio-api: создан"
               fi
 
+              # Ключи VAPID для Web Push (G4): подпись нашего сервера перед
+              # провайдерами push. Пара рождается здесь, в кластере, и в git её
+              # нет. Закрытый ключ получает только потребитель уведомлений,
+              # открытый — API (чтобы отдать браузеру). Пересоздание ключа
+              # обнуляет все подписки: браузеры привязаны к открытому ключу,
+              # поэтому секрет, как и остальные, существующим не трогается.
+              if have messenger-vapid; then
+                echo "messenger-vapid: уже есть, не трогаю"
+              else
+                openssl ecparam -name prime256v1 -genkey -noout -out /tmp/vapid.pem
+                pub=$(openssl ec -in /tmp/vapid.pem -pubout -outform DER 2>/dev/null \
+                  | tail -c 65 | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+                [ -n "$pub" ] || { echo "не удалось получить открытый ключ VAPID" >&2; exit 1; }
+                kubectl -n messenger create secret generic messenger-vapid \
+                  --from-file=private-key=/tmp/vapid.pem \
+                  --from-literal=public-key="$pub" \
+                  --from-literal=subject="mailto:admin@finops.local"
+                rm -f /tmp/vapid.pem
+                echo "messenger-vapid: создан"
+              fi
+
               if have messenger-centrifugo; then
                 echo "messenger-centrifugo: уже есть, не трогаю"
               else

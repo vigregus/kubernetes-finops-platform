@@ -76,6 +76,11 @@ dependencies:
   centrifugo:
     apiUrl: http://messenger-centrifugo.messenger.svc.cluster.local:9000/api
     secret: messenger-centrifugo
+  push:
+    # Ключи VAPID для Web Push (G4): `public-key` (отдаёт API браузеру),
+    # `private-key` (подпись у потребителя уведомлений) и `subject`. Секрет
+    # создаёт messenger-secrets-bootstrap, в git их нет.
+    secret: messenger-vapid
   objectStorage:
     # Внутренний адрес: запросы сервера (проверка объекта, чтение начала
     # файла, удаление). Служба `minio` создаётся оператором MinIO.
@@ -127,6 +132,8 @@ services:
     # Ключи объектного хранилища: API выдаёт предподписанные ссылки и
     # проверяет загруженный объект (G4).
     objectStorage: true
+    # Открытый ключ VAPID для оформления подписки Web Push (G4).
+    vapidPublic: true
     # Метрики снимаются со службы: у нагрузки есть входящие запросы.
     # Умолчание у признака — истина, поэтому true здесь нужен не для
     # работы, а чтобы снятие ключа у соседа не выглядело нормой.
@@ -360,6 +367,38 @@ services:
       # 512Mi, а не 256: сканер получает файл целиком (до 25 МиБ), и запас
       # нужен под самый большой разрешённый.
       limits: {cpu: 500m, memory: 512Mi}
+
+  consumer-notifications:
+    # Web Push (G4): из потока фактов — в уведомления устройствам без живого
+    # соединения (`NTF-001…004`). Нагрузка включается вместе с образом, где есть
+    # модуль `messenger.workers.consumer_notifications`: прежний образ упал бы
+    # на импорте, как и у соседей выше.
+    enabled: true
+    component: worker
+    # Учётная запись **без права на содержимое** (SEC-010): уведомление несёт
+    # сигнал без текста, и право на чужой текст потребителю не нужно.
+    kafkaUser: messenger-notifications
+    backendEnv: true
+    # Закрытый ключ VAPID — только у этой нагрузки из семи.
+    vapidPrivate: true
+    metrics: true
+    metricsPort: 9100
+    command: ["python", "-m", "messenger.workers.consumer_notifications"]
+    replicas: 1
+    minAvailable: 0
+    # Ниже доставки: уведомление — best-effort, а не путь доставки. При
+    # нехватке CPU планировщик вытеснит сначала его, и сообщения не отстанут.
+    priorityClass: messenger-background
+    preStopSeconds: 0
+    # Как у соседей: потребитель обязан успеть дообработать пачку и
+    # зафиксировать смещение, иначе после перезапуска будет повтор.
+    terminationGracePeriodSeconds: 60
+    image:
+      # Заполняется тегом образа, в котором этот модуль уже есть.
+      spec: ghcr.io/vigregus/messenger-api:SHA_PLACEHOLDER
+    resources:
+      requests: {cpu: 25m, memory: 128Mi}
+      limits: {cpu: 500m, memory: 256Mi}
 
   presence-sweeper:
     # Включена коммитом продвижения, и порядок тут был не формальностью —

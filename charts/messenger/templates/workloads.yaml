@@ -213,6 +213,28 @@ spec:
                   name: {{ $.Values.dependencies.objectStorage.secret }}
                   key: secret-key
             {{- end }}
+            {{- if $svc.vapidPublic }}
+            # Web Push (G4): API отдаёт браузеру **открытый** ключ VAPID, и
+            # закрытого у него нет вовсе. Отдельные признаки для открытого и
+            # закрытого, а не один: закрытый ключ нужен одной нагрузке из семи.
+            - name: VAPID_PUBLIC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.dependencies.push.secret }}
+                  key: public-key
+            {{- end }}
+            {{- if $svc.vapidPrivate }}
+            - name: VAPID_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.dependencies.push.secret }}
+                  key: private-key
+            - name: VAPID_SUBJECT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.dependencies.push.secret }}
+                  key: subject
+            {{- end }}
             {{- with $svc.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

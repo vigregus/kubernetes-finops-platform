@@ -75,7 +75,7 @@ def base_template(base: str) -> str:
 # значением у нагрузки, и вывод у неё меняется **по замыслу**; инвариант
 # проверки в другом: правка шаблона без включения признака ничего не меняет.
 # Поэтому оба рендера идут с values, где такие признаки сняты.
-NEW_OPT_IN_FLAGS = ["objectStorage"]
+NEW_OPT_IN_FLAGS = ["objectStorage", "vapidPublic", "vapidPrivate"]
 
 
 def values_without_new_flags(workdir: Path) -> Path:
