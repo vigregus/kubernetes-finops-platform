@@ -179,6 +179,7 @@ const attachmentClient: AttachmentClient = {
           contentType: request.contentType,
           sizeBytes: request.sizeBytes,
           fileName: request.fileName,
+          ...(request.durationMs === undefined ? {} : { durationMs: request.durationMs }),
         },
       }),
     complete: (attachmentId) => attachmentsApi.completeAttachment({ attachmentId }),
@@ -191,8 +192,16 @@ const attachmentClient: AttachmentClient = {
       conversationId: request.conversationId,
       sendMessageRequest: {
         clientMessageId: request.clientMessageId,
-        type: request.kind === "image" ? SendMessageRequestTypeEnum.Image : SendMessageRequestTypeEnum.File,
-        payload: request.caption === "" ? {} : { text: request.caption },
+        type:
+          request.kind === "image"
+            ? SendMessageRequestTypeEnum.Image
+            : request.kind === "voice"
+              ? SendMessageRequestTypeEnum.Voice
+              : SendMessageRequestTypeEnum.File,
+        payload: {
+          ...(request.caption === "" ? {} : { text: request.caption }),
+          ...(request.durationMs === undefined ? {} : { durationMs: request.durationMs }),
+        },
         attachmentIds: [request.attachmentId],
       },
     }),

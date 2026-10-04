@@ -17,6 +17,7 @@ export type UploadFailure =
   | { readonly kind: "type-not-allowed" }
   | { readonly kind: "too-large" }
   | { readonly kind: "rate-limited" }
+  | { readonly kind: "invalid-voice" }
   | { readonly kind: "unavailable" }
   | { readonly kind: "upload-failed" }
   | { readonly kind: "rejected"; readonly code: string | undefined }
@@ -33,6 +34,8 @@ export interface AttachmentOps {
     contentType: string
     sizeBytes: number
     fileName: string
+    /** Только у голосового: длительность, которую показал рекордер (`ATT-004`). */
+    durationMs?: number
   }) => Promise<CreateAttachment201Response>
   readonly complete: (attachmentId: string) => Promise<AttachmentStatus>
   readonly status: (attachmentId: string) => Promise<AttachmentStatus>
@@ -41,6 +44,8 @@ export interface AttachmentOps {
 }
 
 export interface UploadOptions {
+  /** Длительность голосового, мс: уходит в инициацию и проверяется сервером. */
+  readonly durationMs?: number
   readonly pollIntervalMs?: number
   readonly timeoutMs?: number
   readonly sleep?: (ms: number) => Promise<void>
@@ -59,6 +64,7 @@ function failureOfError(error: unknown): UploadFailure {
       : undefined
   if (status === 415) return { kind: "type-not-allowed" }
   if (status === 413) return { kind: "too-large" }
+  if (status === 400) return { kind: "invalid-voice" }
   if (status === 429) return { kind: "rate-limited" }
   return { kind: "unavailable" }
 }
@@ -80,6 +86,7 @@ export async function uploadAttachment(
       contentType: file.type,
       sizeBytes: file.size,
       fileName: file.name,
+      ...(options.durationMs === undefined ? {} : { durationMs: options.durationMs }),
     })
   } catch (error) {
     return { kind: "failed", failure: failureOfError(error) }
@@ -128,6 +135,8 @@ export function failureMessage(failure: UploadFailure): string {
       return "This file is too large."
     case "rate-limited":
       return "Too many uploads. Try again in a moment."
+    case "invalid-voice":
+      return "This recording can't be sent. Try recording again."
     case "unavailable":
       return "Attachments are unavailable right now."
     case "upload-failed":
@@ -139,7 +148,9 @@ export function failureMessage(failure: UploadFailure): string {
         ? "This file was blocked as unsafe."
         : failure.code === "type_mismatch"
           ? "The file doesn't match its type."
-          : "This file was rejected."
+          : failure.code === "invalid_audio"
+            ? "This recording can't be sent. Try recording again."
+            : "This file was rejected."
   }
 }
 
@@ -148,8 +159,10 @@ export type SendAttachmentMessage = (request: {
   readonly conversationId: string
   /** Тождество логической отправки: повтор после сбоя шлёт **тот же** (D3). */
   readonly clientMessageId: string
-  readonly kind: "image" | "file"
+  readonly kind: "image" | "file" | "voice"
   readonly caption: string
+  /** Только у голосового: уходит в `payload.duration_ms`, сервер берёт своё. */
+  readonly durationMs?: number
   readonly attachmentId: string
 }) => Promise<Message>
 

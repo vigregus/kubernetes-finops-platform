@@ -1,6 +1,7 @@
 import { clsx } from "clsx"
 import type { MessageAttachment } from "../../../shared/lib/types"
 import { Icon } from "../../../shared/ui/Icon"
+import { formatDuration } from "../../attachments/formatDuration"
 
 interface AttachmentBubbleProps {
   attachment: MessageAttachment
@@ -8,13 +9,6 @@ interface AttachmentBubbleProps {
 }
 
 const kindIcon = { image: "image", file: "description", voice: "graphic_eq" } as const
-
-function formatDuration(seconds?: number) {
-  if (!seconds) return "0:00"
-  const m = Math.floor(seconds / 60)
-  const s = Math.floor(seconds % 60)
-  return `${m}:${s.toString().padStart(2, "0")}`
-}
 
 export function AttachmentBubble({ attachment, own }: AttachmentBubbleProps) {
   const { kind, name, state, previewUrl, durationSeconds, sizeLabel, rejectionReason } = attachment
@@ -29,6 +23,29 @@ export function AttachmentBubble({ attachment, own }: AttachmentBubbleProps) {
     return (
       <div className={clsx("overflow-hidden rounded-2xl", own ? "rounded-br-sm" : "rounded-bl-sm")}>
         <img src={previewUrl} alt={name} className="block max-h-72 w-64 object-cover" />
+      </div>
+    )
+  }
+
+  // Готовое голосовое играется на месте: ссылка на скачивание — тот же адрес,
+  // что и у файла, но его открытие в новой вкладке для голоса бесполезно.
+  if (kind === "voice" && state === "ready" && attachment.url) {
+    return (
+      <div className={shell} data-attachment-voice>
+        <div
+          className={clsx(
+            "flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl",
+            own ? "bg-white/20" : "bg-surface-warm-subtle",
+          )}
+        >
+          <Icon name="graphic_eq" size={20} />
+        </div>
+        <div className="min-w-0 flex-1">
+          <audio controls preload="metadata" src={attachment.url} data-attachment-audio className="h-8 w-56 max-w-full" />
+          <p className={clsx("text-xs", own ? "text-on-primary/80" : "text-text-warm-muted")}>
+            {formatDuration(durationSeconds)}
+          </p>
+        </div>
       </div>
     )
   }
@@ -65,7 +82,6 @@ export function AttachmentBubble({ attachment, own }: AttachmentBubbleProps) {
         <Icon name="progress_activity" size={18} className="animate-spin flex-shrink-0 opacity-70" />
       )}
       {state === "rejected" && <Icon name="error_outline" size={18} className="flex-shrink-0 text-status-error" />}
-      {state === "ready" && kind === "voice" && <Icon name="play_arrow" size={20} className="flex-shrink-0" />}
     </Shell>
   )
 }

@@ -45,6 +45,22 @@ describe("uploadAttachment", () => {
     expect(o.create).toHaveBeenCalledWith({ contentType: "image/png", sizeBytes: 8, fileName: "кот.png" })
   })
 
+  it("длительность голосового уходит в инициацию", async () => {
+    const voice = new File([new Uint8Array(40)], "voice.webm", { type: "audio/webm" })
+    const o = ops()
+    await uploadAttachment(o, voice, () => {}, { ...fast, durationMs: 7200 })
+    expect(o.create).toHaveBeenCalledWith({
+      contentType: "audio/webm", sizeBytes: 40, fileName: "voice.webm", durationMs: 7200,
+    })
+  })
+
+  it("отказ сервера по длительности называется своей причиной", async () => {
+    const voice = new File([new Uint8Array(40)], "voice.webm", { type: "audio/webm" })
+    const o = ops({ create: vi.fn(async () => { throw new Problem(400) }) })
+    const outcome = await uploadAttachment(o, voice, () => {}, { ...fast, durationMs: 7200 })
+    expect(outcome).toEqual({ kind: "failed", failure: { kind: "invalid-voice" } })
+  })
+
   it("кладёт в PUT заголовки из ответа инициации как есть", async () => {
     const o = ops()
     await uploadAttachment(o, FILE, () => {}, fast)
