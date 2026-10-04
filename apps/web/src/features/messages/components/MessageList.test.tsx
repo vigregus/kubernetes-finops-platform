@@ -406,24 +406,3 @@ describe("запись очереди — в ленте, но не в бесед
   });
 });
 
-
-describe("индикатор «печатает» в ленте", () => {
-  it("рисуется, когда кто-то печатает, и не рисуется иначе", () => {
-    const { container, rerender } = render(
-      <MessageList messages={[messageOf(1)]} conversationName="Аня" appliedThroughSeq={1} />,
-    );
-    expect(container.querySelector("[data-typing-indicator]")).toBeNull();
-
-    rerender(
-      <MessageList
-        messages={[messageOf(1)]}
-        conversationName="Аня"
-        appliedThroughSeq={1}
-        typingNames={["Аня"]}
-      />,
-    );
-    const marker = container.querySelector("[data-typing-indicator]");
-    expect(marker?.getAttribute("data-typing-indicator")).toBe("1");
-    expect(marker?.textContent).toContain("Аня is typing");
-  });
-});

@@ -42,7 +42,8 @@ import type { TelemetryClient } from "../telemetry/telemetryClient"
 import type { AttachmentClient } from "../attachments/attachmentUpload"
 import { useAttachmentDraft } from "../attachments/useAttachmentDraft"
 import { createTypingSender } from "../realtime/typingSender"
-import { useTypingPeers } from "../realtime/useTypingPeers"
+import { useTypingConversations } from "../realtime/useTypingConversations"
+import { TypingIndicator } from "../messages/components/TypingIndicator"
 import { useVoiceRecorder } from "../attachments/useVoiceRecorder"
 import { browserVoiceDeps } from "../attachments/voiceRecorder"
 import { MessengerLayout } from "../../shared/ui/MessengerLayout"
@@ -61,6 +62,7 @@ import type {
  * рендер списка на ровном месте.
  */
 const EMPTY_OVERLAY: ReadonlyMap<string, number> = new Map()
+const NO_TYPING: readonly string[] = []
 
 /**
  * Пустой список записей очереди — **одна** ссылка на модуль.
@@ -386,6 +388,21 @@ export function ChatPage({
   // отставало бы от базы ровно на один рендер.
   const merged = useMemo(() => withUnreadOverlay(base, overlay), [base, overlay])
 
+  // «Печатает» (G4): состояние **одно на страницу**, а не на панель беседы. Оно
+  // нужно и в шапке открытой беседы, и в строке списка у беседы, которая сейчас
+  // не открыта, — канал набора каждой беседы сервер выдаёт тем же тикетом.
+  const typing = useTypingConversations(currentUserId)
+
+  // У личной беседы печатающий — собеседник: имя то же, что в строке списка.
+  // Для групп нужны профили участников, которых клиент пока не знает.
+  const withTyping = useMemo(
+    () =>
+      merged.map((item) =>
+        typing.byConversation.has(item.id) ? { ...item, typingNames: [item.name] } : item,
+      ),
+    [merged, typing.byConversation],
+  )
+
   /**
    * Лента активной беседы — в ссылке, потому что её владелец объявлен **ниже**.
    *
@@ -488,7 +505,7 @@ export function ChatPage({
         }
         sidebar={
           <ConversationSidebar
-            conversations={merged}
+            conversations={withTyping}
             activeConversationId={activeConversation?.id ?? null}
             currentUser={currentUser}
             onSelectConversation={setActiveId}
@@ -540,6 +557,8 @@ export function ChatPage({
               touchConversation(activeConversation.id, text, true)
             }}
             onUnreadPublication={onUnreadPublication}
+            onTypingPublication={typing.onPublication}
+            typingNames={typing.byConversation.has(activeConversation.id) ? [activeConversation.name] : NO_TYPING}
             onReconcile={refresh}
             // Лента сообщает о себе — очередь этим пользуется, чтобы вложить ответ
             // в **свою** беседу (довод у `FeedEntry`).
@@ -585,6 +604,10 @@ interface ConversationPaneProps {
   onSend: (text: string) => void
   /** Публикация личного канала — наверх, к списку: число принадлежит не беседе. */
   onUnreadPublication: (payload: unknown) => void
+  /** Публикация канала набора **любой** беседы — наверх: состояние одно на страницу. */
+  onTypingPublication: (channel: string, payload: unknown) => void
+  /** Кто печатает в этой беседе — решает страница, панель только показывает. */
+  typingNames: readonly string[]
   /** Выход из разрыва — повод сверки списка. */
   onReconcile: () => void
   /**
@@ -629,6 +652,8 @@ function ConversationPane({
   pending,
   onSend,
   onUnreadPublication,
+  onTypingPublication,
+  typingNames,
   onReconcile,
   onFeedReady,
   onConfirmed,
@@ -789,10 +814,6 @@ function ConversationPane({
     [telemetry],
   )
 
-  // «Печатает» (G4): состояние держит получатель, а канал выдаёт сервер тем же
-  // тикетом. Свои публикации идут через publish-proxy API (автор и лимит — там).
-  const typingPeers = useTypingPeers(currentUserId)
-
   const connection = useRealtimeConnection({
     centrifugoUrl,
     // Имя канала — `conversation:{id}`: `conversation_id` в тело публикации не
@@ -804,7 +825,7 @@ function ConversationPane({
     // все беседы, и смена беседы его не меняет.
     userChannel: `user:${currentUserId}`,
     typingChannel: `typing:${conversation.id}`,
-    onTypingPublication: typingPeers.onPublication,
+    onTypingPublication,
     issueTicket,
     onPublication,
     onUserPublication: onUnreadPublication,
@@ -823,12 +844,6 @@ function ConversationPane({
   )
   useEffect(() => () => typingSender.stop(), [typingSender])
 
-  // У личной беседы печатающий — собеседник: имя то же, что в шапке. Для групп
-  // имена нужны из профилей участников, которых клиент пока не знает.
-  const typingNames = useMemo(
-    () => typingPeers.userIds.map(() => conversation.name),
-    [typingPeers.userIds, conversation.name],
-  )
 
   // Три факта наружу: два — от ленты (пропуск и сходимость), третий — отказ
   // догрузки. Все три ведут в тот же автомат, а не в отдельные `useState`:
@@ -1053,7 +1068,7 @@ function ConversationPane({
       data-peer-read-seq={peer?.readSeq ?? undefined}
     >
       <ChatHeader
-        conversation={typingNames.length > 0 ? { ...conversation, typingNames } : conversation}
+        conversation={typingNames.length > 0 ? { ...conversation, typingNames: [...typingNames] } : conversation}
       />
 
       {conversationHistory.phase === "error" ? (
@@ -1066,7 +1081,6 @@ function ConversationPane({
       ) : (
         <MessageList
           messages={messages}
-          typingNames={typingNames}
           conversationName={conversation.name}
           appliedThroughSeq={conversationHistory.appliedThroughSeq}
           // Источник второго числа квитанции. `setState` — устойчивая ссылка, и
@@ -1098,6 +1112,15 @@ function ConversationPane({
         `blocked` композера остаётся непроизведённой, и выдавать её за
         исполняемое правило не будем.
       */}
+      {typingNames.length > 0 && (
+        // Над композером, а не в хвосте ленты: хвост уезжает за экран, стоит
+        // человеку прокрутить историю вверх, и индикатор оказывался там, где его
+        // никто не видит. Маркер приёмки: наличие, а не слова (`RT-001`).
+        <div data-typing-indicator={typingNames.length} className="flex-shrink-0 px-6 pb-1">
+          <TypingIndicator names={[...typingNames]} />
+        </div>
+      )}
+
       <MessageComposer
         recipientName={conversation.name}
         onSend={onSend}

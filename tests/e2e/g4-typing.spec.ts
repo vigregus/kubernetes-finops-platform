@@ -5,7 +5,7 @@ import { STATE_FILE, fixtureFor, signIn } from "./support/auth"
 import type { SignedIn, State } from "./support/auth"
 
 /**
- * Браузерная приёмка G4: «печатает» (`RT-001`).
+ * Браузерная приёмка G4: «печатает» (`RT-001`) — над композером в главном окне, в шапке и в списке бесед.
  *
  * Два настоящих браузера против стенда. A набирает текст — B видит индикатор
  * в ленте и в шапке, а когда A перестаёт, индикатор гаснет. Главное — гаснет
@@ -55,10 +55,22 @@ test.describe("G4: «печатает»", () => {
 		await a.page.locator("[data-composer-input]").pressSequentially("привет", { delay: 60 })
 		await expect(indicator()).toHaveCount(1, { timeout: 10_000 })
 		await expect(indicator()).toContainText("is typing")
-		await expect(b.page.getByText("is typing…")).toBeVisible()
+		await expect(b.page.getByText("is typing…").first()).toBeVisible()
+
+		// Индикатор закреплён над композером, а не в хвосте ленты: он виден,
+		// даже когда человек прокрутил историю вверх.
+		await b.page.locator("[data-message-id]").first().scrollIntoViewIfNeeded()
+		await expect(indicator()).toBeInViewport()
+
+		// И в списке бесед: строка беседы показывает «печатает» вместо превью.
+		const row = b.page.locator(`[data-conversation-id="${conversationId}"]`)
+		await expect(row).toContainText("is typing")
 
 		await a.page.locator("[data-composer-input]").fill("")
 		await expect(indicator()).toHaveCount(0, { timeout: 10_000 })
+		await expect(b.page.locator(`[data-conversation-id="${conversationId}"]`)).not.toContainText(
+			"is typing",
+		)
 	})
 
 	test("RT-001: отправка сообщения гасит индикатор сразу", async () => {
