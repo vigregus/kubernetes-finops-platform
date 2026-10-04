@@ -485,6 +485,21 @@ def attachment_processed(result: str) -> None:
     ATTACHMENT_PROCESSED.labels(service=SERVICE, result=result).inc()
 
 
+# Время разбора изображения и сборки миниатюры. Единственный по-настоящему
+# CPU-тяжёлый участок воркера: рост этой гистограммы — сигнал, что лимит CPU
+# воркера мал или пришли тяжёлые файлы.
+ATTACHMENT_THUMBNAIL_DURATION = Histogram(
+    "messenger_attachment_thumbnail_duration_seconds",
+    "Время создания миниатюры изображения (G4)",
+    ["service"],
+    buckets=(0.02, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10),
+)
+
+
+def attachment_thumbnail(seconds: float) -> None:
+    ATTACHMENT_THUMBNAIL_DURATION.labels(service=SERVICE).observe(seconds)
+
+
 # Возраст самого старого вложения в `processing` — для вложений то же, что
 # `messenger_outbox_oldest_age_seconds` для доставки: жив ли конвейер, видно
 # по тому, что очередь не стареет, а не по пробе.

@@ -393,6 +393,7 @@ messenger_reconnect_total{result="recovered|sync|failed"}
 messenger_sync_duration_seconds
 messenger_auth_operations_total{operation="login|refresh", result="success|failure"}
 messenger_attachment_processing_duration_seconds{type="image|file|voice", result=…}
+messenger_attachment_thumbnail_duration_seconds   # воркер: время разбора изображения и сборки миниатюры (G4)
 messenger_push_delivery_duration_seconds{result="accepted|failed"}
 ```
 

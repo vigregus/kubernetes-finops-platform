@@ -27,6 +27,11 @@ from datetime import timedelta
 
 import httpx
 
+import io
+
+from PIL import Image
+
+from messenger.adapters.imaging import PillowThumbnailer
 from messenger.adapters.object_store import ObjectStore, ObjectStoreSettings
 from messenger.adapters.ratelimit import LimitDecision
 from messenger.adapters.scanner import StubScanner, UnavailableScanner
@@ -449,6 +454,85 @@ async def run() -> None:
             )
             check("complete без загрузки -> 409",
                   no_object.rejection is Reason.ATTACHMENT_UPLOAD_MISSING)
+
+            print("ATT-003: миниатюра изображения")
+            wide = Image.new("RGB", (1600, 900), "navy")
+            exif = Image.Exif()
+            exif[0x010F] = "SecretCameraMaker"
+            wide_buffer = io.BytesIO()
+            wide.save(wide_buffer, format="JPEG", exif=exif)
+            wide_bytes = wide_buffer.getvalue()
+            thumb_id = await new_attachment(conn, store, http, alice, content_type="image/jpeg",
+                                            content=wide_bytes, name="wide.jpg")
+            await service.complete(conn, store=store, user_id=alice.user_id, attachment_id=thumb_id)
+            thumb_outcome = await service.process_batch(
+                conn, store=store, scanner=StubScanner(), owner="attachments-check",
+                thumbnailer=PillowThumbnailer(),
+            )
+            thumb_row = await attachments_repo.fetch(conn, attachment_id=AttachmentId(thumb_id))
+            check("изображение стало ready", thumb_row.state.value == "ready"
+                  and thumb_outcome.ready >= 1, str(thumb_outcome))
+            check("размеры оригинала записаны", (thumb_row.width, thumb_row.height) == (1600, 900),
+                  f"{thumb_row.width}x{thumb_row.height}")
+            check("ключ миниатюры строит сервер из ключа объекта",
+                  thumb_row.thumbnail_key == thumb_row.object_key + ".thumb")
+            thumb_size = await store.head(thumb_row.thumbnail_key)
+            check("миниатюра лежит в хранилище и меньше оригинала",
+                  thumb_size is not None and thumb_size < len(wide_bytes),
+                  f"{thumb_size} против {len(wide_bytes)}")
+
+            thumb_sent = await message_service.send_message(
+                conn, sender_id=alice.user_id, conversation_id=conversation_id,
+                client_message_id=ClientMessageId(uuid.uuid4()), kind=MessageKind.IMAGE,
+                payload=MessagePayload(), attachment_ids=(thumb_id,),
+            )
+            thumb_views = await service.views_for_messages(
+                conn, store=store, message_ids=[thumb_sent.message.message_id]
+            )
+            thumb_view = thumb_views[thumb_sent.message.message_id][0]
+            check("в выдаче есть и миниатюра, и оригинал",
+                  thumb_view.thumbnail_url is not None and thumb_view.download_url != thumb_view.thumbnail_url)
+            got_thumb = await http.get(thumb_view.thumbnail_url)
+            decoded = Image.open(io.BytesIO(got_thumb.content))
+            check("миниатюра скачивается как WebP не больше 480 пикселей",
+                  got_thumb.status_code == 200 and decoded.format == "WEBP"
+                  and max(decoded.size) == 480 and decoded.size == (480, 270),
+                  f"{got_thumb.status_code} {decoded.format} {decoded.size}")
+            check("метаданные камеры в миниатюру не попали",
+                  b"SecretCameraMaker" not in got_thumb.content)
+            got_original = await http.get(thumb_view.download_url)
+            check("оригинал по-прежнему отдаётся целиком",
+                  got_original.status_code == 200 and got_original.content == wide_bytes)
+
+            broken_id = await new_attachment(conn, store, http, alice, content_type="image/png",
+                                             content=PNG, name="broken.png")
+            await service.complete(conn, store=store, user_id=alice.user_id, attachment_id=broken_id)
+            await service.process_batch(
+                conn, store=store, scanner=StubScanner(), owner="attachments-check",
+                thumbnailer=PillowThumbnailer(),
+            )
+            broken = await attachments_repo.fetch(conn, attachment_id=AttachmentId(broken_id))
+            check("сигнатура верная, а разобрать нельзя -> rejected/invalid_image",
+                  broken.state.value == "rejected"
+                  and broken.rejection_reason.value == "invalid_image"
+                  and await store.head(broken.object_key) is None)
+
+            orphan_thumb_id = await new_attachment(conn, store, http, alice, content_type="image/jpeg",
+                                                   content=wide_bytes, name="orphan.jpg")
+            await service.complete(conn, store=store, user_id=alice.user_id,
+                                   attachment_id=orphan_thumb_id)
+            await service.process_batch(
+                conn, store=store, scanner=StubScanner(), owner="attachments-check",
+                thumbnailer=PillowThumbnailer(),
+            )
+            orphan_thumb = await attachments_repo.fetch(
+                conn, attachment_id=AttachmentId(orphan_thumb_id))
+            await service.cleanup_orphans(conn, store=store, older_than=timedelta(seconds=0))
+            check("уборка стёрла и оригинал, и миниатюру",
+                  await store.head(orphan_thumb.object_key) is None
+                  and await store.head(orphan_thumb.thumbnail_key) is None)
+            kept = await store.head(thumb_row.thumbnail_key)
+            check("миниатюра прикреплённого не тронута", kept is not None)
 
             print("ATT-001: уборка неприкреплённых")
             orphan_id = await new_attachment(conn, store, http, alice,

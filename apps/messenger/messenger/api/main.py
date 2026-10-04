@@ -1318,6 +1318,13 @@ def _attachment_body(view: attachment_service.AttachmentView) -> dict[str, objec
         body["file_name"] = item.file_name
     if item.duration_ms is not None:
         body["duration_ms"] = item.duration_ms
+    if view.thumbnail_url is not None:
+        body["thumbnail_url"] = view.thumbnail_url
+    if item.width is not None and item.height is not None:
+        # Размеры оригинала «как показывается»: клиент резервирует место в
+        # ленте до загрузки картинки и не прыгает, когда она появится.
+        body["width"] = item.width
+        body["height"] = item.height
     return body
 
 

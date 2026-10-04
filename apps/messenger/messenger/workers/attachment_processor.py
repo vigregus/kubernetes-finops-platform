@@ -21,6 +21,7 @@ import uuid
 from prometheus_client import start_http_server
 
 from messenger.adapters import scanner as scanner_adapter
+from messenger.adapters.imaging import PillowThumbnailer
 from messenger.adapters.object_store import ObjectStore, ObjectStoreSettings
 from messenger.repositories import attachments as attachments_repo
 from messenger.repositories import postgres
@@ -59,6 +60,7 @@ async def run(stop: asyncio.Event) -> None:
 
     store = ObjectStore(store_settings)
     scanner = scanner_adapter.scanner_from_env()
+    thumbnailer = PillowThumbnailer()
     pool = None
     loop = asyncio.get_running_loop()
     last_cleanup = 0.0
@@ -87,7 +89,7 @@ async def run(stop: asyncio.Event) -> None:
         try:
             async with postgres.connection(pool) as conn:
                 outcome = await attachment_service.process_batch(
-                    conn, store=store, scanner=scanner, owner=owner
+                    conn, store=store, scanner=scanner, owner=owner, thumbnailer=thumbnailer
                 )
                 now = loop.time()
                 if now - last_report >= REPORT_EVERY_SECONDS:

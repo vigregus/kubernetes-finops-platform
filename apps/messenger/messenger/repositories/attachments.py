@@ -12,7 +12,8 @@ from messenger.domain.ids import AttachmentId, MessageId, UserId
 _COLUMNS = """
     attachment_id, uploader_id, message_id, state, bucket, object_key,
     content_type, size_bytes, created_at, file_name, detected_content_type,
-    rejection_reason, attempts, duration_ms, bitrate_kbps
+    rejection_reason, attempts, duration_ms, bitrate_kbps,
+    thumbnail_key, width, height
 """
 
 
@@ -38,6 +39,9 @@ def _to_attachment(row: asyncpg.Record) -> Attachment:
         attempts=row["attempts"],
         duration_ms=row["duration_ms"],
         bitrate_kbps=row["bitrate_kbps"],
+        thumbnail_key=row["thumbnail_key"],
+        width=row["width"],
+        height=row["height"],
     )
 
 
@@ -115,6 +119,9 @@ async def finish(
     state: AttachmentState,
     detected_content_type: str | None = None,
     rejection_reason: RejectionCode | None = None,
+    thumbnail_key: str | None = None,
+    width: int | None = None,
+    height: int | None = None,
 ) -> None:
     """Итог обработки. Аренда снимается: у законченной строки владельца нет."""
     await conn.execute(
@@ -123,6 +130,9 @@ async def finish(
            SET state = $2,
                detected_content_type = $3,
                rejection_reason = $4,
+               thumbnail_key = $5,
+               width = $6,
+               height = $7,
                processed_at = now(),
                lease_owner = NULL,
                lease_until = NULL
@@ -132,6 +142,9 @@ async def finish(
         state.value,
         detected_content_type,
         rejection_reason.value if rejection_reason else None,
+        thumbnail_key,
+        width,
+        height,
     )
 
 

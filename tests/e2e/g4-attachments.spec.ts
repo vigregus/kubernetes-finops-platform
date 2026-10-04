@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs"
+import { deflateSync } from "node:zlib"
 import { expect, test } from "@playwright/test"
 import type { BrowserContext } from "@playwright/test"
 import { STATE_FILE, fixtureFor, signIn } from "./support/auth"
@@ -25,6 +26,39 @@ const PNG = Buffer.from(
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==",
 	"base64",
 )
+
+// Настоящий PNG заданного размера, собранный без зависимостей: для проверки
+// миниатюры нужна картинка больше предела (480), а не точка 1x1.
+function crc32(buffer: Buffer): number {
+	let crc = 0xffffffff
+	for (const byte of buffer) {
+		crc ^= byte
+		for (let bit = 0; bit < 8; bit++) crc = crc & 1 ? (crc >>> 1) ^ 0xedb88320 : crc >>> 1
+	}
+	return (crc ^ 0xffffffff) >>> 0
+}
+function chunk(type: string, data: Buffer): Buffer {
+	const body = Buffer.concat([Buffer.from(type, "ascii"), data])
+	const length = Buffer.alloc(4)
+	length.writeUInt32BE(data.length)
+	const crc = Buffer.alloc(4)
+	crc.writeUInt32BE(crc32(body))
+	return Buffer.concat([length, body, crc])
+}
+function bigPng(width: number, height: number): Buffer {
+	const header = Buffer.alloc(13)
+	header.writeUInt32BE(width, 0)
+	header.writeUInt32BE(height, 4)
+	header.set([8, 2, 0, 0, 0], 8) // 8 бит, RGB
+	const row = Buffer.concat([Buffer.from([0]), Buffer.alloc(width * 3, 0x7f)])
+	const raw = Buffer.concat(Array.from({ length: height }, () => row))
+	return Buffer.concat([
+		Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+		chunk("IHDR", header),
+		chunk("IDAT", deflateSync(raw)),
+		chunk("IEND", Buffer.alloc(0)),
+	])
+}
 const EXE_AS_PNG = Buffer.concat([Buffer.from("MZ\x90\x00"), Buffer.alloc(64)])
 // Тестовая строка антивирусов, собранная из частей (исходник сам не должен
 // срабатывать на антивирусе разработчика).
@@ -79,9 +113,10 @@ test.describe("G4: вложения", () => {
 		const image = row.locator("img[alt='cat.png']")
 		await expect(image).toBeVisible({ timeout: 30_000 })
 
-		const src = await image.getAttribute("src")
-		expect(src, "у картинки есть ссылка на скачивание").toBeTruthy()
-		const downloaded = await b.page.request.get(src as string)
+		// В ленте миниатюра, а оригинал — по ссылке вокруг картинки.
+		const href = await row.locator("a[data-attachment-original]").getAttribute("href")
+		expect(href, "у картинки есть ссылка на оригинал").toBeTruthy()
+		const downloaded = await b.page.request.get(href as string)
 		expect(downloaded.status()).toBe(200)
 		expect(Buffer.compare(await downloaded.body(), PNG), "скачанное равно загруженному").toBe(0)
 
@@ -93,6 +128,41 @@ test.describe("G4: вложения", () => {
 		await expect(
 			b.page.locator("[data-message-id]", { hasText: caption }).locator("img[alt='cat.png']"),
 		).toBeVisible({ timeout: 30_000 })
+	})
+
+	test("ATT-003: большая картинка показывается миниатюрой, оригинал открывается по клику", async () => {
+		const original = bigPng(1200, 800)
+		await pick(a, { name: "big.png", mimeType: "image/png", buffer: original })
+		await expect(draft(a)).toHaveAttribute("data-attachment-draft", "ready", { timeout: 60_000 })
+		const caption = `большая ${Date.now()}`
+		await a.page.locator("[data-composer-input]").fill(caption)
+		await a.page.locator("[data-composer-send]").click()
+
+		const row = b.page.locator("[data-message-id]", { hasText: caption })
+		await expect(row).toHaveCount(1, { timeout: 60_000 })
+		const image = row.locator("img[alt='big.png']")
+		await expect(image).toBeVisible({ timeout: 30_000 })
+
+		// В ленте — миниатюра: WebP, не больше 480 по большей стороне и заметно
+		// легче оригинала. Место зарезервировано размерами оригинала.
+		const src = (await image.getAttribute("src")) as string
+		const thumb = await b.page.request.get(src)
+		expect(thumb.status()).toBe(200)
+		expect(thumb.headers()["content-type"]).toBe("image/webp")
+		expect((await thumb.body()).length).toBeLessThan(original.length)
+		await expect(image).toHaveAttribute("width", "1200")
+		await expect(image).toHaveAttribute("height", "800")
+		// Картинка грузится лениво (`loading="lazy"`): сначала показать, потом ждать.
+		await image.scrollIntoViewIfNeeded()
+		await expect
+			.poll(() => image.evaluate((el: HTMLImageElement) => [el.naturalWidth, el.naturalHeight]))
+			.toEqual([480, 320])
+
+		// Оригинал — по ссылке вокруг картинки, байт в байт.
+		const link = row.locator("a[data-attachment-original]")
+		const full = await b.page.request.get((await link.getAttribute("href")) as string)
+		expect(full.status()).toBe(200)
+		expect(Buffer.compare(await full.body(), original), "оригинал не тронут").toBe(0)
 	})
 
 	test("ATT-003: файл (PDF) доходит с именем", async () => {

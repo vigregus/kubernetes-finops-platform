@@ -11,7 +11,8 @@ interface AttachmentBubbleProps {
 const kindIcon = { image: "image", file: "description", voice: "graphic_eq" } as const
 
 export function AttachmentBubble({ attachment, own }: AttachmentBubbleProps) {
-  const { kind, name, state, previewUrl, durationSeconds, sizeLabel, rejectionReason } = attachment
+  const { kind, name, state, previewUrl, width, height, durationSeconds, sizeLabel, rejectionReason } =
+    attachment
 
   const shell = clsx(
     "flex items-center gap-3 rounded-2xl p-3 text-sm",
@@ -20,9 +21,28 @@ export function AttachmentBubble({ attachment, own }: AttachmentBubbleProps) {
   )
 
   if (kind === "image" && state === "ready") {
+    // Лента показывает миниатюру, оригинал открывается по клику. Размеры
+    // оригинала задают пропорции до загрузки картинки: без них строка
+    // выросла бы, когда миниатюра догрузится, и лента прыгнула бы.
+    const picture = (
+      <img
+        src={previewUrl}
+        alt={name}
+        loading="lazy"
+        {...(width !== undefined && height !== undefined ? { width, height } : {})}
+        style={width !== undefined && height !== undefined ? { aspectRatio: `${width} / ${height}` } : undefined}
+        className="block max-h-72 w-64 object-cover"
+      />
+    )
     return (
       <div className={clsx("overflow-hidden rounded-2xl", own ? "rounded-br-sm" : "rounded-bl-sm")}>
-        <img src={previewUrl} alt={name} className="block max-h-72 w-64 object-cover" />
+        {attachment.url ? (
+          <a href={attachment.url} target="_blank" rel="noopener noreferrer" data-attachment-original>
+            {picture}
+          </a>
+        ) : (
+          picture
+        )}
       </div>
     )
   }

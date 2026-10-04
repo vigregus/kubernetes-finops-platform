@@ -199,6 +199,7 @@ class ObjectStore:
         key: str,
         extra: dict[str, str] | None = None,
         now: datetime | None = None,
+        payload_sha256: str = _EMPTY_SHA256,
     ) -> dict[str, str]:
         s = self.settings
         moment = now or _now()
@@ -207,7 +208,7 @@ class ObjectStore:
         host = urlsplit(s.internal_endpoint).netloc
         headers = {
             "host": host,
-            "x-amz-content-sha256": _EMPTY_SHA256,
+            "x-amz-content-sha256": payload_sha256,
             "x-amz-date": amz_date,
             **{k.lower(): v for k, v in (extra or {}).items()},
         }
@@ -221,7 +222,7 @@ class ObjectStore:
                 "",
                 canonical_headers,
                 signed_names,
-                _EMPTY_SHA256,
+                payload_sha256,
             ]
         )
         string_to_sign = "\n".join(
@@ -260,6 +261,17 @@ class ObjectStore:
         response = await self._http.get(self._url(key), headers=self._headers("GET", key))
         response.raise_for_status()
         return response.content
+
+    async def put(self, key: str, data: bytes, content_type: str) -> None:
+        """Кладёт объект от имени сервера (миниатюра). Хэш тела входит в подпись."""
+        headers = self._headers(
+            "PUT",
+            key,
+            {"content-type": content_type},
+            payload_sha256=hashlib.sha256(data).hexdigest(),
+        )
+        response = await self._http.put(self._url(key), content=data, headers=headers)
+        response.raise_for_status()
 
     async def delete(self, key: str) -> None:
         response = await self._http.delete(self._url(key), headers=self._headers("DELETE", key))
