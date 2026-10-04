@@ -124,6 +124,13 @@ test.describe("G4: вложения", () => {
 		await a.page.locator("[data-composer-send]").click()
 
 		await expect(audio).toHaveCount(before + 1, { timeout: 60_000 })
+		// То же у отправителя: своё голосовое играется в ленте, а не ссылкой
+		// в новую вкладку (ответ на отправку собирается другим путём, чем
+		// публикация, и ломаться может только он).
+		await expect(a.page.locator("[data-attachment-voice]").last().locator("audio")).toBeVisible()
+		await expect(
+			a.page.locator("[data-attachment-voice]").last().locator("a[data-attachment-link]"),
+		).toHaveCount(0)
 		const player = audio.last()
 		const src = await player.getAttribute("src")
 		expect(src, "у голосового есть ссылка на скачивание").toBeTruthy()
@@ -138,6 +145,16 @@ test.describe("G4: вложения", () => {
 		const label = b.page.locator("[data-attachment-voice]").last()
 		await expect(label).toContainText(/0:0[2-5]/)
 		await expect(draft(a)).toHaveCount(0)
+
+		// После перезагрузки история несёт то же: плеер в ленте, а не ссылка.
+		await b.page.reload()
+		await openConversation(b, conversationId)
+		await expect(
+			b.page.locator("[data-attachment-voice]").last().locator("audio"),
+		).toBeVisible({ timeout: 30_000 })
+		await expect(
+			b.page.locator("[data-attachment-voice]").last().locator("a[data-attachment-link]"),
+		).toHaveCount(0)
 	})
 
 	test("ATT-005: неразрешённый тип отвергается сразу, до загрузки", async () => {
