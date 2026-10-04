@@ -166,6 +166,31 @@ def test_в_токен_попадают_каналы_бесед(monkeypatch):
         None, token="token", keys=None, settings=None, realtime=realtime,
     ))
     _, _, channels = realtime.issued[0]
+    # Канал набора — по тому же правилу, что и канал беседы (SEC-008).
+    assert channels == [
+        f"user:{USER_ID}",
+        f"conversation:{беседа}",
+        f"typing:{беседа}",
+    ]
+
+
+def test_выключенный_набор_не_выдаёт_канал(monkeypatch):
+    import uuid as _uuid
+
+    беседа = _uuid.uuid4()
+
+    async def _authenticate(*args, **kwargs):
+        return _auth()
+
+    realtime = FakeRealtime()
+    monkeypatch.setattr(identity, "authenticate", _authenticate)
+    monkeypatch.setenv("TYPING_ENABLED", "false")
+    _беседы(monkeypatch, [беседа])
+
+    asyncio.run(service.issue_token_for_user(
+        None, token="token", keys=None, settings=None, realtime=realtime,
+    ))
+    _, _, channels = realtime.issued[0]
     assert channels == [f"user:{USER_ID}", f"conversation:{беседа}"]
 
 

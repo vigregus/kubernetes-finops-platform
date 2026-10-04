@@ -41,6 +41,8 @@ import {
 import type { TelemetryClient } from "../telemetry/telemetryClient"
 import type { AttachmentClient } from "../attachments/attachmentUpload"
 import { useAttachmentDraft } from "../attachments/useAttachmentDraft"
+import { createTypingSender } from "../realtime/typingSender"
+import { useTypingPeers } from "../realtime/useTypingPeers"
 import { useVoiceRecorder } from "../attachments/useVoiceRecorder"
 import { browserVoiceDeps } from "../attachments/voiceRecorder"
 import { MessengerLayout } from "../../shared/ui/MessengerLayout"
@@ -787,6 +789,10 @@ function ConversationPane({
     [telemetry],
   )
 
+  // «Печатает» (G4): состояние держит получатель, а канал выдаёт сервер тем же
+  // тикетом. Свои публикации идут через publish-proxy API (автор и лимит — там).
+  const typingPeers = useTypingPeers(currentUserId)
+
   const connection = useRealtimeConnection({
     centrifugoUrl,
     // Имя канала — `conversation:{id}`: `conversation_id` в тело публикации не
@@ -797,6 +803,8 @@ function ConversationPane({
     // `user_channel_for`), и берётся из зрителя: у одного человека он один на
     // все беседы, и смена беседы его не меняет.
     userChannel: `user:${currentUserId}`,
+    typingChannel: `typing:${conversation.id}`,
+    onTypingPublication: typingPeers.onPublication,
     issueTicket,
     onPublication,
     onUserPublication: onUnreadPublication,
@@ -804,7 +812,23 @@ function ConversationPane({
     onObservedEvent,
   })
 
-  const { notify } = connection
+  const { notify, sendTyping } = connection
+
+  // Отправитель набора — один на панель беседы; уход из беседы (панель
+  // пересоздаётся по `key`) шлёт `stop`, чтобы у собеседника индикатор не висел
+  // до таймаута.
+  const typingSender = useMemo(
+    () => createTypingSender({ send: sendTyping, now: Date.now }),
+    [sendTyping],
+  )
+  useEffect(() => () => typingSender.stop(), [typingSender])
+
+  // У личной беседы печатающий — собеседник: имя то же, что в шапке. Для групп
+  // имена нужны из профилей участников, которых клиент пока не знает.
+  const typingNames = useMemo(
+    () => typingPeers.userIds.map(() => conversation.name),
+    [typingPeers.userIds, conversation.name],
+  )
 
   // Три факта наружу: два — от ленты (пропуск и сходимость), третий — отказ
   // догрузки. Все три ведут в тот же автомат, а не в отдельные `useState`:
@@ -1028,7 +1052,9 @@ function ConversationPane({
       // значило бы вывести прочтение из молчания.
       data-peer-read-seq={peer?.readSeq ?? undefined}
     >
-      <ChatHeader conversation={conversation} />
+      <ChatHeader
+        conversation={typingNames.length > 0 ? { ...conversation, typingNames } : conversation}
+      />
 
       {conversationHistory.phase === "error" ? (
         // Отказ хвоста — отдельное состояние, и оно не выдаёт себя ни за
@@ -1040,6 +1066,7 @@ function ConversationPane({
       ) : (
         <MessageList
           messages={messages}
+          typingNames={typingNames}
           conversationName={conversation.name}
           appliedThroughSeq={conversationHistory.appliedThroughSeq}
           // Источник второго числа квитанции. `setState` — устойчивая ссылка, и
@@ -1074,6 +1101,7 @@ function ConversationPane({
       <MessageComposer
         recipientName={conversation.name}
         onSend={onSend}
+        onTyping={typingSender.input}
         attachment={
           attachments === undefined
             ? undefined

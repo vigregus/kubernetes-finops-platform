@@ -65,3 +65,35 @@ describe("композер с вложением", () => {
     expect(attachment.onPick).toHaveBeenCalledWith(file)
   })
 })
+
+
+describe("композер сообщает «печатает»", () => {
+  it("набор текста — true, очистка поля — false", () => {
+    const onTyping = vi.fn()
+    render(<MessageComposer recipientName="Аня" onSend={vi.fn()} onTyping={onTyping} />)
+    fireEvent.change(input(), { target: { value: "при" } })
+    fireEvent.change(input(), { target: { value: "" } })
+    expect(onTyping.mock.calls).toEqual([[true], [false]])
+  })
+
+  it("пробелы вместо текста — не набор", () => {
+    const onTyping = vi.fn()
+    render(<MessageComposer recipientName="Аня" onSend={vi.fn()} onTyping={onTyping} />)
+    fireEvent.change(input(), { target: { value: "   " } })
+    expect(onTyping).toHaveBeenLastCalledWith(false)
+  })
+
+  it("отправка гасит набор: собеседник не видит его после ухода сообщения", () => {
+    const onTyping = vi.fn()
+    render(<MessageComposer recipientName="Аня" onSend={vi.fn()} onTyping={onTyping} />)
+    fireEvent.change(input(), { target: { value: "привет" } })
+    fireEvent.click(send())
+    expect(onTyping).toHaveBeenLastCalledWith(false)
+    expect(onTyping.mock.calls.length).toBe(2)
+  })
+
+  it("без обработчика композер прежний", () => {
+    render(<MessageComposer recipientName="Аня" onSend={vi.fn()} />)
+    expect(() => fireEvent.change(input(), { target: { value: "x" } })).not.toThrow()
+  })
+})

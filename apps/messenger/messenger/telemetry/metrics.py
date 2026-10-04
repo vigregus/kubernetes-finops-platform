@@ -458,6 +458,19 @@ def browser_delivery_duration(seconds: float) -> None:
     )
 
 
+# «Печатает» (G4): исход решения по публикации клиента. Доля `rate_limited`
+# и `invalid` — признак флуда или кривого клиента, а не нагрузки.
+TYPING_EVENTS = Counter(
+    "messenger_typing_events_total",
+    "Исход решения по публикации «печатает» (G4)",
+    ["service", "result"],
+)
+
+
+def typing_event(result: str) -> None:
+    TYPING_EVENTS.labels(service=SERVICE, result=result).inc()
+
+
 # G4: конвейер вложений. Исход обработки (`ready`/`rejected`/`failed`/
 # `deferred`) — тем же способом, что у `messenger_realtime_delivery_total`:
 # доля `rejected` и `deferred` и есть сигнал «сканер или хранилище болеют».

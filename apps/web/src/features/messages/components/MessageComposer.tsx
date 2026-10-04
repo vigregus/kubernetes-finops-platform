@@ -66,6 +66,12 @@ interface MessageComposerProps {
   disabled?: boolean
   disabledReason?: string
   attachment?: ComposerAttachment
+  /**
+   * Поле изменилось (`hasText`) — для индикатора «печатает». Вызывается и когда
+   * поле очищено отправкой, и тогда `false`: собеседник не должен видеть набор
+   * после того, как сообщение уже ушло.
+   */
+  onTyping?: (hasText: boolean) => void
 }
 
 const DRAFT_LABEL: Record<AttachmentDraft["state"], string> = {
@@ -82,6 +88,7 @@ export function MessageComposer({
   disabled,
   disabledReason,
   attachment,
+  onTyping,
 }: MessageComposerProps) {
   const [value, setValue] = useState("")
   const fileInput = useRef<HTMLInputElement>(null)
@@ -94,6 +101,7 @@ export function MessageComposer({
     if (attachment !== undefined && draft?.state === "ready") {
       attachment.onSend(text)
       setValue("")
+      onTyping?.(false)
       return
     }
     // Файл ещё в пути: текст не уходит отдельным сообщением, пока человек
@@ -103,6 +111,7 @@ export function MessageComposer({
     if (!text) return
     onSend(text)
     setValue("")
+    onTyping?.(false)
   }
 
   function handleKeyDown(event: KeyboardEvent<HTMLInputElement>) {
@@ -242,7 +251,10 @@ export function MessageComposer({
           )}
           <TextField
             value={value}
-            onChange={(event) => setValue(event.target.value)}
+            onChange={(event) => {
+              setValue(event.target.value)
+              onTyping?.(event.target.value.trim() !== "")
+            }}
             onKeyDown={handleKeyDown}
             placeholder={`Message ${recipientName}...`}
             data-composer-input

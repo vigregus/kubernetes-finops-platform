@@ -84,11 +84,14 @@ import { useEffect, useRef } from "react"
 
 import { EmptyConversationState } from "./EmptyConversationState"
 import { MessageBubble } from "./MessageBubble"
+import { TypingIndicator } from "./TypingIndicator"
 import type { ChatMessage, PendingMessage } from "../../../shared/lib/types"
 
 interface MessageListProps {
   /** Отсортированные по `seq` сообщения беседы. */
   messages: readonly ChatMessage[]
+  /** Кто печатает прямо сейчас (`RT-001`). Пусто — индикатора нет вовсе. */
+  typingNames?: readonly string[]
   /**
    * Нужно только пустой ленте: пустое состояние называет беседу по имени.
    *
@@ -172,12 +175,15 @@ function pendingAsMessage(record: PendingMessage): ChatMessage {
   }
 }
 
+const NO_TYPING: readonly string[] = []
+
 export function MessageList({
   messages,
   conversationName,
   appliedThroughSeq,
   onVisibleThroughSeq,
   pending = NO_PENDING,
+  typingNames = NO_TYPING,
 }: MessageListProps) {
   const scroller = useRef<HTMLDivElement | null>(null)
 
@@ -299,6 +305,13 @@ export function MessageList({
         </div>
       ) : (
         <EmptyConversationState name={conversationName} />
+      )}
+      {typingNames.length > 0 && (
+        // Маркер приёмки: индикатор появляется и гаснет сам (`RT-001`), и тест
+        // читает его наличие, а не слова.
+        <div data-typing-indicator={typingNames.length} className="py-1.5">
+          <TypingIndicator names={[...typingNames]} />
+        </div>
       )}
     </div>
   )
