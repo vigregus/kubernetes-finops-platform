@@ -92,6 +92,9 @@ class CountingLimiter:
 async def upload(http: httpx.AsyncClient, init, content: bytes) -> int:
     """Загрузка так, как её сделал бы браузер: по ссылке, с заголовками из ответа."""
     response = await http.put(init.upload_url, content=content, headers=init.upload_headers)
+    if response.status_code != 200:
+        # Причина отказа хранилища (подпись, хост, тип) — в теле ответа.
+        print(f"      PUT {response.status_code}: {response.text[:900]}")
     return response.status_code
 
 
