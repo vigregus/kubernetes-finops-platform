@@ -73,6 +73,21 @@ This project assumes a local `minikube` cluster (Docker driver) for Local v1.
               analytics.finops.local analytics-stage.finops.local \
               opencost.finops.local shop.finops.local
    ```
+   Messenger hostnames (`app`, `idp`, `rt`, `s3`, `mail` under
+   `finops.local`) are served by the edge gateway with certificates
+   issued by a local CA. Browsers refuse a page they cannot trust, but
+   for a sub-resource they cannot even ask: attachments in the chat are
+   loaded from `s3.finops.local` in the background, so without trust
+   they show as broken images (`net::ERR_CERT_AUTHORITY_INVALID`).
+   Trust the CA once instead of clicking through each host:
+   ```
+   kubectl -n cert-manager get secret finops-local-ca \
+     -o jsonpath='{.data.tls\.crt}' | base64 -d > /tmp/finops-local-ca.crt
+   sudo security add-trusted-cert -d -r trustRoot \
+     -k /Library/Keychains/System.keychain /tmp/finops-local-ca.crt
+   ```
+   then restart the browser. (The browser acceptance in `tests/e2e`
+   runs with `ignoreHTTPSErrors`, so it does not show this problem.)
 8. Create any required local secrets outside Git (see "Local secret
    handling" below).
 9. Run `k6` scenarios from `tests/k6` (see that directory's own README)

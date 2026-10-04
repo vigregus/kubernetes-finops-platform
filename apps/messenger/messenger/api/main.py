@@ -15,7 +15,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 from urllib.parse import parse_qs
 
@@ -44,6 +44,7 @@ from messenger.domain.ids import (
 from messenger.domain.message import (
     MessageKind,
     MessagePayload,
+    validate_attachments,
     validate_message_payload,
 )
 from messenger.domain.presence import is_online
@@ -54,6 +55,7 @@ from messenger.domain.receipts import (
     validate_receipts,
 )
 from messenger.domain.user import capabilities_of, normalize_email
+from messenger.services import attachments as attachment_service
 from messenger.services import backchannel as backchannel_service
 from messenger.services import browser_telemetry as browser_telemetry_service
 from messenger.services import conversations as conversation_service
@@ -1259,7 +1261,20 @@ class SetReceipts(BaseModel):
         return self
 
 
-def _message_body(message) -> dict[str, object]:
+def _attachment_body(view: attachment_service.AttachmentView) -> dict[str, object]:
+    item = view.attachment
+    body: dict[str, object] = {
+        "attachment_id": str(item.attachment_id),
+        "content_type": item.content_type,
+        "size_bytes": item.size_bytes,
+        "download_url": view.download_url,
+    }
+    if item.file_name:
+        body["file_name"] = item.file_name
+    return body
+
+
+def _message_body(message, attachments=()) -> dict[str, object]:
     """Сообщение в форме контракта.
 
     Содержимое удалённого не отдаётся: надгробие сохраняет номер
@@ -1282,6 +1297,14 @@ def _message_body(message) -> dict[str, object]:
         "created_at": message.created_at,
         "edited_at": message.edited_at,
         "deleted_at": message.deleted_at,
+        # Ключ есть только у сообщения с вложениями: пустой массив у
+        # текстового утверждал бы «вложений нет», а клиент и так знает это
+        # по `type`. Удалённое сообщение вложений не показывает (надгробие).
+        **(
+            {"attachments": [_attachment_body(view) for view in attachments]}
+            if attachments and message.deleted_at is None
+            else {}
+        ),
     }
 
 
@@ -1613,7 +1636,10 @@ def _receipts_body(state: ReadState) -> dict[str, object]:
     }
 
 
-def _history_body(result: history_service.HistoryResult) -> dict[str, object]:
+def _history_body(
+    result: history_service.HistoryResult,
+    attachments: dict | None = None,
+) -> dict[str, object]:
     """Страница в форме контракта. Все пять полей — всегда.
 
     Сообщения собираются тем же `_message_body`, что и в одиночной выдаче:
@@ -1626,7 +1652,10 @@ def _history_body(result: history_service.HistoryResult) -> dict[str, object]:
     синхронизированной и пошёл бы догонять то, что уже догнал.
     """
     return {
-        "items": [_message_body(item) for item in result.page.items],
+        "items": [
+            _message_body(item, (attachments or {}).get(item.message_id, ()))
+            for item in result.page.items
+        ],
         "has_more": result.page.has_more,
         "next_before_seq": (
             int(result.next_before_seq)
@@ -1703,6 +1732,15 @@ async def list_messages(
                 through_seq=through_seq,
                 limit=limit,
             )
+            views = {}
+            if result.ok:
+                # Только после проверки доступа: ссылка на скачивание
+                # выдаётся тому, кто уже прошёл её для этой беседы.
+                views = await attachment_service.views_for_messages(
+                    conn,
+                    store=runtime.object_store,
+                    message_ids=[item.message_id for item in result.page.items],
+                )
     except InvalidCursor as exc:
         # Второй источник того же `400`: правило о курсоре, для которого
         # нужна голова беседы. Проверить его в строке запроса нельзя —
@@ -1727,7 +1765,7 @@ async def list_messages(
         )
 
     with tracing.span("response"):
-        body_out = _history_body(result)
+        body_out = _history_body(result, views)
     return body_out
 
 
@@ -1760,6 +1798,7 @@ async def send_message(
         # блокировку строки беседы. Правило одно — вызывается дважды,
         # а не переписывается здесь своими словами.
         validate_message_payload(kind, payload)
+        validate_attachments(kind, len(set(body.attachment_ids)))
     except ValueError as exc:
         # Предел длины описан в контракте отдельным кодом: клиенту важно
         # отличить «слишком длинно» от «поле не то», потому что в первом
@@ -1811,8 +1850,18 @@ async def send_message(
         return _problem_response(to_problem(result.rejection or Reason.INTERNAL), response)
 
     response.status_code = 201 if result.created else 200
+    sent_views = {}
+    if body.attachment_ids and runtime.object_store is not None:
+        async with runtime.connection() as conn:
+            sent_views = await attachment_service.views_for_messages(
+                conn,
+                store=runtime.object_store,
+                message_ids=[result.message.message_id],
+            )
     with tracing.span("response"):
-        body_out = _message_body(result.message)
+        body_out = _message_body(
+            result.message, sent_views.get(result.message.message_id, ())
+        )
     # Сквозной ключ на корневом спане запроса. После перехода на три
     # трассы поиск по `trace_id` находит только одну из трёх, поэтому
     # найти сообщение в Tempo можно ровно по этому атрибуту.
@@ -2008,6 +2057,134 @@ async def ingest_browser_telemetry(
         await browser_telemetry_service.ingest(conn, events=events)
 
     return Response(status_code=202)
+
+
+class InitAttachment(BaseModel):
+    """Тело `POST /attachments`. Имена — из контракта."""
+
+    content_type: str
+    size_bytes: int = Field(ge=1)
+    file_name: str | None = Field(default=None, min_length=1, max_length=255)
+
+
+# Состояния, которых для клиента не существует: уборщик их уже забрал
+# или забирает, и показать их значило бы утверждать то, на что нельзя опереться.
+_HIDDEN_ATTACHMENT_STATES = frozenset({"orphaned", "erased"})
+
+
+def _attachment_status_body(item) -> dict[str, object]:
+    body: dict[str, object] = {
+        "attachment_id": str(item.attachment_id),
+        "state": item.state.value,
+    }
+    if item.rejection_reason is not None:
+        body["rejection_code"] = item.rejection_reason.value
+    return body
+
+
+@app.post("/attachments", status_code=201, response_model=dict[str, object])
+async def create_attachment(
+    body: InitAttachment, request: Request, response: Response
+) -> dict[str, object] | Response:
+    """Выдаёт ссылку на прямую загрузку в хранилище (G4, `ATT-005`/`ATT-006`).
+
+    Отказ по типу и размеру — **до** выдачи ссылки: ни строки, ни подписи.
+    Лимит инициаций с отказом в закрытую сторону (`OnFailure.DENY`): ссылка
+    стоит места в хранилище, и недоступный счётчик не повод раздавать их
+    без счёта.
+    """
+    runtime = request.app.state.runtime
+    store = runtime.object_store
+    if store is None:
+        return _problem_response(to_problem(Reason.ATTACHMENTS_UNAVAILABLE), response)
+
+    async with runtime.connection() as conn:
+        auth = await _current(request, conn)
+        if not auth.ok or auth.user is None:
+            return _auth_failure(auth.rejection, response)
+
+        result = await attachment_service.init_upload(
+            conn,
+            store=store,
+            limiter=runtime.limiter,
+            user_id=auth.user.user_id,
+            content_type=body.content_type,
+            size_bytes=body.size_bytes,
+            file_name=body.file_name,
+        )
+
+    if result.rejection is Reason.RATE_LIMITED:
+        # Без Retry-After клиент повторяет вслепую и упирается снова.
+        response.headers["Retry-After"] = str(result.retry_after_seconds or 1)
+    if not result.ok or result.attachment is None:
+        return _problem_response(
+            to_problem(result.rejection or Reason.INTERNAL), response
+        )
+
+    expires_at = datetime.now(UTC) + timedelta(seconds=result.expires_in_seconds)
+    return {
+        "attachment_id": str(result.attachment.attachment_id),
+        "upload_url": result.upload_url,
+        "expires_at": expires_at,
+        "upload_headers": result.upload_headers or {},
+    }
+
+
+@app.post(
+    "/attachments/{attachment_id}/complete",
+    status_code=202,
+    response_model=dict[str, object],
+)
+async def complete_attachment(
+    attachment_id: uuid.UUID, request: Request, response: Response
+) -> dict[str, object] | Response:
+    """«Загрузил»: сверить объект и поставить в обработку. Повтор безопасен."""
+    runtime = request.app.state.runtime
+    store = runtime.object_store
+    if store is None:
+        return _problem_response(to_problem(Reason.ATTACHMENTS_UNAVAILABLE), response)
+
+    async with runtime.connection() as conn:
+        auth = await _current(request, conn)
+        if not auth.ok or auth.user is None:
+            return _auth_failure(auth.rejection, response)
+        result = await attachment_service.complete(
+            conn,
+            store=store,
+            user_id=auth.user.user_id,
+            attachment_id=AttachmentId(attachment_id),
+        )
+
+    if not result.ok or result.attachment is None:
+        return _problem_response(
+            to_problem(result.rejection or Reason.INTERNAL), response
+        )
+    return _attachment_status_body(result.attachment)
+
+
+@app.get("/attachments/{attachment_id}", response_model=dict[str, object])
+async def get_attachment_status(
+    attachment_id: uuid.UUID, request: Request, response: Response
+) -> dict[str, object] | Response:
+    """Состояние вложения: клиент опрашивает его, пока оно `processing`."""
+    runtime = request.app.state.runtime
+    async with runtime.connection() as conn:
+        auth = await _current(request, conn)
+        if not auth.ok or auth.user is None:
+            return _auth_failure(auth.rejection, response)
+        result = await attachment_service.status(
+            conn, user_id=auth.user.user_id, attachment_id=AttachmentId(attachment_id)
+        )
+
+    if (
+        not result.ok
+        or result.attachment is None
+        or result.attachment.state.value in _HIDDEN_ATTACHMENT_STATES
+    ):
+        return _problem_response(
+            to_problem(result.rejection or Reason.ATTACHMENT_NOT_FOUND), response
+        )
+    return _attachment_status_body(result.attachment)
 
 
 @app.post("/auth/verify-email/resend", response_model=dict[str, object])

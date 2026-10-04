@@ -54,6 +54,20 @@ def validate_message_payload(kind: MessageKind, payload: MessagePayload) -> None
         raise ValueError("длительность разрешена только для голосового сообщения")
 
 
+def validate_attachments(kind: MessageKind, attachment_count: int) -> None:
+    """Сочетание вида и числа вложений (G4). Правило одно, вызывается дважды.
+
+    В этом срезе у сообщения-картинки и сообщения-файла ровно одно вложение:
+    несколько — отдельное решение о раскладке в ленте, а не побочный эффект
+    транспорта. Текст вложений не несёт, голосовые — следующий срез.
+    """
+    if kind in (MessageKind.IMAGE, MessageKind.FILE):
+        if attachment_count != 1:
+            raise ValueError("сообщение-вложение требует ровно одно вложение")
+    elif attachment_count:
+        raise ValueError("вложения разрешены только у изображения и файла")
+
+
 @dataclass(frozen=True, slots=True)
 class Message:
     message_id: MessageId
