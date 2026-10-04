@@ -58,10 +58,23 @@ class PillowThumbnailer:
             if image.width * image.height > MAX_SOURCE_PIXELS:
                 raise UnreadableImage("слишком много пикселей")
             image.seek(0)  # анимация: берётся первый кадр
-            oriented = ImageOps.exif_transpose(image)
-            source_width, source_height = oriented.size
 
+            # Размеры оригинала «как показывается» считаются **до** любых
+            # ужатий при чтении: поворот по EXIF на 90° меняет стороны местами.
+            source_width, source_height = image.size
+            rotated = image.getexif().get(0x0112) in (5, 6, 7, 8)
+            if rotated:
+                source_width, source_height = source_height, source_width
             target = fit_within(source_width, source_height, THUMBNAIL_MAX_PX)
+
+            if image.format == "JPEG":
+                # JPEG умеет распаковываться сразу в 1/2, 1/4 или 1/8 размера:
+                # снимок на 48 мегапикселей не занимает сотни мегабайт в
+                # воркере с лимитом памяти, а на качество миниатюры в 480 px
+                # это не влияет — декодер не опускается ниже запрошенного.
+                # Запрошенный размер — в осях файла, а не повёрнутого вида.
+                image.draft("RGB", target[::-1] if rotated else target)
+            oriented = ImageOps.exif_transpose(image)
             has_alpha = oriented.mode in ("RGBA", "LA") or "transparency" in oriented.info
             frame = oriented.convert("RGBA" if has_alpha else "RGB")
             frame.thumbnail(target, Image.Resampling.LANCZOS)

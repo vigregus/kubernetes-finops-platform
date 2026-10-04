@@ -92,3 +92,12 @@ def test_бомба_сжатия_отвергается_до_распаковк�
     assert len(bomb) < 1_000_000
     with pytest.raises(UnreadableImage):
         make(bomb)
+
+
+def test_большой_jpeg_с_поворотом_даёт_верные_размеры_без_полной_распаковки():
+    # 4000x3000 в осях файла, показывать повёрнутым: 3000x4000 → 360x480.
+    exif = Image.Exif()
+    exif[0x0112] = 6
+    thumb = make(_encode(Image.new("RGB", (4000, 3000), "gray"), "JPEG", exif=exif))
+    assert (thumb.source_width, thumb.source_height) == (3000, 4000)
+    assert (thumb.width, thumb.height) == (360, 480)
