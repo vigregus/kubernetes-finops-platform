@@ -95,7 +95,7 @@ export default defineConfig({
 			// своя спека, свой бюджет (загрузка, обработка воркером, доставка), а
 			// состояние прогона пишет та же подготовка `fixture`.
 			name: "g4",
-			testMatch: /g4-(attachments|typing)\.spec\.ts$/,
+			testMatch: /g4-(attachments|typing|push)\.spec\.ts$/,
 			dependencies: ["fixture"],
 			timeout: 300_000,
 			// Голосовое (`ATT-004`): настоящий `MediaRecorder` читает фейковый
