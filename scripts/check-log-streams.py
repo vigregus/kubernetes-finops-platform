@@ -125,6 +125,9 @@ EVENTS: dict[str, str] = {
     # и снятие доли онлайн происходят в одном такте, и разделять их значило
     # бы утверждать, что одно бывает без другого.
     "presence_sweep": APPLICATION,
+    "call_sweep": APPLICATION,
+    "turn_unavailable": APPLICATION,
+    "turn_unconfigured": APPLICATION,
     # Обращения.
     "http_request": "access",
     # Доступ: кого пустили, кого нет и почему.

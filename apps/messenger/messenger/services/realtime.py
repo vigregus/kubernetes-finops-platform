@@ -9,11 +9,13 @@ import asyncpg
 
 from messenger.adapters import oidc
 from messenger.adapters.centrifugo import CentrifugoClient
+from messenger.domain import call as call_domain
 from messenger.domain import typing_indicator as typing_domain
 from messenger.domain.identity import TokenRejection
 from messenger.domain.ids import DeviceId, SessionId, UserId
 from messenger.repositories import conversations as conversation_repo
 from messenger.repositories import sessions, users
+from messenger.services import calls as calls_service
 from messenger.services import identity
 from messenger.services import typing as typing_service
 
@@ -89,6 +91,10 @@ async def issue_token_for_user(
         # участнику и на момент выдачи (SEC-008). Публикует в него клиент сам,
         # но через publish-proxy (`services/typing.py`).
         channels += [typing_domain.typing_channel(uuid.UUID(str(c))) for c in conversations]
+    if calls_service.enabled():
+        # Личный канал звонков (без истории): подписка выдаётся только владельцу
+        # и только когда звонки включены на окружении.
+        channels.append(call_domain.call_channel(user_id))
     issued, expires_at = realtime.issue_token(
         user_id,
         str(auth.session.session_id),

@@ -22,7 +22,7 @@ from enum import Enum
 
 import asyncpg
 
-from messenger.adapters import centrifugo, keycloak, object_store, oidc, ratelimit
+from messenger.adapters import centrifugo, keycloak, object_store, oidc, ratelimit, turn
 from messenger.repositories import postgres
 from messenger.services.login import LoginSettings
 from messenger.telemetry import metrics
@@ -238,6 +238,9 @@ class Runtime:
     # `None`, когда объектное хранилище не настроено: вложения тогда отвечают
     # 503, а остальное живёт (`adapters/object_store.py`).
     object_store: object_store.ObjectStore | None = None
+    # Доступ к STUN/TURN для звонков (`adapters/turn.py`): всегда есть — без
+    # настройки это пустой список, и звонок идёт напрямую.
+    turn: turn.TurnProvider | None = None
     backchannel_audience: str = field(
         default_factory=lambda: os.getenv("OIDC_BACKCHANNEL_AUDIENCE", "messenger-web")
     )
@@ -253,6 +256,8 @@ class Runtime:
             self.limiter = ratelimit.RateLimiter(settings=limit_settings_from_env())
         if self.centrifugo is None:
             self.centrifugo = centrifugo_client_from_env()
+        if self.turn is None:
+            self.turn = turn.provider_from_env()
         if self.object_store is None:
             store_settings = object_store.ObjectStoreSettings.from_env()
             if store_settings is not None:

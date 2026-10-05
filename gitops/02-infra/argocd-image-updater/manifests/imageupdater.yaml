@@ -72,6 +72,14 @@ spec:
           manifestTargets:
             helm:
               spec: services.presence-sweeper.image.spec
+        - alias: callsweeper
+          imageName: ghcr.io/vigregus/messenger-api
+          commonUpdateSettings:
+            updateStrategy: newest-build
+            allowTags: "regexp:^[0-9a-f]{40}$"
+          manifestTargets:
+            helm:
+              spec: services.call-sweeper.image.spec
         - alias: consumernotifications
           imageName: ghcr.io/vigregus/messenger-api
           commonUpdateSettings:

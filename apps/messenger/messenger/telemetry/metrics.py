@@ -485,6 +485,52 @@ def push_sent(result: str) -> None:
     PUSH_SENT.labels(service=SERVICE, result=result).inc()
 
 
+# Звонки (G4, ADR 0007). Исход звонка — по причине завершения; время установки
+# и путь соединения сообщает клиент по `getStats()` и подтверждает «медиа пошло».
+# Доля `relay` в `messenger_call_connection_total` проверяет допущение оценки
+# (15%), на котором держится стоимость.
+CALL_STARTED = Counter(
+    "messenger_call_started_total", "Звонки по виду (G4)", ["service", "kind"]
+)
+CALL_ENDED = Counter(
+    "messenger_call_ended_total",
+    "Завершённые звонки по причине (G4)",
+    ["service", "kind", "reason"],
+)
+CALL_CONNECTION = Counter(
+    "messenger_call_connection_total",
+    "Путь соединения активного звонка: direct или relay (G4)",
+    ["service", "type"],
+)
+CALL_SETUP_SECONDS = Histogram(
+    "messenger_call_setup_seconds",
+    "От «принял» до «медиа пошло» (G4)",
+    ["service"],
+    buckets=(0.5, 1, 2, 3, 5, 8, 13, 20, 30),
+)
+CALL_SIGNAL = Counter(
+    "messenger_call_signal_total", "Сигналы звонка по исходу (G4)", ["service", "result"]
+)
+
+
+def call_started(kind: str) -> None:
+    CALL_STARTED.labels(service=SERVICE, kind=kind).inc()
+
+
+def call_ended(kind: str, reason: str) -> None:
+    CALL_ENDED.labels(service=SERVICE, kind=kind, reason=reason).inc()
+
+
+def call_connection(connection_type: str, setup_seconds: float | None) -> None:
+    CALL_CONNECTION.labels(service=SERVICE, type=connection_type).inc()
+    if setup_seconds is not None and setup_seconds >= 0:
+        CALL_SETUP_SECONDS.labels(service=SERVICE).observe(setup_seconds)
+
+
+def call_signal(result: str) -> None:
+    CALL_SIGNAL.labels(service=SERVICE, result=result).inc()
+
+
 # G4: конвейер вложений. Исход обработки (`ready`/`rejected`/`failed`/
 # `deferred`) — тем же способом, что у `messenger_realtime_delivery_total`:
 # доля `rejected` и `deferred` и есть сигнал «сканер или хранилище болеют».

@@ -8,7 +8,7 @@
   "properties": {
     "channels": {
       "type": "object",
-      "required": ["conversation", "typing", "user"],
+      "required": ["conversation", "typing", "user", "call"],
       "properties": {
         "conversation": {
           "type": "object",
@@ -41,6 +41,17 @@
             "history_size": { "const": 20 },
             "history_ttl_seconds": { "const": 60 },
             "payload": { "$ref": "#/$defs/userEvent" }
+          }
+        },
+        "call": {
+          "type": "object",
+          "description": "Личный канал звонков: входящий звонок, смена состояния, сигналы WebRTC. История выключена **целиком**: после обрыва соединения Centrifugo отдал бы устаревший `offer` как новый (`CALL-007`). Публикует только сервер (клиенту права нет), подписку выдаёт сервер по тикету владельцу и только когда звонки включены.",
+          "properties": {
+            "pattern": { "const": "call:{user_id}" },
+            "presence": { "const": false },
+            "history_size": { "const": 0 },
+            "history_ttl_seconds": { "const": 0 },
+            "payload": { "$ref": "#/$defs/callEvent" }
           }
         }
       }
@@ -104,6 +115,39 @@
           "type": "integer",
           "description": "Состояние держит получатель, а не сервер: каждый heartbeat продлевает срок только своего пользователя. Так «печатает» гаснет само, даже если отправитель просто закрыл вкладку."
         }
+      }
+    },
+    "callEvent": {
+      "type": "object",
+      "required": ["type", "call_id"],
+      "properties": {
+        "type": { "enum": ["call.incoming", "call.state", "call.signal"] },
+        "call_id": { "type": "string", "format": "uuid" },
+        "conversation_id": { "type": "string", "format": "uuid" },
+        "kind": { "enum": ["audio", "video"] },
+        "caller": {
+          "type": "object",
+          "properties": {
+            "user_id": { "type": "string", "format": "uuid" },
+            "display_name": { "type": "string" }
+          }
+        },
+        "state": { "enum": ["ringing", "accepted", "active", "ended"] },
+        "reason": {
+          "type": ["string", "null"],
+          "description": "Причина конца или `accepted_elsewhere`: вызов принят в другой вкладке этого же человека — экран гаснет, звонок не кончился."
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Монотонный номер состояния: клиент отбрасывает событие с номером не больше виденного."
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Номер сигнала в звонке, выданный сервером: устаревший сигнал отбрасывается."
+        },
+        "signal": { "type": "object" }
       }
     },
     "userEvent": {
