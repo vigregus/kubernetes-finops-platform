@@ -25,7 +25,13 @@ import {
 import { ApiProblem } from "../../api/problems"
 import { isRecord } from "../messages/message-adapter"
 import { createCallChannelClient, type CentrifugeFactory } from "../realtime/realtimeClient"
-import { CallEngine, type EngineEnv, type WireSignal } from "./callEngine"
+import {
+  CallEngine,
+  VIDEO_QUALITIES,
+  type EngineEnv,
+  type VideoQuality,
+  type WireSignal,
+} from "./callEngine"
 import { createSerialQueue } from "./signalQueue"
 import {
   IDLE,
@@ -44,6 +50,18 @@ export const ENDED_SCREEN_MS = 2500
 /** Как часто клиент подтверждает, что звонок жив (сервер ждёт тишину до 90 с). */
 export const KEEPALIVE_MS = 30_000
 
+const QUALITY_KEY = "messenger.call.videoQuality"
+
+/** Выбор человека живёт в браузере: удобство, а не состояние (может не прочитаться). */
+function loadVideoQuality(): VideoQuality {
+  try {
+    const value = window.localStorage.getItem(QUALITY_KEY)
+    return (VIDEO_QUALITIES as readonly string[]).includes(value ?? "") ? (value as VideoQuality) : "auto"
+  } catch {
+    return "auto"
+  }
+}
+
 export interface CallsContextValue {
   readonly view: CallView
   readonly localStream: MediaStream | null
@@ -54,16 +72,20 @@ export interface CallsContextValue {
   readonly supported: boolean
   /** Короткое сообщение об отказе начать звонок; гаснет само. */
   readonly notice: string | null
+  /** Качество **исходящего** видео: `auto` или пресет. */
+  readonly videoQuality: VideoQuality
   startCall(conversationId: string, kind: CallKind, peerName: string): void
   accept(): void
   decline(): void
   hangup(): void
   setMuted(muted: boolean): void
   setCameraOff(off: boolean): void
+  setVideoQuality(quality: VideoQuality): void
   hasVideo(): boolean
 }
 
-const CallsContext = createContext<CallsContextValue | null>(null)
+/** Экспортируется для тестов и историй интерфейса; в приложении — только через провайдер. */
+export const CallsContext = createContext<CallsContextValue | null>(null)
 
 /** `null`, когда звонков нет (выключены на окружении): интерфейс кнопок не рисует. */
 export function useCalls(): CallsContextValue | null {
@@ -140,6 +162,8 @@ export function CallsProvider({
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null)
   const [signalingUp, setSignalingUp] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
+  const [videoQuality, setVideoQualityState] = useState<VideoQuality>(loadVideoQuality)
+  const videoQualityRef = useRef(videoQuality)
 
   // Метка этой вкладки. Две вкладки вызываемого, нажавшие «принять» одновременно,
   // обе подняли бы медиа и обе ответили бы на `offer`; по метке сервер называет
@@ -508,6 +532,17 @@ export function CallsProvider({
     [apply],
   )
 
+  const setVideoQuality = useCallback((quality: VideoQuality) => {
+    videoQualityRef.current = quality
+    setVideoQualityState(quality)
+    engineRef.current?.setVideoQuality(quality)
+    try {
+      window.localStorage.setItem(QUALITY_KEY, quality)
+    } catch {
+      // Не сохранилось — выбор живёт до закрытия вкладки.
+    }
+  }, [])
+
   const hasVideo = useCallback(() => engineRef.current?.hasVideo() ?? false, [])
 
   const value = useMemo<CallsContextValue>(
@@ -518,15 +553,20 @@ export function CallsProvider({
       signalingUp,
       supported: env !== null,
       notice,
+      videoQuality,
       startCall,
       accept,
       decline,
       hangup,
       setMuted,
       setCameraOff,
+      setVideoQuality,
       hasVideo,
     }),
-    [view, localStream, remoteStream, signalingUp, env, notice, startCall, accept, decline, hangup, setMuted, setCameraOff, hasVideo],
+    [
+      view, localStream, remoteStream, signalingUp, env, notice, videoQuality, startCall, accept,
+      decline, hangup, setMuted, setCameraOff, setVideoQuality, hasVideo,
+    ],
   )
 
   return <CallsContext.Provider value={value}>{children}</CallsContext.Provider>

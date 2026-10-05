@@ -53,6 +53,24 @@ async function trackPeers(context: BrowserContext): Promise<void> {
 	})
 }
 
+/** Параметры кодирования исходящего видео — то, что браузер реально применил. */
+async function videoEncoding(page: Page): Promise<{ maxBitrate?: number; scaleResolutionDownBy?: number }> {
+	return page.evaluate(() => {
+		const peers = (window as unknown as { __peers?: RTCPeerConnection[] }).__peers ?? []
+		for (const peer of peers) {
+			for (const sender of peer.getSenders()) {
+				if (sender.track?.kind === "video") {
+					return (sender.getParameters().encodings?.[0] ?? {}) as {
+						maxBitrate?: number
+						scaleResolutionDownBy?: number
+					}
+				}
+			}
+		}
+		return {}
+	})
+}
+
 /** Сколько пакетов принято по входящим потокам; растёт — значит, медиа идёт. */
 async function packetsReceived(page: Page): Promise<number> {
 	return page.evaluate(async () => {
@@ -166,6 +184,21 @@ test.describe("G4: звонки", () => {
 				)
 				.toBeGreaterThan(0)
 		}
+		await expectMediaFlowing(b.page)
+
+		// Качество исходящего видео меняется посреди звонка и доходит до отправителя.
+		await a.page.getByRole("button", { name: "Video quality" }).click()
+		await a.page.getByRole("menuitemradio", { name: /^Low/ }).click()
+		await expect(a.page.locator("[data-call-quality]")).toHaveAttribute("data-call-quality", "low")
+		await expect
+			.poll(() => videoEncoding(a.page), { timeout: 10_000 })
+			.toMatchObject({ maxBitrate: 350_000, scaleResolutionDownBy: 2 })
+		await a.page.getByRole("button", { name: "Video quality" }).click()
+		await a.page.getByRole("menuitemradio", { name: /^High/ }).click()
+		await expect
+			.poll(() => videoEncoding(a.page), { timeout: 10_000 })
+			.toMatchObject({ maxBitrate: 1_500_000, scaleResolutionDownBy: 1 })
+		await expect(PEER(a)).toHaveAttribute("data-call-phase", "active")
 		await expectMediaFlowing(b.page)
 
 		// Микрофон выключается, не разрывая соединения.

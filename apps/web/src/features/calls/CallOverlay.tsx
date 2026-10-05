@@ -5,6 +5,7 @@ import { Avatar } from "../../shared/ui/Avatar"
 import { Icon } from "../../shared/ui/Icon"
 import { formatCallDuration } from "./callSummary"
 import type { CallEndReason, CallPhase } from "./callState"
+import { VIDEO_QUALITIES, type VideoQuality } from "./callEngine"
 import { useCalls } from "./CallsProvider"
 
 const ENDED_TEXT: Readonly<Record<CallEndReason, string>> = {
@@ -22,6 +23,73 @@ const ENDED_TEXT: Readonly<Record<CallEndReason, string>> = {
 const STATUS_TEXT: Readonly<Partial<Record<CallPhase, string>>> = {
   outgoing: "Calling…",
   connecting: "Connecting…",
+}
+
+const QUALITY_LABEL: Readonly<Record<VideoQuality, string>> = {
+  auto: "Auto",
+  low: "Low · 360p",
+  medium: "Medium · 480p",
+  high: "High · 720p",
+}
+
+/**
+ * Выбор качества **исходящего** видео. Меню, а не список всегда на экране: в
+ * разговоре нужна картинка, а не настройки. Атрибут `data-call-quality` — то, чем
+ * приёмка читает выбор, не разбирая слова.
+ */
+function VideoQualityMenu({
+  value,
+  onChange,
+}: {
+  value: VideoQuality
+  onChange: (quality: VideoQuality) => void
+}) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="relative" data-call-quality={value}>
+      <button
+        type="button"
+        aria-label="Video quality"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((current) => !current)}
+        className={clsx(
+          "flex h-14 w-14 items-center justify-center rounded-full transition-colors",
+          open ? "bg-white text-stone-900" : "bg-white/15 text-white hover:bg-white/25",
+        )}
+      >
+        <Icon name="hd" size={24} />
+      </button>
+      {open && (
+        <div
+          role="menu"
+          aria-label="Outgoing video quality"
+          className="absolute bottom-16 left-1/2 w-48 -translate-x-1/2 rounded-2xl bg-stone-800 p-1.5 text-sm shadow-xl"
+        >
+          <p className="px-3 pb-1 pt-1.5 text-xs text-white/60">Your outgoing video</p>
+          {VIDEO_QUALITIES.map((quality) => (
+            <button
+              key={quality}
+              type="button"
+              role="menuitemradio"
+              aria-checked={quality === value}
+              onClick={() => {
+                onChange(quality)
+                setOpen(false)
+              }}
+              className={clsx(
+                "flex w-full items-center justify-between rounded-xl px-3 py-2 text-left hover:bg-white/10",
+                quality === value && "bg-white/15 font-semibold",
+              )}
+            >
+              {QUALITY_LABEL[quality]}
+              {quality === value && <Icon name="check" size={16} />}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
 }
 
 /** Поток к элементу — через ref: `srcObject` нельзя задать атрибутом. */
@@ -206,6 +274,7 @@ export function CallOverlay() {
                 <Icon name={view.cameraOff ? "videocam_off" : "videocam"} size={24} />
               </button>
             )}
+            {isVideo && <VideoQualityMenu value={calls.videoQuality} onChange={calls.setVideoQuality} />}
             <button
               type="button"
               aria-label="End call"

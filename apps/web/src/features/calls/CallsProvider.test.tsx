@@ -1,5 +1,5 @@
 import { act, cleanup, render } from "@testing-library/react"
-import { afterEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { ApiProblem } from "../../api/problems"
 import { givenFakeCentrifuge, givenTicketIssuer } from "../../test-support/centrifuge"
@@ -181,6 +181,38 @@ describe("принять в двух вкладках", () => {
     await publish(incoming)
     await act(async () => ctx.current?.accept())
     expect(ctx.current?.view).toMatchObject({ phase: "ended", endReason: "failed" })
+  })
+})
+
+describe("качество видео", () => {
+  // В окружении тестов своего хранилища нет: подставляется простое, общее на тест.
+  const store = new Map<string, string>()
+  beforeEach(() => {
+    store.clear()
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => void store.set(key, value),
+    })
+    Object.defineProperty(window, "localStorage", { value: globalThis.localStorage, configurable: true })
+  })
+  afterEach(() => vi.unstubAllGlobals())
+
+  it("по умолчанию auto, выбор сохраняется и переживает перемонтирование", async () => {
+    const { ops } = fakeOps()
+    const first = givenProvider(ops)
+    expect(first.ctx.current?.videoQuality).toBe("auto")
+    await act(async () => first.ctx.current?.setVideoQuality("low"))
+    expect(first.ctx.current?.videoQuality).toBe("low")
+    cleanup()
+
+    const second = givenProvider(fakeOps().ops)
+    expect(second.ctx.current?.videoQuality).toBe("low")
+  })
+
+  it("мусор в хранилище читается как auto", () => {
+    store.set("messenger.call.videoQuality", "ultra")
+    const { ctx } = givenProvider(fakeOps().ops)
+    expect(ctx.current?.videoQuality).toBe("auto")
   })
 })
 

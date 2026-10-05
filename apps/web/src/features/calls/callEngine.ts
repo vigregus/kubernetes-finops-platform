@@ -53,6 +53,8 @@ export interface EngineOptions {
   readonly onConnected: (type: ConnectionType) => void
   /** Звонок не состоялся или оборвался: клиент завершает его. */
   readonly onFailed: (reason: "media_denied" | "failed") => void
+  /** Начальное качество исходящего видео; по умолчанию `auto`. */
+  readonly videoQuality?: VideoQuality
   readonly reconnectWindowMs?: number
   readonly candidateFlushMs?: number
   /** Подмена таймеров — для прогона без реального времени. */
@@ -64,6 +66,43 @@ export interface EngineOptions {
 
 /** Потолок видео — 720p; в оценке стоимости заложен 1 Мбит/с на участника. */
 export const VIDEO_MAX_BITRATE = 1_000_000
+
+/**
+ * Качество **исходящего** видео. Управляет тем, что человек отправляет, а не тем,
+ * что он видит: чужую картинку определяет собеседник со своего экрана.
+ *
+ * `auto` — потолок оценки стоимости (1 Мбит/с) и адаптация самого браузера под
+ * сеть; пресеты задают потолок явно. Пресет — не гарантия: при плохой сети браузер
+ * опустит качество ниже заданного, а не выше.
+ */
+export type VideoQuality = "auto" | "low" | "medium" | "high"
+
+export const VIDEO_QUALITIES: readonly VideoQuality[] = ["auto", "low", "medium", "high"]
+
+interface VideoPreset {
+  /** Во сколько раз уменьшить кадр (720p / 2 = 360p). */
+  readonly scaleResolutionDownBy: number
+  readonly maxBitrate: number
+  readonly maxFramerate: number
+}
+
+/**
+ * Разрешение считается от захвата 720p (`mediaConstraints`). `high` выше потолка
+ * оценки стоимости — это выбор человека, а не умолчание.
+ */
+export const VIDEO_PRESETS: Readonly<Record<Exclude<VideoQuality, "auto">, VideoPreset>> = {
+  low: { scaleResolutionDownBy: 2, maxBitrate: 350_000, maxFramerate: 15 },
+  medium: { scaleResolutionDownBy: 1.5, maxBitrate: 700_000, maxFramerate: 24 },
+  high: { scaleResolutionDownBy: 1, maxBitrate: 1_500_000, maxFramerate: 30 },
+}
+
+/** Что записать в кодирование отправителя для выбранного качества. */
+export function encodingFor(quality: VideoQuality): RTCRtpEncodingParameters {
+  if (quality === "auto") {
+    return { maxBitrate: VIDEO_MAX_BITRATE, scaleResolutionDownBy: 1, maxFramerate: 30 }
+  }
+  return { ...VIDEO_PRESETS[quality] }
+}
 
 export function mediaConstraints(kind: "audio" | "video"): MediaStreamConstraints {
   return {
@@ -93,9 +132,11 @@ export class CallEngine {
   private closed = false
   private reported = false
   private refreshTimer: unknown = null
+  private quality: VideoQuality = "auto"
 
   constructor(options: EngineOptions) {
     this.opts = options
+    this.quality = options.videoQuality ?? "auto"
   }
 
   private get timers() {
@@ -309,7 +350,7 @@ export class CallEngine {
   private async reportConnected(): Promise<void> {
     if (this.reported || this.pc === null) return
     this.reported = true
-    this.capBitrate()
+    this.applyQuality()
     let type: ConnectionType = "direct"
     try {
       type = await connectionType(this.pc)
@@ -319,8 +360,12 @@ export class CallEngine {
     if (!this.closed) this.opts.onConnected(type)
   }
 
-  /** Потолок битрейта видео; не получилось — не повод ронять звонок. */
-  private capBitrate(): void {
+  /**
+   * Применяет качество к отправителям видео: потолок битрейта, масштаб и частота
+   * кадров. Не получилось — не повод ронять звонок (браузер без поддержки
+   * `scaleResolutionDownBy` просто оставит своё).
+   */
+  private applyQuality(): void {
     const pc = this.pc
     if (pc === null) return
     for (const sender of pc.getSenders()) {
@@ -328,12 +373,18 @@ export class CallEngine {
       try {
         const params = sender.getParameters()
         const encodings = params.encodings?.length ? params.encodings : [{}]
-        encodings[0] = { ...encodings[0], maxBitrate: VIDEO_MAX_BITRATE }
+        encodings[0] = { ...encodings[0], ...encodingFor(this.quality) }
         void sender.setParameters({ ...params, encodings }).catch(() => undefined)
       } catch {
         // см. выше
       }
     }
+  }
+
+  /** Меняет качество исходящего видео посреди звонка, без пересоздания соединения. */
+  setVideoQuality(quality: VideoQuality): void {
+    this.quality = quality
+    this.applyQuality()
   }
 
   // --- управление медиа -----------------------------------------------------------

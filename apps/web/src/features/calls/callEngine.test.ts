@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest"
 
-import { CallEngine, connectionType, mediaConstraints, type EngineOptions, type WireSignal } from "./callEngine"
+import {
+  CallEngine,
+  VIDEO_MAX_BITRATE,
+  VIDEO_PRESETS,
+  connectionType,
+  encodingFor,
+  mediaConstraints,
+  type EngineOptions,
+  type WireSignal,
+} from "./callEngine"
 
 // Двойники: ровно то подмножество WebRTC, которое трогает движок.
 
@@ -57,11 +66,15 @@ class FakePeer {
   addTrack(track: FakeTrack) {
     this.senders.push({ track })
   }
+  applied: Array<{ kind: string; encoding: Record<string, unknown> }> = []
   getSenders() {
     return this.senders.map((s) => ({
       track: s.track,
       getParameters: () => ({ encodings: [{}] }),
-      setParameters: () => Promise.resolve(),
+      setParameters: (params: { encodings: Array<Record<string, unknown>> }) => {
+        this.applied.push({ kind: s.track.kind, encoding: params.encodings[0] ?? {} })
+        return Promise.resolve()
+      },
     }))
   }
   async createOffer(options?: { iceRestart?: boolean }) {
@@ -397,5 +410,63 @@ describe("обновление данных TURN (долгий релейный 
     expect(r.timers.filter((t) => t.ms === 540_000).every((t) => t.cleared)).toBe(true)
     fire(r, 540_000)
     expect(r.issued).toHaveLength(1)
+  })
+})
+
+
+describe("качество исходящего видео", () => {
+  it("auto — потолок оценки стоимости и без масштабирования", () => {
+    expect(encodingFor("auto")).toEqual({
+      maxBitrate: VIDEO_MAX_BITRATE,
+      scaleResolutionDownBy: 1,
+      maxFramerate: 30,
+    })
+  })
+
+  it("пресеты строго по возрастанию: ниже — меньше кадр, битрейт и частота", () => {
+    const { low, medium, high } = VIDEO_PRESETS
+    expect(low.maxBitrate).toBeLessThan(medium.maxBitrate)
+    expect(medium.maxBitrate).toBeLessThan(high.maxBitrate)
+    expect(low.scaleResolutionDownBy).toBeGreaterThan(medium.scaleResolutionDownBy)
+    expect(medium.scaleResolutionDownBy).toBeGreaterThan(high.scaleResolutionDownBy)
+    expect(low.maxFramerate).toBeLessThan(high.maxFramerate)
+  })
+
+  it("при установлении связи применяется начальное качество, и только к видео", async () => {
+    const r = rig({ kind: "video", videoQuality: "low" })
+    await r.engine.start()
+    r.peer.emitState("connected")
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(r.peer.applied).toEqual([{ kind: "video", encoding: expect.objectContaining(VIDEO_PRESETS.low) }])
+  })
+
+  it("смена качества посреди звонка не пересоздаёт соединение", async () => {
+    const r = rig({ kind: "video" })
+    await r.engine.start()
+    r.peer.emitState("connected")
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    r.peer.applied.length = 0
+
+    r.engine.setVideoQuality("high")
+    r.engine.setVideoQuality("medium")
+    expect(r.peer.applied.map((a) => a.encoding["maxBitrate"])).toEqual([
+      VIDEO_PRESETS.high.maxBitrate,
+      VIDEO_PRESETS.medium.maxBitrate,
+    ])
+    expect(r.peer.closed).toBe(false)
+  })
+
+  it("возврат на auto снимает масштаб, а не оставляет прежний пресет", async () => {
+    const r = rig({ kind: "video", videoQuality: "low" })
+    await r.engine.start()
+    r.engine.setVideoQuality("auto")
+    expect(r.peer.applied.at(-1)?.encoding).toMatchObject({ scaleResolutionDownBy: 1, maxBitrate: VIDEO_MAX_BITRATE })
+  })
+
+  it("аудиозвонок: качество видео ничего не трогает", async () => {
+    const r = rig({ kind: "audio" })
+    await r.engine.start()
+    r.engine.setVideoQuality("low")
+    expect(r.peer.applied).toEqual([])
   })
 })
