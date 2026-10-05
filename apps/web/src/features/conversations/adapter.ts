@@ -18,6 +18,7 @@
  * отсутствие ключа — это «сервер не сказал», а не «офлайн».
  */
 
+import { callPreview, parseCallSummary } from "../calls/callSummary"
 import type {
   Conversation as ConversationDto,
   ConversationListPage,
@@ -58,7 +59,7 @@ const DELETED_PREVIEW = "Message deleted"
  * «No messages yet». Адаптер кормит существующую ветку, а не заводит второй
  * текст для того же состояния.
  */
-function previewOf(message: MessageDto | undefined): string {
+function previewOf(message: MessageDto | undefined, viewerId: string): string {
   if (!message) return ""
 
   // Надгробие сильнее содержимого: у удалённого сообщения `payload` может
@@ -70,7 +71,13 @@ function previewOf(message: MessageDto | undefined): string {
     return typeof text === "string" && text !== "" ? text : GENERIC_PREVIEW
   }
 
-  // `system` и всё, чего мы не знаем: `Message` честнее выдуманного заголовка.
+  // Итог звонка — единственное служебное сообщение, у которого есть свои слова.
+  if (message.type === "system") {
+    const call = parseCallSummary(message.payload?.text)
+    if (call !== null) return callPreview(call, message.senderId === viewerId)
+  }
+
+  // Остальное `system` и всё, чего мы не знаем: `Message` честнее выдуманного заголовка.
   return TYPE_PREVIEW[message.type] ?? GENERIC_PREVIEW
 }
 
@@ -198,7 +205,7 @@ export function adaptConversation(
     // переживает потерю realtime-слоя так же, как отметка времени).
     peerReadState: peerReadStateOf(dto.readStates, counterpart),
 
-    lastMessagePreview: previewOf(lastMessage),
+    lastMessagePreview: previewOf(lastMessage, currentUserId),
     previewDeleted: Boolean(lastMessage?.deletedAt),
 
     // Отдельный признак, а не «превью непустое»: от него зависит, можно ли

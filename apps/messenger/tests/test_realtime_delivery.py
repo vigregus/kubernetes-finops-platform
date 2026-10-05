@@ -85,6 +85,18 @@ def test_одна_половина_только_ждёт(кеш):
     assert centrifugo.published == []
 
 
+def test_событие_несёт_вид_сообщения_чтобы_итог_звонка_не_был_текстом(кеш):
+    """`type` события — тип события; вид сообщения едет отдельным полем (CALL-005)."""
+    centrifugo = FakeCentrifugo()
+    факт = {**ФАКТ, "type": "system"}
+    содержимое = {**СОДЕРЖИМОЕ, "payload": {"text": "call.missed.audio"}}
+    обработать(delivery.CONTENT_TOPIC, содержимое, кеш, centrifugo)
+    обработать(delivery.FACT_TOPIC, факт, кеш, centrifugo)
+    _, событие = centrifugo.published[0]
+    assert событие["type"] == "message.created"
+    assert событие["message_type"] == "system"
+
+
 def test_пара_собирается_в_любом_порядке(кеш):
     """Порядок гарантирован внутри партиции, а не между топиками."""
     centrifugo = FakeCentrifugo()

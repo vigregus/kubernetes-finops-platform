@@ -281,3 +281,69 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
     },
   };
 }
+
+
+/** Соединение звонков: свой канал `call:{id}`, свой билет, своя жизнь. */
+export interface CallChannelClientOptions {
+  readonly centrifugoUrl: string
+  /** `call:{user_id}` (`channels.json`). */
+  readonly channel: string
+  /** Билет **только на канал звонков**: `POST /realtime/token?scope=calls`. */
+  readonly issueTicket: RealtimeTicketIssuer
+  readonly onPublication: (payload: unknown) => void
+  /** Соединение поднято или потеряно — для подсказки в интерфейсе звонка. */
+  readonly onConnectionChange?: (connected: boolean) => void
+  readonly createCentrifuge?: CentrifugeFactory
+}
+
+export interface CallChannelClient {
+  start(): void
+  stop(): void
+}
+
+/**
+ * Отдельное соединение для звонков, а не ещё один канал соединения беседы.
+ *
+ * Соединение беседы пересоздаётся при смене открытой беседы
+ * (`useRealtimeConnection`: канал входит в зависимости эффекта), а канал звонков
+ * **истории не имеет** (`channels.json`): сигнал, пришедший в окно между
+ * закрытием старого соединения и открытием нового, пропал бы навсегда, и
+ * звонок не установился бы. Поэтому у звонков своё соединение, которое живёт,
+ * пока открыто приложение, и не знает, какая беседа сейчас на экране.
+ *
+ * Билет другой — только на канал звонков: соединение не получает сообщений
+ * бесед и набора, ему они не нужны.
+ */
+export function createCallChannelClient(options: CallChannelClientOptions): CallChannelClient {
+  const create = options.createCentrifuge ?? ((endpoint, config) => new Centrifuge(endpoint, config))
+
+  const client = create(options.centrifugoUrl, {
+    // Тот же приём, что у соединения беседы: билет берётся на **каждую** попытку,
+    // а потерянная сессия останавливает переподключение, а не крутит его вечно.
+    getData: async () => {
+      try {
+        return { ticket: await options.issueTicket() }
+      } catch (error) {
+        if (error instanceof SessionExpiredError || error instanceof UnauthenticatedError) {
+          throw new CentrifugeUnauthorizedError(error.message)
+        }
+        throw error
+      }
+    },
+    // Холодное рукопожатие на macOS длится ~10 с (резолвер `.local`): см. таймаут
+    // соединения беседы выше — по той же причине и тем же значением.
+    timeout: 30_000,
+  })
+
+  client.on("connected", () => options.onConnectionChange?.(true))
+  client.on("disconnected", () => options.onConnectionChange?.(false))
+  client.on("connecting", () => options.onConnectionChange?.(false))
+  client.on("publication", (ctx) => {
+    if (ctx.channel === options.channel) options.onPublication(ctx.data)
+  })
+
+  return {
+    start: () => client.connect(),
+    stop: () => client.disconnect(),
+  }
+}

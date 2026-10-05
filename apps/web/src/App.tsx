@@ -1,4 +1,4 @@
-import { useMemo, useSyncExternalStore } from "react";
+import { useCallback, useMemo, useSyncExternalStore } from "react";
 import { adaptConversations } from "./features/conversations/adapter";
 import { ChatPage } from "./features/conversations/ChatPage";
 import type {
@@ -21,6 +21,9 @@ import type { ResendVerificationEmail } from "./features/auth/components/EmailVe
 import type { TelemetryClient } from "./features/telemetry/telemetryClient";
 import type { AttachmentClient } from "./features/attachments/attachmentUpload";
 import type { PushSubscriptionApi } from "./features/notifications/pushClient";
+import { CallOverlay } from "./features/calls/CallOverlay";
+import { CallsProvider } from "./features/calls/CallsProvider";
+import type { CallsOperations } from "./features/calls/callsApi";
 
 interface AppProps {
   session: SessionState;
@@ -136,6 +139,12 @@ interface AppProps {
   attachments?: AttachmentClient;
   /** Подписка Web Push (G4). Нет — баннера уведомлений нет. */
   pushSubscriptions?: PushSubscriptionApi;
+  /**
+   * Звонки (G4, ADR 0007): операции API и билет **на канал звонков**. Нет — звонков
+   * нет. Включаются и по признаку `calls` из `/me`: сервер выключает их флагом.
+   */
+  calls?: CallsOperations;
+  issueCallsTicket?: () => Promise<string>;
 }
 
 /** Состояние готовности: данные `/me` и списка бесед в одном снимке. */
@@ -168,6 +177,8 @@ export function App({
   telemetry,
   attachments,
   pushSubscriptions,
+  calls,
+  issueCallsTicket,
 }: AppProps) {
   const state = useSyncExternalStore(session.subscribe, session.getSnapshot);
 
@@ -221,6 +232,8 @@ export function App({
           telemetry={telemetry}
           attachments={attachments}
           pushSubscriptions={pushSubscriptions}
+          calls={calls}
+          issueCallsTicket={issueCallsTicket}
         />
       );
   }
@@ -243,6 +256,8 @@ interface ReadyScreenProps {
   attachments?: AttachmentClient;
   /** Подписка Web Push (G4). Нет — баннера уведомлений нет. */
   pushSubscriptions?: PushSubscriptionApi;
+  calls?: CallsOperations;
+  issueCallsTicket?: () => Promise<string>;
 }
 
 function ReadyScreen({
@@ -261,6 +276,8 @@ function ReadyScreen({
   telemetry,
   attachments,
   pushSubscriptions,
+  calls,
+  issueCallsTicket,
 }: ReadyScreenProps) {
   const viewer = useMemo(() => adaptMe(state.account), [state.account]);
 
@@ -299,7 +316,12 @@ function ReadyScreen({
     [historyApi, viewer.userId],
   );
 
-  return (
+  const peerNameFor = useCallback(
+    (conversationId: string) => conversations.find((item) => item.id === conversationId)?.name ?? null,
+    [conversations],
+  );
+
+  const page = (
     <ChatPage
       conversations={conversations}
       refreshConversations={refreshConversations}
@@ -319,6 +341,26 @@ function ReadyScreen({
       attachments={attachments}
       pushSubscriptions={pushSubscriptions}
     />
+  );
+
+  // Звонки включаются возможностью `calls` из `/me`, а не наличием кода: сервер
+  // выключает их флагом (`calls_enabled`), и интерфейс не должен показывать
+  // кнопку, которая ответит `503`.
+  if (calls === undefined || issueCallsTicket === undefined || !viewer.capabilities.includes("calls")) {
+    return page;
+  }
+  return (
+    <CallsProvider
+      ops={calls}
+      centrifugoUrl={centrifugoUrl}
+      issueCallsTicket={issueCallsTicket}
+      viewerId={viewer.userId}
+      peerNameFor={peerNameFor}
+      createCentrifuge={createCentrifuge}
+    >
+      {page}
+      <CallOverlay />
+    </CallsProvider>
   );
 }
 

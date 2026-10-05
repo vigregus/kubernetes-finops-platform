@@ -3,6 +3,7 @@ import type { ChatMessage } from "../../../shared/lib/types"
 import { Avatar } from "../../../shared/ui/Avatar"
 import { Icon } from "../../../shared/ui/Icon"
 import { AttachmentBubble } from "./AttachmentBubble"
+import { CallSummaryNotice } from "./CallSummaryNotice"
 import { UnsupportedMessageNotice } from "./UnsupportedMessageNotice"
 
 interface MessageBubbleProps {
@@ -74,6 +75,10 @@ function DeliveryStatus({ message, onRetry }: { message: ChatMessage; onRetry?: 
 export function MessageBubble({ message, onRetry }: MessageBubbleProps) {
   const isOwn = message.authorId === "me"
   const isFailed = message.deliveryState === "failed"
+
+  if (message.kind === "call" && message.call) {
+    return <CallSummaryNotice call={message.call} isOwn={isOwn} timestamp={message.timestamp} />
+  }
 
   if (message.kind === "unsupported") {
     return <UnsupportedMessageNotice isOwn={isOwn} timestamp={message.timestamp} />

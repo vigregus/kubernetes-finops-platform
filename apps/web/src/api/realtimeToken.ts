@@ -21,7 +21,10 @@ import { SessionsApi } from "./generated";
 /** Что вернёт вызывающий: свежий тикет на каждую попытку соединения. */
 export type RealtimeTicketIssuer = () => Promise<string>;
 
-export function createRealtimeTicketIssuer(configuration: Configuration): RealtimeTicketIssuer {
+export function createRealtimeTicketIssuer(
+  configuration: Configuration,
+  scope?: "calls",
+): RealtimeTicketIssuer {
   // `withUnwrappedErrors` — не украшение, как и у остальных API в `main.tsx`:
   // без неё `SessionExpiredError`/`UnauthenticatedError`, которые бросает
   // `fetchApi` (`api/client.ts`), не долетают сюда — `BaseAPI.request()`
@@ -36,7 +39,7 @@ export function createRealtimeTicketIssuer(configuration: Configuration): Realti
   const sessions = withUnwrappedErrors(new SessionsApi(configuration));
 
   return async () => {
-    const response = await sessions.issueRealtimeToken();
+    const response = await sessions.issueRealtimeToken(scope === undefined ? {} : { scope });
     return response.token;
   };
 }

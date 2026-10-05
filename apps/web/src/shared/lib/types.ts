@@ -120,7 +120,14 @@ export interface MessageAttachment {
   rejectionReason?: string
 }
 
-export type MessageKind = "text" | "attachment" | "unsupported"
+/** Итог звонка (G4, `features/calls/callSummary.ts`) — системное сообщение сервера. */
+export interface MessageCall {
+  outcome: "completed" | "declined" | "missed" | "cancelled" | "busy" | "unavailable" | "failed"
+  kind: "audio" | "video"
+  durationSeconds?: number
+}
+
+export type MessageKind = "text" | "attachment" | "call" | "unsupported"
 
 export interface ChatMessage {
   id: string
@@ -145,6 +152,7 @@ export interface ChatMessage {
   kind: MessageKind
   text?: string
   attachment?: MessageAttachment
+  call?: MessageCall
   timestamp: string
   deliveryState?: MessageDeliveryState
   deleted?: boolean
