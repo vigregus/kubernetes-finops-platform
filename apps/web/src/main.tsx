@@ -213,9 +213,15 @@ const callsOperations: CallsOperations = {
     const { call } = await callsApi.getCurrentCall();
     return call === null || call === undefined ? null : toCallView(call);
   },
-  accept: async (callId) => toCallView(await callsApi.acceptCall({ callId })),
+  accept: async (callId, tabId) =>
+    toCallView(await callsApi.acceptCall({ callId, acceptCall: { tabId } })),
   decline: async (callId) => toCallView(await callsApi.declineCall({ callId })),
-  hangup: async (callId) => toCallView(await callsApi.hangupCall({ callId })),
+  // `keepalive` — запрос на закрытии страницы должен дойти до сервера.
+  hangup: async (callId, options) =>
+    toCallView(
+      await callsApi.hangupCall({ callId }, options?.unload === true ? { keepalive: true } : undefined),
+    ),
+  fail: async (callId) => toCallView(await callsApi.failCall({ callId })),
   keepalive: async (callId) => toCallView(await callsApi.keepAliveCall({ callId })),
   connected: async (callId, connectionType) =>
     toCallView(await callsApi.reportCallConnected({ callId, callConnected: { connectionType } })),

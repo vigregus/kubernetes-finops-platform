@@ -22,9 +22,11 @@ import {
   type ReactNode,
 } from "react"
 
+import { ApiProblem } from "../../api/problems"
 import { isRecord } from "../messages/message-adapter"
 import { createCallChannelClient, type CentrifugeFactory } from "../realtime/realtimeClient"
 import { CallEngine, type EngineEnv, type WireSignal } from "./callEngine"
+import { createSerialQueue } from "./signalQueue"
 import {
   IDLE,
   callReducer,
@@ -139,6 +141,11 @@ export function CallsProvider({
   const [signalingUp, setSignalingUp] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
 
+  // Метка этой вкладки. Две вкладки вызываемого, нажавшие «принять» одновременно,
+  // обе подняли бы медиа и обе ответили бы на `offer`; по метке сервер называет
+  // победителя, а проигравшая сворачивается, не трогая звонок.
+  const tabIdRef = useRef<string>(crypto.randomUUID())
+
   const engineRef = useRef<CallEngine | null>(null)
   const keepaliveRef = useRef<number | null>(null)
   const wakeLockRef = useRef<{ release(): Promise<void> } | null>(null)
@@ -217,7 +224,12 @@ export function CallsProvider({
       const callId = viewRef.current.callId
       apply({ type: "local-ended", reason })
       teardown()
-      if (callId !== null) void ops.hangup(callId).catch(() => undefined)
+      if (callId === null) return
+      // Обрыв — отдельный переход `fail`, а не `hangup`: трубка в активном звонке
+      // записывается сервером как состоявшийся разговор (`completed`), и сбой
+      // сети попадал бы в ленту, метрики и долю неудач разговором.
+      const failed = reason === "failed" || reason === "media_denied"
+      void (failed ? ops.fail(callId) : ops.hangup(callId)).catch(() => undefined)
     },
     [apply, teardown, ops],
   )
@@ -231,7 +243,11 @@ export function CallsProvider({
       env,
       role: current.role,
       kind: current.kind,
-      sendSignal: (signal) => ops.signal(callId, signal),
+      // Сигналы уходят **строго по одному**: `offer` и пачка кандидатов,
+      // отправленные параллельно, достигают сервера в любом порядке, а номер им
+      // выдаётся по порядку прихода — и `offer` получал бы номер больше, чем
+      // кандидаты, пришедшие раньше.
+      sendSignal: createSerialQueue<WireSignal>((signal) => ops.signal(callId, signal)),
       iceServers: () => ops.iceServers(callId),
       onLocalStream: setLocalStream,
       onRemoteStream: setRemoteStream,
@@ -315,6 +331,56 @@ export function CallsProvider({
     handleEventRef.current = handleEvent
   }, [handleEvent])
 
+  /**
+   * Сверка с сервером. У канала звонков **нет истории**: событие, пришедшее, пока
+   * соединение было оборвано, потеряно навсегда, и единственный путь вернуть
+   * истину — спросить. Поэтому сверка идёт при **каждом** подъёме соединения, а не
+   * только при открытии страницы.
+   *
+   * Чего здесь **нет**, и это названо: вкладка, застающая чужой идущий звонок,
+   * его **не завершает**. Прежняя редакция делала `hangup` на любой «живой, но не
+   * мой» звонок, считая, что прежняя страница исчезла, — и новая вкладка,
+   * открытая посреди разговора, обрывала его в первой. Владелец медиа — вкладка,
+   * в которой работает движок; остальные молчат. Брошенный звонок (страница
+   * закрыта, медиа пропало) закрывает не новая вкладка, а закрытие страницы
+   * (`pagehide`) или тишина `keepalive` на сервере.
+   */
+  const reconcile = useCallback(async () => {
+    let call
+    try {
+      call = await ops.current()
+    } catch {
+      return
+    }
+    const view = viewRef.current
+    if (call === null) {
+      // Сервер звонка не знает, а у нас он идёт: конец пропал вместе с событием.
+      if (isLive(view)) {
+        apply({ type: "local-ended", reason: "failed" })
+        teardown()
+      }
+      return
+    }
+    if (!isLive(view)) {
+      // Свободная вкладка: показываем только входящий, который ещё звонит. Всё
+      // остальное ведёт другая вкладка.
+      if (call.state === "ringing" && call.role === "callee") {
+        apply({ type: "api-call", call, peerName: peerNameFor(call.conversationId) })
+      }
+      return
+    }
+    if (view.callId !== call.callId) return
+    const prev = view
+    const next = apply({ type: "api-call", call, peerName: null })
+    if (next.phase === "ended" && prev.phase !== "ended") teardown()
+    else if (next.phase === "connecting") ensureEngine()
+  }, [ops, apply, peerNameFor, ensureEngine, teardown])
+
+  const reconcileRef = useRef(reconcile)
+  useEffect(() => {
+    reconcileRef.current = reconcile
+  }, [reconcile])
+
   // Соединение сигнализации живёт, пока открыто приложение, и не зависит от того,
   // какая беседа на экране (см. `createCallChannelClient`).
   useEffect(() => {
@@ -323,33 +389,28 @@ export function CallsProvider({
       channel: `call:${viewerId}`,
       issueTicket: issueCallsTicket,
       onPublication: (payload) => handleEventRef.current(payload),
-      onConnectionChange: setSignalingUp,
+      onConnectionChange: (connected) => {
+        setSignalingUp(connected)
+        if (connected) void reconcileRef.current()
+      },
       ...(createCentrifuge === undefined ? {} : { createCentrifuge }),
     })
     client.start()
     return () => client.stop()
   }, [centrifugoUrl, viewerId, issueCallsTicket, createCentrifuge])
 
-  // Страница открылась посреди звонка (перезагрузка, новая вкладка). Входящий,
-  // который ещё звонит, показываем; всё остальное оборвалось вместе с прежней
-  // страницей — медиа живёт в ней, и подхватить его нечем, — поэтому завершаем.
+  // Страница с идущим звонком закрывается или перезагружается: медиа живёт в ней и
+  // вместе с ней пропадёт, поэтому звонок завершается сразу, а не через 90 секунд
+  // тишины. `keepalive` оставляет запрос в живых после выгрузки страницы.
   useEffect(() => {
-    let cancelled = false
-    void ops
-      .current()
-      .then((call) => {
-        if (cancelled || call === null || isLive(viewRef.current)) return
-        if (call.state === "ringing" && call.role === "callee") {
-          apply({ type: "api-call", call, peerName: peerNameFor(call.conversationId) })
-        } else {
-          void ops.hangup(call.callId).catch(() => undefined)
-        }
-      })
-      .catch(() => undefined)
-    return () => {
-      cancelled = true
+    const onPageHide = () => {
+      const current = viewRef.current
+      if (engineRef.current === null || current.callId === null || !isLive(current)) return
+      void ops.hangup(current.callId, { unload: true }).catch(() => undefined)
     }
-  }, [ops, apply, peerNameFor])
+    window.addEventListener("pagehide", onPageHide)
+    return () => window.removeEventListener("pagehide", onPageHide)
+  }, [ops])
 
   // Итог звонка висит на экране недолго.
   useEffect(() => {
@@ -399,10 +460,14 @@ export function CallsProvider({
     // был, иначе сигнал уйдёт в никуда.
     ensureEngine()
     void ops
-      .accept(callId)
+      .accept(callId, tabIdRef.current)
       .then((call) => apply({ type: "api-call", call, peerName: null }))
-      .catch(() => {
-        apply({ type: "local-ended", reason: "failed" })
+      .catch((error: unknown) => {
+        // Проиграли гонку «принять»: звонок принят другой вкладкой, и **он идёт**.
+        // Сворачиваемся, не завершая его, — `hangup` отсюда оборвал бы разговор
+        // победительницы.
+        const taken = error instanceof ApiProblem && error.code === "call_taken"
+        apply({ type: "local-ended", reason: taken ? "accepted_elsewhere" : "failed" })
         teardown()
       })
   }, [apply, ensureEngine, ops, teardown])

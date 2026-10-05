@@ -10,9 +10,13 @@ export interface CallsOperations {
   start(conversationId: string, kind: "audio" | "video"): Promise<ApiCallView>
   /** Мой живой звонок или `null`. */
   current(): Promise<ApiCallView | null>
-  accept(callId: string): Promise<ApiCallView>
+  /** `tabId` — метка этой вкладки: проигравшая гонку «принять» получает `call_taken`. */
+  accept(callId: string, tabId: string): Promise<ApiCallView>
   decline(callId: string): Promise<ApiCallView>
-  hangup(callId: string): Promise<ApiCallView>
+  /** `unload` — страница закрывается: запрос должен пережить её (`keepalive`). */
+  hangup(callId: string, options?: { readonly unload?: boolean }): Promise<ApiCallView>
+  /** Соединение не состоялось или оборвалось насовсем: итог `failed`, а не `completed`. */
+  fail(callId: string): Promise<ApiCallView>
   keepalive(callId: string): Promise<ApiCallView>
   connected(callId: string, connectionType: "direct" | "relay"): Promise<ApiCallView>
   signal(callId: string, signal: WireSignal): Promise<void>
