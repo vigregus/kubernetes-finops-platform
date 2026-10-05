@@ -250,16 +250,27 @@ paths:
       tags: [calls]
       summary: Принять входящий звонок
       description: |
-        Побеждает первый запрос; повтор — тот же ответ. Остальные вкладки
-        вызываемого получают `call.state` с `reason: accepted_elsewhere`.
+        Побеждает первый запрос; повтор **той же вкладки** — тот же ответ. Остальные
+        вкладки вызываемого получают `call.state` с `reason: accepted_elsewhere`, а
+        вкладка, нажавшая позже первой, — `409 call_taken`: иначе обе подняли бы медиа
+        и обе ответили бы на `offer`.
       operationId: acceptCall
       parameters:
         - { $ref: '#/components/parameters/CallId' }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AcceptCall' }
       responses:
         '200': { $ref: '#/components/responses/CallState' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/CallNotFound' }
-        '409': { $ref: '#/components/responses/CallEnded' }
+        '409':
+          description: Звонок завершён (`call_ended`) или принят другой вкладкой (`call_taken`)
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
 
   /calls/{call_id}/decline:
     post:
@@ -286,6 +297,23 @@ paths:
         '200': { $ref: '#/components/responses/CallState' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/CallNotFound' }
+
+  /calls/{call_id}/fail:
+    post:
+      tags: [calls]
+      summary: Соединение не состоялось или оборвалось насовсем
+      description: |
+        Итог `failed`, а не `completed`: «трубка» в активном звонке — это
+        состоявшийся разговор, и обрыв сети записывался бы им. Допустимо, когда
+        звонок принят; повтор безопасен.
+      operationId: failCall
+      parameters:
+        - { $ref: '#/components/parameters/CallId' }
+      responses:
+        '200': { $ref: '#/components/responses/CallState' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/CallNotFound' }
+        '409': { $ref: '#/components/responses/CallEnded' }
 
   /calls/{call_id}/connected:
     post:
@@ -1156,6 +1184,16 @@ components:
       properties:
         conversation_id: { type: string, format: uuid }
         kind: { type: string, enum: [audio, video] }
+
+    AcceptCall:
+      type: object
+      additionalProperties: false
+      properties:
+        tab_id:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: Метка вкладки, нажавшей «принять».
 
     CallConnected:
       type: object

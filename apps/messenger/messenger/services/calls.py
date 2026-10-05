@@ -113,10 +113,17 @@ async def _summarize(conn: asyncpg.Connection, call: Call) -> None:
 
 
 async def _transition(
-    conn: asyncpg.Connection, call: Call, change: domain.Change
+    conn: asyncpg.Connection,
+    call: Call,
+    change: domain.Change,
+    accepted_by: str | None = None,
 ) -> Call:
     updated = await repo.apply(
-        conn, call.call_id, state=change.state or call.state, reason=change.reason
+        conn,
+        call.call_id,
+        state=change.state or call.state,
+        reason=change.reason,
+        accepted_by=accepted_by,
     )
     if updated.ended:
         await _summarize(conn, updated)
@@ -160,6 +167,12 @@ async def start_call(
         if callee_id in blocked:
             return CallResult(rejection=Reason.BLOCKED)
 
+        # Застрявшие просроченные звонки участников завершаются здесь, а не ждут
+        # подметальщика: иначе мёртвый `call-sweeper` держал бы линию занятой.
+        expiry_events: list[Event] = []
+        for user in (caller_id, callee_id):
+            await _expire_live(conn, user, expiry_events)
+
         mine = await repo.fetch_live_for_user(conn, caller_id)
         if mine is None:
             outcome = await _create(
@@ -178,10 +191,20 @@ async def start_call(
         else:
             outcome = CallResult(rejection=Reason.ALREADY_IN_CALL)
 
+    await _publish(realtime, expiry_events)
     if outcome.call is None:
         return outcome
     await _publish(realtime, outcome.events)
     return outcome
+
+
+async def _expire_live(conn: asyncpg.Connection, user_id: UserId, events: list[Event]) -> None:
+    live = await repo.fetch_live_for_user(conn, user_id)
+    if live is None:
+        return
+    locked = await repo.fetch(conn, live.call_id, lock=True)
+    if locked is not None:
+        await _fresh(conn, locked, events)
 
 
 async def _meet_counter_call(conn: asyncpg.Connection, call_id: uuid.UUID) -> CallResult:
@@ -282,72 +305,124 @@ async def _record_ended(
 # --- действия над звонком ----------------------------------------------------------
 
 
-async def _locked_for(
-    conn: asyncpg.Connection, call_id: uuid.UUID, user_id: UserId
-) -> Call | None:
+async def _fresh(
+    conn: asyncpg.Connection, call: Call, events: list[Event]
+) -> tuple[Call, bool]:
+    """Ленивое истечение срока: просроченный звонок завершается **здесь**, а не ждёт
+    подметальщика.
+
+    Без этого «просроченный `ringing` отвергается и без подметальщика» было бы
+    словами, а не свойством: мёртвый `call-sweeper` оставлял бы звонок
+    принимаемым через пять минут. Строка уже заблокирована вызывающим. Истёкший
+    звонок записывает итог в ленту и освобождает линию в этой же транзакции, а
+    события о нём уйдут вместе с событиями действия.
+    """
+    change = domain.expire(call, datetime.now(UTC))
+    if not change.changed:
+        return call, False
+    updated = await _transition(conn, call, change)
+    events.extend(_state_events(updated))
+    return updated, True
+
+
+async def _open(
+    conn: asyncpg.Connection, call_id: uuid.UUID, user_id: UserId, events: list[Event]
+) -> tuple[Call | None, bool]:
+    """Блокирует звонок участника и подтягивает истёкший срок."""
     call = await repo.fetch(conn, call_id, lock=True)
     if call is None or not call.involves(user_id):
         # Чужой звонок неотличим от несуществующего.
-        return None
-    return call
+        return None, False
+    return await _fresh(conn, call, events)
 
 
 def _rejection(change: domain.Change) -> Reason | None:
     if change.denied:
         return Reason.CALL_NOT_FOUND
+    if change.taken:
+        return Reason.CALL_TAKEN
     if change.gone:
         return Reason.CALL_ENDED
     return None
 
 
 async def accept(
-    conn: asyncpg.Connection, *, realtime: Publisher | None, user_id: UserId, call_id: uuid.UUID
+    conn: asyncpg.Connection,
+    *,
+    realtime: Publisher | None,
+    user_id: UserId,
+    call_id: uuid.UUID,
+    tab: str | None = None,
 ) -> CallResult:
+    events: list[Event] = []
     async with conn.transaction():
-        call = await _locked_for(conn, call_id, user_id)
+        call, expired = await _open(conn, call_id, user_id, events)
         if call is None:
             return CallResult(rejection=Reason.CALL_NOT_FOUND)
-        change = domain.accept(call, user_id)
-        rejection = _rejection(change)
-        if rejection is not None:
-            return CallResult(rejection=rejection)
-        if not change.changed:
-            return CallResult(call=call)
-        updated = await _transition(conn, call, change)
-        events = _state_events(updated, accepted_elsewhere=True)
-        # Звонящему — обычное «принято»: переопределяем первое событие.
-        events[0] = (domain.call_channel(updated.caller_id), domain.state_event(updated))
+        if expired:
+            outcome = CallResult(rejection=Reason.CALL_ENDED)
+        else:
+            change = domain.accept(call, user_id, tab)
+            rejection = _rejection(change)
+            if rejection is not None:
+                outcome = CallResult(rejection=rejection)
+            elif not change.changed:
+                outcome = CallResult(call=call)
+            else:
+                updated = await _transition(conn, call, change, accepted_by=tab)
+                events.extend(_state_events(updated, accepted_elsewhere=True))
+                # Звонящему — обычное «принято»: переопределяем его событие.
+                events[-2] = (domain.call_channel(updated.caller_id), domain.state_event(updated))
+                outcome = CallResult(call=updated)
     await _publish(realtime, events)
-    return CallResult(call=updated)
+    return outcome
 
 
 async def decline(
     conn: asyncpg.Connection, *, realtime: Publisher | None, user_id: UserId, call_id: uuid.UUID
 ) -> CallResult:
-    return await _end_action(conn, realtime, user_id, call_id, domain.decline)
+    return await _end_action(conn, realtime, user_id, call_id, domain.decline, expired_ok=False)
 
 
 async def hangup(
     conn: asyncpg.Connection, *, realtime: Publisher | None, user_id: UserId, call_id: uuid.UUID
 ) -> CallResult:
-    return await _end_action(conn, realtime, user_id, call_id, domain.hangup)
+    return await _end_action(conn, realtime, user_id, call_id, domain.hangup, expired_ok=True)
 
 
-async def _end_action(conn, realtime, user_id, call_id, action) -> CallResult:
+async def fail(
+    conn: asyncpg.Connection, *, realtime: Publisher | None, user_id: UserId, call_id: uuid.UUID
+) -> CallResult:
+    """Клиент сообщает, что соединение не состоялось: итог `failed`, а не `completed`."""
+    return await _end_action(conn, realtime, user_id, call_id, domain.fail, expired_ok=True)
+
+
+async def _end_action(conn, realtime, user_id, call_id, action, *, expired_ok: bool) -> CallResult:
+    events: list[Event] = []
     async with conn.transaction():
-        call = await _locked_for(conn, call_id, user_id)
+        call, expired = await _open(conn, call_id, user_id, events)
         if call is None:
             return CallResult(rejection=Reason.CALL_NOT_FOUND)
-        change = action(call, user_id)
-        rejection = _rejection(change)
-        if rejection is not None:
-            return CallResult(rejection=rejection)
-        if not change.changed:
-            return CallResult(call=call)
-        updated = await _transition(conn, call, change)
-        events = _state_events(updated)
+        if expired:
+            # Идемпотентные действия отвечают итогом; остальным звонок уже кончился.
+            outcome = (
+                CallResult(call=call)
+                if expired_ok
+                else CallResult(rejection=Reason.CALL_ENDED)
+            )
+        else:
+            change = action(call, user_id)
+            rejection = _rejection(change)
+            if rejection is not None:
+                outcome = CallResult(rejection=rejection)
+            elif not change.changed:
+                outcome = CallResult(call=call)
+            else:
+                updated = await _transition(conn, call, change)
+                events.extend(_state_events(updated))
+                outcome = CallResult(call=updated)
     await _publish(realtime, events)
-    return CallResult(call=updated)
+    return outcome
 
 
 async def report_connected(
@@ -359,39 +434,51 @@ async def report_connected(
     connection_type: str,
 ) -> CallResult:
     """«Медиа пошло»: звонок становится активным, путь соединения идёт в метрику."""
+    events: list[Event] = []
     async with conn.transaction():
-        call = await _locked_for(conn, call_id, user_id)
+        call, expired = await _open(conn, call_id, user_id, events)
         if call is None:
             return CallResult(rejection=Reason.CALL_NOT_FOUND)
-        change = domain.connected(call, user_id)
-        rejection = _rejection(change)
-        if rejection is not None:
-            return CallResult(rejection=rejection)
-        if not change.changed:
-            await repo.touch(conn, call.call_id)
-            return CallResult(call=call)
-        updated = await _transition(conn, call, change)
-        if connection_type in ("direct", "relay"):
-            await repo.set_connection_type(conn, call.call_id, connection_type)
-            setup = None
-            if call.accepted_at is not None:
-                setup = (datetime.now(UTC) - call.accepted_at).total_seconds()
-            metrics.call_connection(connection_type, setup)
-        events = _state_events(updated)
+        if expired:
+            outcome = CallResult(rejection=Reason.CALL_ENDED)
+        else:
+            change = domain.connected(call, user_id)
+            rejection = _rejection(change)
+            if rejection is not None:
+                outcome = CallResult(rejection=rejection)
+            elif not change.changed:
+                await repo.touch(conn, call.call_id)
+                outcome = CallResult(call=call)
+            else:
+                updated = await _transition(conn, call, change)
+                if connection_type in ("direct", "relay"):
+                    await repo.set_connection_type(conn, call.call_id, connection_type)
+                    setup = None
+                    if call.accepted_at is not None:
+                        setup = (datetime.now(UTC) - call.accepted_at).total_seconds()
+                    metrics.call_connection(connection_type, setup)
+                events.extend(_state_events(updated))
+                outcome = CallResult(call=updated)
     await _publish(realtime, events)
-    return CallResult(call=updated)
+    return outcome
 
 
 async def keepalive(
-    conn: asyncpg.Connection, *, user_id: UserId, call_id: uuid.UUID
+    conn: asyncpg.Connection,
+    *,
+    realtime: Publisher | None = None,
+    user_id: UserId,
+    call_id: uuid.UUID,
 ) -> CallResult:
     """Подтверждение жизни; ответ несёт состояние, чтобы клиент сверился с сервером."""
+    events: list[Event] = []
     async with conn.transaction():
-        call = await _locked_for(conn, call_id, user_id)
+        call, _ = await _open(conn, call_id, user_id, events)
         if call is None:
             return CallResult(rejection=Reason.CALL_NOT_FOUND)
         if not call.ended:
             await repo.touch(conn, call.call_id)
+    await _publish(realtime, events)
     return CallResult(call=call)
 
 
@@ -438,27 +525,37 @@ async def send_signal(
             retry_after_seconds=decision.retry_after_seconds,
         )
 
+    events: list[Event] = []
     async with conn.transaction():
-        call = await _locked_for(conn, call_id, user_id)
+        call, expired = await _open(conn, call_id, user_id, events)
         if call is None:
             metrics.call_signal("forbidden")
             return CallResult(rejection=Reason.CALL_NOT_FOUND)
-        if call.ended:
-            return CallResult(rejection=Reason.CALL_ENDED)
-        if call.state is CallState.RINGING:
+        if expired or call.ended:
+            outcome = CallResult(rejection=Reason.CALL_ENDED)
+        elif call.state is CallState.RINGING:
             # Сигналы начинаются после принятия: так не бывает устаревшего
             # `offer` для вызываемого, который ещё не решил, отвечать ли.
-            return CallResult(rejection=Reason.CALL_NOT_READY)
-        seq = await repo.next_signal_seq(conn, call.call_id)
-        events: list[Event] = [
-            (
-                domain.call_channel(call.peer_of(user_id)),
-                domain.signal_event(call=call, signal=signal, seq=seq),
+            outcome = CallResult(rejection=Reason.CALL_NOT_READY)
+        else:
+            seq = await repo.next_signal_seq(conn, call.call_id)
+            events.append(
+                (
+                    domain.call_channel(call.peer_of(user_id)),
+                    domain.signal_event(call=call, signal=signal, seq=seq),
+                )
             )
-        ]
-    metrics.call_signal("sent")
+            metrics.call_signal("sent")
+            # Публикация **внутри** транзакции, пока строка звонка заблокирована:
+            # номер выдан под этой блокировкой, и два сигнала одного звонка
+            # публикуются в порядке номеров. После фиксации публикации двух
+            # запросов обгоняли бы друг друга, и сигнал с меньшим номером
+            # отбрасывался бы получателем как устаревший. Цена названа: строка
+            # звонка занята на время одного HTTP-запроса к Centrifugo (до 2 с).
+            await _publish(realtime, events)
+            return CallResult(call=call)
     await _publish(realtime, events)
-    return CallResult(call=call)
+    return outcome
 
 
 # --- TURN ---------------------------------------------------------------------------

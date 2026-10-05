@@ -146,6 +146,8 @@ async def connect_from_ticket(
             session_id=session_id,
             user_id=user_id,
             client_id=client_id,
+            # Соединение звонков — то, у которого в билете есть канал звонков.
+            calls=any(channel.startswith("call:") for channel in channels),
         )
         if not accepted:
             return ProxyConnectResult()

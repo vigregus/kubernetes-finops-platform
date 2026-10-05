@@ -96,6 +96,8 @@ class Call:
     active_at: datetime | None
     ended_at: datetime | None
     last_keepalive_at: datetime
+    # Вкладка, принявшая звонок (метка страницы от клиента); `None` — не называла.
+    accepted_by: str | None = None
 
     @property
     def ended(self) -> bool:
@@ -122,6 +124,8 @@ class Change:
     reason: EndReason | None = None
     denied: bool = False
     gone: bool = False
+    # Звонок уже принят **другой** вкладкой этого человека: «принять» проиграло.
+    taken: bool = False
 
     @property
     def changed(self) -> bool:
@@ -137,13 +141,21 @@ def _end(reason: EndReason) -> Change:
     return Change(state=CallState.ENDED, reason=reason)
 
 
-def accept(call: Call, user_id: uuid.UUID) -> Change:
-    """Принимает вызываемый. Первый запрос побеждает, повтор — пустое действие."""
+def accept(call: Call, user_id: uuid.UUID, tab: str | None = None) -> Change:
+    """Принимает вызываемый. Первый запрос побеждает.
+
+    Повтор **той же вкладки** — пустое действие (клиент повторяет запрос после
+    обрыва сети). «Принять» из **другой** вкладки, когда звонок уже принят, —
+    `taken`: обе вкладки подняли бы медиа и обе ответили бы на `offer`, поэтому
+    проигравшая обязана узнать, что проиграла, а не получить тот же `200`.
+    """
     if user_id != call.callee_id:
         return _DENIED
     if call.state is CallState.RINGING:
         return Change(state=CallState.ACCEPTED)
     if call.state in (CallState.ACCEPTED, CallState.ACTIVE):
+        if tab is not None and call.accepted_by is not None and call.accepted_by != tab:
+            return Change(taken=True)
         return _NOOP
     return _GONE
 
@@ -172,6 +184,22 @@ def hangup(call: Call, user_id: uuid.UUID) -> Change:
         # Медиа не было: звонка как разговора не случилось.
         return _end(EndReason.CANCELLED)
     return _end(EndReason.COMPLETED)
+
+
+def fail(call: Call, user_id: uuid.UUID) -> Change:
+    """Клиент сообщает: соединение не установилось или оборвалось насовсем.
+
+    Отдельный переход, а не «трубка»: `hangup` в активном звонке — это
+    `completed`, и обрыв сети записывался бы как состоявшийся разговор — в ленте,
+    в метриках, в доле неудач. Допустимо только там, где медиа уже ждали или шло.
+    """
+    if not call.involves(user_id):
+        return _DENIED
+    if call.ended:
+        return _NOOP
+    if call.state in (CallState.ACCEPTED, CallState.ACTIVE):
+        return _end(EndReason.FAILED)
+    return _GONE
 
 
 def connected(call: Call, user_id: uuid.UUID) -> Change:

@@ -17,7 +17,7 @@ from messenger.domain.call import Call, CallKind, CallState, EndReason
 _COLUMNS = """
     call_id, conversation_id, caller_id, callee_id, kind, state, version,
     signal_seq, end_reason, created_at, accepted_at, active_at, ended_at,
-    last_keepalive_at
+    last_keepalive_at, accepted_by
 """
 
 
@@ -41,22 +41,25 @@ def _to_call(row: asyncpg.Record) -> Call:
         active_at=row["active_at"],
         ended_at=row["ended_at"],
         last_keepalive_at=row["last_keepalive_at"],
+        accepted_by=row["accepted_by"],
     )
 
 
 async def callee_reachable(
     conn: asyncpg.Connection, *, user_id: uuid.UUID, window: timedelta
 ) -> bool:
-    """Есть ли у человека живое соединение — тот, кому есть чему зазвонить.
+    """Есть ли у человека живое **соединение звонков**.
 
     По реестру соединений, а не по присутствию «был в сети»: звонок в пустую
-    вкладку звонил бы 30 секунд впустую.
+    вкладку звонил бы 30 секунд впустую. И именно соединение звонков, а не любое:
+    у звонка свой канал без истории, и входящий, опубликованный при живом сокете
+    беседы и мёртвом сокете звонков, потерялся бы навсегда.
     """
     row = await conn.fetchval(
         """
         SELECT EXISTS (
             SELECT 1 FROM realtime_connections
-             WHERE user_id = $1 AND refreshed_at >= now() - $2::interval
+             WHERE user_id = $1 AND calls AND refreshed_at >= now() - $2::interval
         )
         """,
         user_id,
@@ -150,6 +153,7 @@ async def apply(
     *,
     state: CallState,
     reason: EndReason | None = None,
+    accepted_by: str | None = None,
 ) -> Call:
     """Записывает переход: состояние, время, номер; при конце — снимает участников."""
     row = await conn.fetchrow(
@@ -161,11 +165,12 @@ async def apply(
                accepted_at = CASE WHEN $2 = 'accepted' THEN now() ELSE accepted_at END,
                active_at = CASE WHEN $2 = 'active' THEN now() ELSE active_at END,
                ended_at = CASE WHEN $2 = 'ended' THEN now() ELSE ended_at END,
-               last_keepalive_at = now()
+               last_keepalive_at = now(),
+               accepted_by = CASE WHEN $2 = 'accepted' THEN $4 ELSE accepted_by END
          WHERE call_id = $1
         RETURNING {_COLUMNS}
         """,  # noqa: S608
-        call_id, state.value, reason.value if reason else None,
+        call_id, state.value, reason.value if reason else None, accepted_by,
     )
     if row is None:
         raise RuntimeError("звонок исчез во время перехода")

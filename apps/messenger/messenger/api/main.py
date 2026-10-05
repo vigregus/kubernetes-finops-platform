@@ -1128,6 +1128,15 @@ class CallConnected(BaseModel):
     connection_type: Literal["direct", "relay"]
 
 
+class AcceptCall(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Метка вкладки, нажавшей «принять»: две вкладки вызываемого, нажавшие
+    # одновременно, не должны обе считать себя принявшими. Необязательна —
+    # клиент без неё получает прежнее поведение.
+    tab_id: str | None = Field(default=None, min_length=1, max_length=64)
+
+
 def _call_body(call: Call, user_id: UserId) -> dict[str, object]:
     return {
         "call_id": str(call.call_id),
@@ -1207,9 +1216,7 @@ def _call_action(name: str):
             return failure
         runtime = request.app.state.runtime
         action = getattr(calls_service, name)
-        kwargs = {"user_id": user.user_id, "call_id": call_id}
-        if name != "keepalive":
-            kwargs["realtime"] = runtime.centrifugo
+        kwargs = {"user_id": user.user_id, "call_id": call_id, "realtime": runtime.centrifugo}
         async with runtime.connection() as conn:
             result = await action(conn, **kwargs)
         if not result.ok:
@@ -1220,10 +1227,35 @@ def _call_action(name: str):
     return handler
 
 
+@app.post("/calls/{call_id}/accept", response_model=dict[str, object], name="call_accept")
+async def call_accept(
+    call_id: uuid.UUID,
+    request: Request,
+    response: Response,
+    body: AcceptCall | None = None,
+) -> dict[str, object] | Response:
+    """Принять входящий звонок. Побеждает первый; проигравшая вкладка получает `409 call_taken`."""
+    user, failure = await _call_user(request, response)
+    if failure is not None:
+        return failure
+    runtime = request.app.state.runtime
+    async with runtime.connection() as conn:
+        result = await calls_service.accept(
+            conn,
+            realtime=runtime.centrifugo,
+            user_id=user.user_id,
+            call_id=call_id,
+            tab=body.tab_id if body is not None else None,
+        )
+    if not result.ok:
+        return _call_failure(result, response)
+    return _call_body(result.call, user.user_id)
+
+
 for _action, _summary in (
-    ("accept", "Принять входящий звонок"),
     ("decline", "Отклонить входящий звонок"),
     ("hangup", "Повесить трубку (или отменить исходящий)"),
+    ("fail", "Сообщить, что соединение не состоялось или оборвалось"),
     ("keepalive", "Подтвердить, что звонок жив"),
 ):
     app.post(

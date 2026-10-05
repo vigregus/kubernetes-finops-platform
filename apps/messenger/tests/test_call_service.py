@@ -32,11 +32,16 @@ def run(coro):
     return asyncio.run(coro)
 
 
+IN_TX = {"depth": 0}
+
+
 class Tx:
     async def __aenter__(self):
+        IN_TX["depth"] += 1
         return self
 
     async def __aexit__(self, *exc):
+        IN_TX["depth"] -= 1
         return False
 
 
@@ -48,9 +53,11 @@ class Conn:
 class Realtime:
     def __init__(self):
         self.sent: list[tuple[str, dict]] = []
+        self.inside_tx: list[bool] = []
 
     async def publish(self, channel, data):
         self.sent.append((channel, data))
+        self.inside_tx.append(IN_TX["depth"] > 0)
         return True
 
 
@@ -135,10 +142,11 @@ def store(monkeypatch):
         call_id = st.live.get(user_id)
         return st.calls[call_id] if call_id else None
 
-    async def apply(conn, call_id, *, state, reason=None):
+    async def apply(conn, call_id, *, state, reason=None, accepted_by=None):
         old = st.calls[call_id]
         new = replace(
             old, state=state, end_reason=reason, version=old.version + 1,
+            accepted_by=accepted_by if state is CallState.ACCEPTED else old.accepted_by,
             accepted_at=NOW if state is CallState.ACCEPTED else old.accepted_at,
             active_at=NOW if state is CallState.ACTIVE else old.active_at,
             ended_at=NOW + timedelta(seconds=42) if state is CallState.ENDED else old.ended_at,
@@ -165,6 +173,10 @@ def store(monkeypatch):
 
     async def claim_live(conn, *, limit):
         return [st.calls[c] for c in {*st.live.values()}]
+
+    async def fetch_live(conn, user_id):
+        call_id = st.live.get(user_id)
+        return st.calls[call_id] if call_id else None
 
     async def post_system_message(conn, *, conversation_id, sender_id, client_message_id, payload):
         from types import SimpleNamespace
@@ -482,3 +494,109 @@ def test_недоступный_turn_не_роняет_звонок(store):
     call_id = start().call.call_id
     result = run(service.ice_servers(Conn(), turn=Turn(None), user_id=A, call_id=call_id))
     assert result.servers == []
+
+
+# --- ленивое истечение: корректность не зависит от подметальщика ----------------------------
+
+
+def make_stale(store, call_id, seconds=domain.RING_SECONDS + 60):
+    created = datetime.now(UTC) - timedelta(seconds=seconds)
+    store.calls[call_id] = replace(store.calls[call_id], created_at=created)
+
+
+def test_просроченный_звонок_нельзя_принять_и_без_подметальщика(store):
+    call_id = start().call.call_id
+    make_stale(store, call_id)
+    rt = Realtime()
+    result = run(service.accept(Conn(), realtime=rt, user_id=B, call_id=call_id))
+    assert result.rejection is Reason.CALL_ENDED
+    assert store.calls[call_id].end_reason is EndReason.MISSED
+    assert [m["text"] for m in store.messages] == ["call.missed.audio"]
+    assert store.live == {}
+    # обеим сторонам ушло событие о конце, а не только ответ на запрос
+    assert {c for c, _ in rt.sent} == {f"call:{A}", f"call:{B}"}
+
+
+def test_просроченный_звонок_при_трубке_отвечает_итогом_а_не_ошибкой(store):
+    call_id = start().call.call_id
+    make_stale(store, call_id)
+    result = run(service.hangup(Conn(), realtime=None, user_id=A, call_id=call_id))
+    assert result.ok and result.call.end_reason is EndReason.MISSED
+    assert len(store.messages) == 1
+
+
+def test_зависший_просроченный_звонок_не_держит_линию_занятой(store):
+    stale = start().call.call_id
+    make_stale(store, stale)
+    fresh = start()
+    assert fresh.ok and fresh.call.state is CallState.RINGING
+    assert fresh.call.call_id != stale
+    assert store.calls[stale].end_reason is EndReason.MISSED
+
+
+# --- принять: кто победил -----------------------------------------------------------------------
+
+
+def accept_as(call_id, tab):
+    return run(service.accept(Conn(), realtime=None, user_id=B, call_id=call_id, tab=tab))
+
+
+def test_две_вкладки_принимают_одновременно_проигравшая_узнаёт_об_этом(store):
+    call_id = start().call.call_id
+    first = accept_as(call_id, "tab-1")
+    second = accept_as(call_id, "tab-2")
+    assert first.ok
+    assert second.rejection is Reason.CALL_TAKEN
+    assert store.calls[call_id].accepted_by == "tab-1"
+    assert store.calls[call_id].version == 2  # проигравшая ничего не изменила
+
+
+def test_повтор_принятия_той_же_вкладки_не_проигрыш(store):
+    call_id = start().call.call_id
+    accept_as(call_id, "tab-1")
+    assert accept_as(call_id, "tab-1").ok
+
+
+# --- не соединилось -----------------------------------------------------------------------------
+
+
+def test_обрыв_записывается_как_неудача_а_не_как_состоявшийся_разговор(store):
+    call_id = start().call.call_id
+    run(service.accept(Conn(), realtime=None, user_id=B, call_id=call_id))
+    run(service.report_connected(
+        Conn(), realtime=None, user_id=A, call_id=call_id, connection_type="direct"))
+    result = run(service.fail(Conn(), realtime=None, user_id=A, call_id=call_id))
+    assert result.call.end_reason is EndReason.FAILED
+    assert [m["text"] for m in store.messages] == ["call.failed.audio"]
+    assert store.messages[0]["duration_ms"] is None
+
+
+def test_неудача_до_принятия_отвергается(store):
+    call_id = start().call.call_id
+    result = run(service.fail(Conn(), realtime=None, user_id=A, call_id=call_id))
+    assert result.rejection is Reason.CALL_ENDED
+
+
+def test_неудача_идемпотентна_и_только_для_участника(store):
+    call_id = start().call.call_id
+    run(service.accept(Conn(), realtime=None, user_id=B, call_id=call_id))
+    run(service.fail(Conn(), realtime=None, user_id=A, call_id=call_id))
+    assert run(service.fail(Conn(), realtime=None, user_id=B, call_id=call_id)).ok
+    assert len(store.messages) == 1
+    other = start()
+    stranger = run(service.fail(Conn(), realtime=None, user_id=C, call_id=other.call.call_id))
+    assert stranger.rejection is Reason.CALL_NOT_FOUND
+
+
+# --- порядок сигналов ---------------------------------------------------------------------
+
+
+def test_сигнал_публикуется_пока_строка_звонка_заблокирована(store):
+    """Публикация после фиксации позволяла двум запросам обогнать друг друга (CALL-007)."""
+    call_id = start().call.call_id
+    run(service.accept(Conn(), realtime=None, user_id=B, call_id=call_id))
+    rt = Realtime()
+    signal(call_id, A, OFFER, rt)
+    signal(call_id, A, {"type": "ice", "candidates": [{"candidate": "c"}]}, rt)
+    assert rt.inside_tx == [True, True]
+    assert [e["seq"] for _, e in rt.sent] == [1, 2]

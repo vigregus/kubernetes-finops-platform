@@ -93,6 +93,7 @@ ENDPOINTS = [
     ("post", f"/calls/{CALL_ID}/accept", None),
     ("post", f"/calls/{CALL_ID}/decline", None),
     ("post", f"/calls/{CALL_ID}/hangup", None),
+    ("post", f"/calls/{CALL_ID}/fail", None),
     ("post", f"/calls/{CALL_ID}/connected", {"connection_type": "direct"}),
     ("post", f"/calls/{CALL_ID}/keepalive", None),
     ("post", f"/calls/{CALL_ID}/signals", {"type": "offer", "sdp": "v=0"}),
@@ -162,7 +163,7 @@ def test_отказы_создания(client, monkeypatch, reason, status, code
     assert r.json()["code"] == code
 
 
-@pytest.mark.parametrize("action", ["accept", "decline", "hangup", "keepalive"])
+@pytest.mark.parametrize("action", ["accept", "decline", "hangup", "fail", "keepalive"])
 def test_действия_над_звонком(client, monkeypatch, action):
     authenticated(monkeypatch)
     fake = patch(monkeypatch, action, result(make_call(callee=ME, caller=PEER)))
@@ -182,6 +183,29 @@ def test_отказы_действий(client, monkeypatch, reason, status, code
     patch(monkeypatch, "accept", result(rejection=reason))
     r = client.post(f"/calls/{CALL_ID}/accept")
     assert (r.status_code, r.json()["code"]) == (status, code)
+
+
+def test_принятие_передаёт_метку_вкладки(client, monkeypatch):
+    authenticated(monkeypatch)
+    fake = patch(monkeypatch, "accept", result(make_call(callee=ME, caller=PEER)))
+    assert client.post(f"/calls/{CALL_ID}/accept", json={"tab_id": "tab-7"}).status_code == 200
+    assert fake.kwargs["tab"] == "tab-7"
+    assert client.post(f"/calls/{CALL_ID}/accept").status_code == 200
+    assert fake.kwargs["tab"] is None
+
+
+def test_проигравшая_вкладка_получает_409_call_taken(client, monkeypatch):
+    authenticated(monkeypatch)
+    patch(monkeypatch, "accept", result(rejection=Reason.CALL_TAKEN))
+    r = client.post(f"/calls/{CALL_ID}/accept", json={"tab_id": "tab-2"})
+    assert (r.status_code, r.json()["code"]) == (409, "call_taken")
+
+
+def test_негодная_метка_вкладки_отвергается(client, monkeypatch):
+    authenticated(monkeypatch)
+    patch(monkeypatch, "accept", result(make_call()))
+    assert client.post(f"/calls/{CALL_ID}/accept", json={"tab_id": ""}).status_code == 422
+    assert client.post(f"/calls/{CALL_ID}/accept", json={"tab_id": "x" * 65}).status_code == 422
 
 
 def test_медиа_пошло_несёт_путь_соединения(client, monkeypatch):

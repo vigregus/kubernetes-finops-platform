@@ -118,6 +118,25 @@ def test_повторное_медиа_пошло_ничего_не_меняет
     assert not domain.connected(make(CallState.ACTIVE), B).changed
 
 
+def test_принять_из_другой_вкладки_когда_уже_принято_проигрыш():
+    call = make(CallState.ACCEPTED, accepted_by="tab-1")
+    assert domain.accept(call, B, "tab-2").taken
+    assert not domain.accept(call, B, "tab-1").taken
+    assert not domain.accept(call, B, None).taken
+
+
+def test_обрыв_после_принятия_это_failed():
+    for state in (CallState.ACCEPTED, CallState.ACTIVE):
+        change = domain.fail(make(state), A)
+        assert (change.state, change.reason) == (CallState.ENDED, EndReason.FAILED)
+
+
+def test_неудача_пока_звонит_невозможна_а_повтор_пуст():
+    assert domain.fail(make(CallState.RINGING), A).gone
+    assert not domain.fail(make(CallState.ENDED, EndReason.FAILED), A).changed
+    assert domain.fail(make(), OTHER).denied
+
+
 # --- время: подметальщик ---------------------------------------------------------------
 
 
