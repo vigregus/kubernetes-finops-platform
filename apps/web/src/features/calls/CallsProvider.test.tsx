@@ -7,6 +7,7 @@ import type { EngineEnv, WireSignal } from "./callEngine"
 import type { ApiCallView } from "./callState"
 import type { CallsOperations } from "./callsApi"
 import { CallsProvider, useCalls, type CallsContextValue } from "./CallsProvider"
+import type { AlertEnv } from "./incomingAlert"
 
 afterEach(cleanup)
 
@@ -67,7 +68,26 @@ function fakeOps(overrides: Partial<CallsOperations> = {}) {
   return { ops, log }
 }
 
-function givenProvider(ops: CallsOperations) {
+function fakeAlert() {
+  const log = { started: 0, stopped: 0, notified: [] as string[] }
+  const env: AlertEnv = {
+    pageHidden: () => true,
+    onVisibilityChange: () => () => undefined,
+    getTitle: () => "Messenger",
+    setTitle: () => undefined,
+    openRingtone: () => {
+      log.started += 1
+      return { tone: () => undefined, close: () => void (log.stopped += 1) }
+    },
+    notify: (info) => void log.notified.push(info.callId),
+    closeNotification: () => undefined,
+    setInterval: () => 0,
+    clearInterval: () => undefined,
+  }
+  return { env, log }
+}
+
+function givenProvider(ops: CallsOperations, alertEnv: AlertEnv = fakeAlert().env) {
   const fake = givenFakeCentrifuge()
   const ctx: { current: CallsContextValue | null } = { current: null }
   function Probe() {
@@ -83,6 +103,7 @@ function givenProvider(ops: CallsOperations) {
       peerNameFor={() => "Alice"}
       env={fakeEnv()}
       createCentrifuge={fake.factory}
+      alertEnv={alertEnv}
     >
       <Probe />
     </CallsProvider>,
@@ -274,5 +295,103 @@ describe("конец звонка", () => {
     expect(ctx.current?.view.phase).toBe("ended")
     await publish({ type: "call.state", call_id: CALL, state: "accepted", reason: null, version: 2 })
     expect(ctx.current?.view.phase).toBe("ended")
+  })
+})
+
+
+describe("сигнал о входящем звонке", () => {
+  it("входящий включает сигнал, любой конец — выключает", async () => {
+    const alert = fakeAlert()
+    const { ops } = fakeOps()
+    const { publish } = givenProvider(ops, alert.env)
+    expect(alert.log.started).toBe(0)
+    await publish(incoming)
+    expect(alert.log.started).toBe(1)
+    expect(alert.log.notified).toEqual([CALL])
+    await publish({ type: "call.state", call_id: CALL, state: "ended", reason: "cancelled", version: 3 })
+    expect(alert.log.stopped).toBe(1)
+  })
+
+  it("принятие звонка выключает сигнал", async () => {
+    const alert = fakeAlert()
+    const { ops } = fakeOps()
+    const { ctx, publish } = givenProvider(ops, alert.env)
+    await publish(incoming)
+    await act(async () => ctx.current?.accept())
+    expect(alert.log.stopped).toBe(1)
+  })
+})
+
+describe("действие с уведомления", () => {
+  const swMessage = (data: unknown) =>
+    act(async () => {
+      for (const handler of swHandlers) handler({ data } as MessageEvent)
+      await Promise.resolve()
+    })
+
+  const swHandlers: Array<(event: MessageEvent) => void> = []
+  beforeEach(() => {
+    swHandlers.length = 0
+    vi.stubGlobal("navigator", {
+      ...globalThis.navigator,
+      serviceWorker: {
+        addEventListener: (_: string, handler: (event: MessageEvent) => void) => swHandlers.push(handler),
+        removeEventListener: () => undefined,
+      },
+    })
+  })
+  afterEach(() => vi.unstubAllGlobals())
+
+  it("«Принять» с уведомления принимает входящий звонок", async () => {
+    const { ops } = fakeOps()
+    const { publish } = givenProvider(ops)
+    await publish(incoming)
+    await swMessage({ type: "call-action", action: "accept", callId: CALL })
+    expect(ops.accept).toHaveBeenCalledTimes(1)
+  })
+
+  it("«Отклонить» с уведомления отклоняет", async () => {
+    const { ops } = fakeOps()
+    const { publish } = givenProvider(ops)
+    await publish(incoming)
+    await swMessage({ type: "call-action", action: "decline", callId: CALL })
+    expect(ops.decline).toHaveBeenCalledTimes(1)
+    expect(ops.accept).not.toHaveBeenCalled()
+  })
+
+  it("действие пришло раньше входящего (приложение открылось из уведомления) — ждёт и применяется", async () => {
+    const { ops } = fakeOps()
+    const { publish } = givenProvider(ops)
+    await swMessage({ type: "call-action", action: "accept", callId: CALL })
+    expect(ops.accept).not.toHaveBeenCalled()
+    await publish(incoming)
+    expect(ops.accept).toHaveBeenCalledTimes(1)
+  })
+
+  it("«открыть» ничего не принимает — только показывает экран вызова", async () => {
+    const { ops } = fakeOps()
+    const { ctx, publish } = givenProvider(ops)
+    await publish(incoming)
+    await swMessage({ type: "call-action", action: "open", callId: CALL })
+    expect(ops.accept).not.toHaveBeenCalled()
+    expect(ctx.current?.view.phase).toBe("incoming")
+  })
+
+  it("действие над чужим звонком не принимает этот", async () => {
+    const { ops } = fakeOps()
+    const { publish } = givenProvider(ops)
+    await publish(incoming)
+    await swMessage({ type: "call-action", action: "accept", callId: "другой-звонок" })
+    expect(ops.accept).not.toHaveBeenCalled()
+  })
+
+  it("мусорные сообщения worker'а игнорируются", async () => {
+    const { ops } = fakeOps()
+    const { publish } = givenProvider(ops)
+    await publish(incoming)
+    await swMessage(null)
+    await swMessage({ type: "call-action", action: "format-disk", callId: CALL })
+    await swMessage({ type: "other" })
+    expect(ops.accept).not.toHaveBeenCalled()
   })
 })

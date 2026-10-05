@@ -223,8 +223,14 @@ test.describe("G4: звонки", () => {
 	test("CALL-003: A отменяет, пока звонит — у B вызов гаснет, итог «cancelled»", async () => {
 		await a.page.getByRole("button", { name: "Start voice call" }).click()
 		await expect(b.page.getByRole("alertdialog", { name: "Incoming call" })).toBeVisible({ timeout: 20_000 })
+		// Сигнал о входящем: заголовок вкладки мигает (виден в панели вкладок), пока звонит…
+		await expect
+			.poll(() => b.page.title(), { timeout: 5_000 })
+			.toMatch(/📞 Incoming audio call/)
 		await a.page.getByRole("button", { name: "End call" }).click()
 		await expect(b.page.getByRole("alertdialog", { name: "Incoming call" })).toHaveCount(0, { timeout: 20_000 })
+		// …и по окончании возвращается прежний.
+		await expect.poll(() => b.page.title(), { timeout: 5_000 }).not.toMatch(/Incoming/)
 		await expect(b.page.locator('[data-call-summary="cancelled"]').last()).toBeVisible({ timeout: 20_000 })
 	})
 

@@ -97,4 +97,58 @@ describe("Service Worker уведомлений", () => {
     })
     expect(opened).toEqual(["/?conversation=c%201%2F2"])
   })
+
+  describe("уведомление о звонке", () => {
+    const click = (action: string) => ({
+      action,
+      notification: { close: vi.fn(), data: { callId: "call-1" } },
+    })
+
+    it("«Принять» в открытой вкладке: вкладка выходит вперёд и получает действие", async () => {
+      const { windows, run, opened } = loadWorker()
+      const tab = { focus: vi.fn(async () => {}), postMessage: vi.fn() }
+      windows.push(tab)
+      await run("notificationclick", click("accept"))
+      expect(tab.focus).toHaveBeenCalled()
+      expect(tab.postMessage).toHaveBeenCalledWith({ type: "call-action", action: "accept", callId: "call-1" })
+      expect(opened).toEqual([])
+    })
+
+    it("«Отклонить» передаётся как есть", async () => {
+      const { windows, run } = loadWorker()
+      const tab = { focus: vi.fn(async () => {}), postMessage: vi.fn() }
+      windows.push(tab)
+      await run("notificationclick", click("decline"))
+      expect(tab.postMessage).toHaveBeenCalledWith({ type: "call-action", action: "decline", callId: "call-1" })
+    })
+
+    it("нажатие на само уведомление (без кнопки) — просто открыть, а не принять", async () => {
+      const { windows, run } = loadWorker()
+      const tab = { focus: vi.fn(async () => {}), postMessage: vi.fn() }
+      windows.push(tab)
+      await run("notificationclick", click(""))
+      expect(tab.postMessage).toHaveBeenCalledWith({ type: "call-action", action: "open", callId: "call-1" })
+    })
+
+    it("вкладок нет — приложение открывается с действием в адресе", async () => {
+      const { run, opened } = loadWorker()
+      await run("notificationclick", click("accept"))
+      expect(opened).toEqual(["/?call=call-1&action=accept"])
+    })
+
+    it("неизвестное действие не становится принятием", async () => {
+      const { run, opened } = loadWorker()
+      await run("notificationclick", click("format-disk"))
+      expect(opened).toEqual(["/?call=call-1&action=open"])
+    })
+
+    it("уведомление о сообщении ведёт себя как прежде", async () => {
+      const { run, opened } = loadWorker()
+      await run("notificationclick", {
+        action: "",
+        notification: { close: vi.fn(), data: { conversationId: "c-9" } },
+      })
+      expect(opened).toEqual(["/?conversation=c-9"])
+    })
+  })
 })

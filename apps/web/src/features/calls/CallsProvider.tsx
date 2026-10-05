@@ -23,6 +23,8 @@ import {
 } from "react"
 
 import { ApiProblem } from "../../api/problems"
+import { callActionFromUrl, listenForCallAction, type PendingCallAction } from "./callActions"
+import { browserAlertEnv, createIncomingAlert, type AlertEnv } from "./incomingAlert"
 import { isRecord } from "../messages/message-adapter"
 import { createCallChannelClient, type CentrifugeFactory } from "../realtime/realtimeClient"
 import {
@@ -119,6 +121,8 @@ interface CallsProviderProps {
   /** Тестовые швы. */
   readonly env?: EngineEnv | null
   readonly createCentrifuge?: CentrifugeFactory
+  /** Среда сигнала о входящем звонке (звук, заголовок, уведомление); по умолчанию — браузер. */
+  readonly alertEnv?: AlertEnv
 }
 
 function str(value: unknown): string | null {
@@ -153,6 +157,7 @@ export function CallsProvider({
   children,
   env: envProp,
   createCentrifuge,
+  alertEnv,
 }: CallsProviderProps) {
   const env = useMemo(() => (envProp === undefined ? browserEngineEnv() : envProp), [envProp])
 
@@ -544,6 +549,68 @@ export function CallsProvider({
   }, [])
 
   const hasVideo = useCallback(() => engineRef.current?.hasVideo() ?? false, [])
+
+  // --- сигнал о входящем звонке ------------------------------------------------------
+
+  const alert = useMemo(() => createIncomingAlert(alertEnv ?? browserAlertEnv()), [alertEnv])
+
+  useEffect(() => {
+    if (view.phase === "incoming" && view.callId !== null) {
+      alert.start({ callId: view.callId, name: view.peerName ?? "Unknown", kind: view.kind })
+    } else {
+      alert.stop()
+    }
+    return () => alert.stop()
+  }, [alert, view.phase, view.callId, view.peerName, view.kind])
+
+  // Действие с уведомления («Принять», «Отклонить») ждёт, пока звонок появится на
+  // экране: из закрытой вкладки приложение открывается раньше, чем сигнализация
+  // успевает показать входящий. Не дождалось за минуту — отбрасывается: принять
+  // звонок, которого уже нет, нельзя.
+  const pendingRef = useRef<PendingCallAction | null>(null)
+  const runPending = useCallback(() => {
+    const pending = pendingRef.current
+    const current = viewRef.current
+    if (pending === null || current.callId !== pending.callId || current.phase !== "incoming") return
+    pendingRef.current = null
+    if (pending.action === "accept") acceptRef.current()
+    else if (pending.action === "decline") declineRef.current()
+  }, [])
+
+  const acceptRef = useRef(accept)
+  const declineRef = useRef(decline)
+  useEffect(() => {
+    acceptRef.current = accept
+    declineRef.current = decline
+  }, [accept, decline])
+
+  useEffect(() => {
+    let expire: number | null = null
+    const take = (pending: PendingCallAction) => {
+      pendingRef.current = pending
+      if (expire !== null) window.clearTimeout(expire)
+      expire = window.setTimeout(() => (pendingRef.current = null), 60_000)
+      runPending()
+    }
+    const fromUrl = callActionFromUrl(window.location.search)
+    if (fromUrl !== null) {
+      take(fromUrl)
+      // Адрес чистится: перезагрузка страницы не должна принять звонок второй раз.
+      const url = new URL(window.location.href)
+      url.searchParams.delete("call")
+      url.searchParams.delete("action")
+      window.history.replaceState(null, "", url.toString())
+    }
+    const stop = listenForCallAction(take)
+    return () => {
+      stop()
+      if (expire !== null) window.clearTimeout(expire)
+    }
+  }, [runPending])
+
+  useEffect(() => {
+    runPending()
+  }, [view.phase, view.callId, runPending])
 
   const value = useMemo<CallsContextValue>(
     () => ({
