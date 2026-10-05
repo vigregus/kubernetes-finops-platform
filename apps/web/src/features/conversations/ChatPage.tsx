@@ -272,6 +272,15 @@ export function ChatPage({
     const wanted = conversationFromUrl(window.location.search)
     return wanted !== null && conversations.some((item) => item.id === wanted)
   })
+  // Свёрнутая левая колонка (широкий экран): выбор помнится между визитами. Хранилище
+  // может быть недоступно (приватное окно) — тогда колонка просто развёрнута.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(readSidebarCollapsed)
+  const toggleSidebar = useCallback(() => {
+    setSidebarCollapsed((current) => {
+      writeSidebarCollapsed(!current)
+      return !current
+    })
+  }, [])
   const isMobileRef = useRef(isMobile)
   useEffect(() => {
     isMobileRef.current = isMobile
@@ -587,6 +596,8 @@ export function ChatPage({
             activeConversationId={isMobile ? null : (activeConversation?.id ?? null)}
             currentUser={currentUser}
             onSelectConversation={openChat}
+            collapsed={!isMobile && sidebarCollapsed}
+            {...(isMobile ? {} : { onToggleCollapsed: toggleSidebar })}
             // Проп передан — кнопка новой беседы **есть** (D10). До этого среза
             // он оставался непереданным, и кнопки не существовало вовсе: не
             // «спрятана», а не нарисована.
@@ -666,6 +677,24 @@ export function ChatPage({
       )}
     </>
   )
+}
+
+const SIDEBAR_COLLAPSED_KEY = "messenger.sidebar.collapsed"
+
+function readSidebarCollapsed(): boolean {
+  try {
+    return window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1"
+  } catch {
+    return false
+  }
+}
+
+function writeSidebarCollapsed(collapsed: boolean): void {
+  try {
+    window.localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? "1" : "0")
+  } catch {
+    // Выбор не запомнится, интерфейс работает.
+  }
 }
 
 interface ConversationPaneProps {

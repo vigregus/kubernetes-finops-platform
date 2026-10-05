@@ -1,4 +1,5 @@
 import type { Conversation, CurrentUser } from "../../../shared/lib/types"
+import { Avatar } from "../../../shared/ui/Avatar"
 import { Icon } from "../../../shared/ui/Icon"
 import { ConversationListItem } from "./ConversationListItem"
 import { CurrentUserFooter } from "../../auth/components/CurrentUserFooter"
@@ -23,6 +24,13 @@ interface ConversationSidebarProps {
    * способ создать беседу, иначе он нарисует кнопку в пустоту.
    */
   onNewConversation?: () => void
+  /**
+   * Свёрнутая узкая колонка: аватары вместо строк. Только широкий экран — на
+   * телефоне список занимает экран целиком, и `ChatPage` сюда `true` не передаёт.
+   */
+  collapsed?: boolean
+  /** Свернуть или развернуть. Нет обработчика — нет и кнопки (как у остальных). */
+  onToggleCollapsed?: () => void
 }
 
 export function ConversationSidebar({
@@ -31,7 +39,80 @@ export function ConversationSidebar({
   currentUser,
   onSelectConversation,
   onNewConversation,
+  collapsed = false,
+  onToggleCollapsed,
 }: ConversationSidebarProps) {
+  if (collapsed) {
+    return (
+      <aside
+        data-sidebar="collapsed"
+        className="flex w-[76px] flex-shrink-0 flex-col items-center justify-between bg-surface-container-low shadow-[2px_0_16px_rgba(41,37,36,0.03)]"
+      >
+        <div className="flex min-h-0 w-full flex-1 flex-col items-center gap-2 py-4">
+          {onToggleCollapsed && (
+            <button
+              type="button"
+              aria-label="Expand chats panel"
+              title="Expand chats panel"
+              onClick={onToggleCollapsed}
+              className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl bg-accent-terracotta text-on-primary shadow-sm transition-all hover:bg-status-error active:scale-95"
+            >
+              <Icon name="chevron_right" size={22} />
+            </button>
+          )}
+          {onNewConversation && (
+            <button
+              type="button"
+              aria-label="New conversation"
+              title="Start new chat"
+              onClick={onNewConversation}
+              className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl bg-surface-cream text-accent-terracotta shadow-[0_2px_6px_rgba(41,37,36,0.04)] transition-all hover:bg-surface-warm-subtle active:scale-95"
+            >
+              <Icon name="edit_square" size={20} />
+            </button>
+          )}
+          <nav className="mt-2 flex min-h-0 w-full flex-1 flex-col items-center gap-2 overflow-y-auto px-2">
+            {conversations.map((conversation) => {
+              const active = conversation.id === activeConversationId
+              return (
+                <button
+                  key={conversation.id}
+                  type="button"
+                  // Те же атрибуты, что у строки списка: приёмка находит беседу одним адресом.
+                  data-conversation-id={conversation.id}
+                  data-unread-count={conversation.unreadCount}
+                  aria-label={conversation.name}
+                  title={conversation.name}
+                  onClick={() => onSelectConversation(conversation.id)}
+                  className={`relative flex-shrink-0 rounded-full p-0.5 transition-all active:scale-95 ${
+                    active ? "ring-2 ring-accent-terracotta" : "hover:bg-surface-cream"
+                  }`}
+                >
+                  <Avatar
+                    name={conversation.name}
+                    src={conversation.avatarUrl}
+                    initials={conversation.initials}
+                    size="md"
+                    presence={conversation.presence}
+                    ringClassName="ring-surface-container-low"
+                  />
+                  {Boolean(conversation.unreadCount) && (
+                    <span className="absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-accent-terracotta px-1 text-[11px] font-semibold text-on-primary shadow-sm">
+                      {conversation.unreadCount}
+                    </span>
+                  )}
+                </button>
+              )
+            })}
+          </nav>
+        </div>
+        <div className="flex-shrink-0 pb-4" title={currentUser.name}>
+          <Avatar name={currentUser.name} src={currentUser.avatarUrl} ringClassName="ring-surface-container-low" />
+        </div>
+      </aside>
+    )
+  }
+
   return (
     <aside className="relative flex w-full flex-shrink-0 flex-col justify-between bg-surface-container-low shadow-[2px_0_16px_rgba(41,37,36,0.03)] md:w-[360px]">
       <div className="flex min-h-0 flex-1 flex-col">
@@ -46,6 +127,17 @@ export function ConversationSidebar({
               <p className="hidden text-xs text-text-warm-muted md:block">Messages &amp; People</p>
             </div>
           </div>
+          {onToggleCollapsed && (
+            <button
+              type="button"
+              aria-label="Collapse chats panel"
+              title="Collapse chats panel"
+              onClick={onToggleCollapsed}
+              className="ml-auto mr-2 hidden h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl text-text-warm-secondary transition-colors hover:bg-surface-warm-subtle hover:text-on-surface active:scale-95 md:flex"
+            >
+              <Icon name="chevron_left" size={22} />
+            </button>
+          )}
           {onNewConversation && (
             <button
               type="button"

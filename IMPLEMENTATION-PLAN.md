@@ -1331,6 +1331,7 @@ browser ack) и `v2` после `G3-008` (с ним).
 | MOB-002 | Карточки списка, плавающая «New Chat», шапка беседы со стрелкой, безопасные зоны (`viewport-fit=cover`), плотный композер | `MOB-001` | ✅ | мобильные истории `Organisms/ConversationSidebar`, `Molecules/ChatHeader`, `Molecules/MessageComposer`, `Templates/MessengerLayout` |
 | MOB-003 | Storybook как документация: уровни Atoms / Molecules / Organisms / Templates / Pages, токены, вьюпорты Phone / Small phone / Tablet | — | ✅ | страницы `Introduction`, `Foundations/Tokens`; `npm run build-storybook` зелёный |
 | MOB-004 | Проверка на телефоне и в браузере с эмуляцией на стенде (e2e Playwright) | `MOB-001` | ⬜ | список → беседа → отправка → «назад» на viewport iPhone |
+| MOB-006 | Левая колонка сворачивается в узкую (аватары, число непрочитанного, развернуть), выбор запоминается; только широкий экран | `MOB-001` | ✅ | юнит-тест `ChatPage`, истории `Organisms/ConversationSidebar → Collapsed`, e2e `MOB-006` |
 | MOB-005 | Вкладки «Channels», «Calls», «Profile», поиск по чатам, фильтры, подпись «Encrypted» из шаблона — **не делаются**: функций нет (шифрование вне объёма ADR 0000, поиск по пагинированному списку вводил бы в заблуждение, истории звонков нет) | — | ⛔ | вернуться, когда появится функция |
 
 #### Бэклог G4: устойчивый доступ и звонки по ссылке ([часть 18](docs/messenger/18-resilient-access-and-guest-calls.md), [ADR 0009](docs/ADR/0009-resilient-access-and-guest-calls.md))

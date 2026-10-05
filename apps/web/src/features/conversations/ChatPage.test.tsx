@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Автомок: `playIncomingMessageSound` бьёт по `AudioContext`, которого в
 // jsdom нет, — сам модуль на это рассчитан (см. его докстринг, «молчание
@@ -1796,5 +1796,50 @@ describe("узкий экран: список и беседа по очеред�
     expect(container.querySelector("[data-screen]")?.getAttribute("data-screen")).toBe("both");
     expect(container.querySelector("[data-conversation-id]")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Back to chats" })).toBeNull();
+  });
+});
+
+
+describe("левая колонка сворачивается (широкий экран)", () => {
+  const original = Object.getOwnPropertyDescriptor(window, "localStorage");
+
+  // Хранилище в памяти: у `localStorage` jsdom под этим Node бывает недоступен, а
+  // проверяется здесь запоминание выбора, а не браузерное хранилище.
+  beforeEach(() => {
+    const data = new Map<string, string>();
+    Object.defineProperty(window, "localStorage", {
+      configurable: true,
+      value: {
+        getItem: (key: string) => data.get(key) ?? null,
+        setItem: (key: string, value: string) => void data.set(key, value),
+        removeItem: (key: string) => void data.delete(key),
+      },
+    });
+  });
+
+  afterEach(() => {
+    if (original) Object.defineProperty(window, "localStorage", original);
+  });
+
+  it("свернуть → остаются аватары с тем же адресом беседы; развернуть → строки; выбор помнится", async () => {
+    const first = setup({ conversations: [ANNA], tail: () => Promise.resolve(tailOf([messageOf(1)])) });
+    await waitFor(() => expect(screen.getByText("message 1")).toBeTruthy());
+    expect(first.container.querySelector("[data-sidebar='collapsed']")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Collapse chats panel" }));
+    expect(first.container.querySelector("[data-sidebar='collapsed']")).toBeTruthy();
+    // Беседа по-прежнему находима одним адресом и выбирается кликом.
+    expect(first.container.querySelector(`[data-conversation-id="${ANNA.id}"]`)).toBeTruthy();
+    expect(screen.queryByText("Messages & People")).toBeNull();
+    expect(window.localStorage.getItem("messenger.sidebar.collapsed")).toBe("1");
+
+    // Новая страница читает запомненное.
+    first.unmount?.();
+    const second = setup({ conversations: [ANNA], tail: () => Promise.resolve(tailOf([messageOf(1)])) });
+    await waitFor(() => expect(second.container.querySelector("[data-sidebar='collapsed']")).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand chats panel" }));
+    expect(second.container.querySelector("[data-sidebar='collapsed']")).toBeNull();
+    expect(window.localStorage.getItem("messenger.sidebar.collapsed")).toBe("0");
   });
 });
