@@ -30,6 +30,13 @@ CONV = ConversationId(uuid.uuid4())
 NOW = datetime.now(UTC)
 
 
+# Момент внутри окна TURN (середина пятиминутки): от часов теста не зависит. С живыми
+# часами тест падал, когда «сейчас + 30 с» переходило границу окна.
+TURN_AT = datetime.fromtimestamp(
+    1_791_000_000 // domain.TURN_WINDOW_SECONDS * domain.TURN_WINDOW_SECONDS + 100, UTC
+)
+
+
 def run(coro):
     return asyncio.run(coro)
 
@@ -547,11 +554,11 @@ def test_turn_выдаётся_участнику_принятого_звонк�
     from messenger.adapters.turn import IceServer
     call_id = accepted_call(store)
     turn = Turn([IceServer(urls=("turn:x",), username="u", credential="c")])
-    result = ice(call_id, B, turn, now=NOW)
+    result = ice(call_id, B, turn, now=TURN_AT)
     assert result.servers == [{"urls": ["turn:x"], "username": "u", "credential": "c"}]
     # Срок — минуты: данные, выданные на часы, пережили бы звонок в двадцать секунд.
     assert 300 <= result.ttl_seconds <= domain.TURN_TTL_SECONDS
-    assert turn.calls[0]["expires_at"] == int(NOW.timestamp()) + result.ttl_seconds
+    assert turn.calls[0]["expires_at"] == int(TURN_AT.timestamp()) + result.ttl_seconds
     assert turn.calls[0]["expires_at"] % domain.TURN_WINDOW_SECONDS == 0
     # Субъект — человек, а не звонок: квота coturn не сбрасывается новым звонком.
     assert turn.calls[0]["subject"] == str(B)
@@ -574,21 +581,21 @@ def test_данные_turn_стабильны_для_человека_внутр
     def username(by, when):
         return ice(call_id, by, provider, now=when).servers[0]["username"]
 
-    inside = NOW + timedelta(seconds=30)
-    assert username(A, NOW) == username(A, NOW) == username(A, inside)
-    assert username(A, NOW) != username(B, NOW)
+    inside = TURN_AT + timedelta(seconds=30)
+    assert username(A, TURN_AT) == username(A, TURN_AT) == username(A, inside)
+    assert username(A, TURN_AT) != username(B, TURN_AT)
     # следующее окно — новое имя: старые данные не живут вечно
-    assert username(A, NOW) != username(A, NOW + timedelta(seconds=domain.TURN_WINDOW_SECONDS + 1))
+    assert username(A, TURN_AT) != username(A, TURN_AT + timedelta(seconds=domain.TURN_WINDOW_SECONDS + 1))
 
 
 def test_новый_звонок_того_же_человека_даёт_то_же_имя_а_не_свежую_квоту(store):
     from messenger.adapters.turn import CoturnProvider
     provider = CoturnProvider(secret="s", urls=("turn:x",), now=lambda: 1.0)
     first = accepted_call(store)
-    name = ice(first, A, provider, now=NOW).servers[0]["username"]
+    name = ice(first, A, provider, now=TURN_AT).servers[0]["username"]
     run(service.hangup(Conn(), realtime=Realtime(), user_id=A, call_id=first))
     second = accepted_call(store)
-    assert ice(second, A, provider, now=NOW).servers[0]["username"] == name
+    assert ice(second, A, provider, now=TURN_AT).servers[0]["username"] == name
 
 
 def test_частые_запросы_данных_turn_ограничены(store):
