@@ -135,11 +135,24 @@ services:
     # Открытый ключ VAPID для оформления подписки Web Push (G4).
     vapidPublic: true
     # Звонки (ADR 0007): флаг включён на стенде. Для людей — только после
-    # защиты от нежелательных звонков (`CALL-017`). STUN/TURN не задан:
-    # на одной машине достаточно прямого пути, а настоящий TURN — `CALL-004`/`CALL-011`.
+    # защиты от нежелательных звонков (`CALL-017`).
     env:
       - name: CALLS_ENABLED
         value: "true"
+      # Релей — свой coturn (`messenger-turn`), без платного сервиса. Секрет
+      # необязателен: без него провайдер откатывается на STUN, а звонок идёт
+      # напрямую (`adapters/turn.py`). Адрес — имя из `/etc/hosts`/DNS, которое
+      # видит браузер, а не внутреннее имя службы.
+      - name: TURN_PROVIDER
+        value: coturn
+      - name: TURN_COTURN_URLS
+        value: "turn:turn.finops.local:3478?transport=udp,turn:turn.finops.local:3478?transport=tcp"
+      - name: TURN_COTURN_SECRET
+        valueFrom:
+          secretKeyRef:
+            name: messenger-turn
+            key: secret
+            optional: true
     # Метрики снимаются со службы: у нагрузки есть входящие запросы.
     # Умолчание у признака — истина, поэтому true здесь нужен не для
     # работы, а чтобы снятие ключа у соседа не выглядело нормой.

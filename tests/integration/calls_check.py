@@ -185,6 +185,11 @@ async def run() -> None:
                   ice.status_code == 200 and ice.headers.get("cache-control") == "no-store"
                   and ice.json().get("ttl_seconds") == 600, f"{ice.status_code} {ice.text[:120]}")
 
+            servers = ice.json().get("ice_servers", []) if ice.status_code == 200 else []
+            check("CALL-004: стенд выдаёт данные своего coturn (имя «срок:метка» и подпись)",
+                  bool(servers) and ":" in str(servers[0].get("username", ""))
+                  and bool(servers[0].get("credential")), str(servers)[:160])
+
             # --- CALL-007: сигнал без истории ----------------------------------------
             with contextlib.suppress(Exception):
                 await b.ws.close()
