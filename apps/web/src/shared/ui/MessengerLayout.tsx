@@ -21,7 +21,7 @@ export function MessengerLayout({ sidebar, children, banner, screen = "both" }: 
   return (
     <div
       data-screen={screen}
-      className="flex h-dvh w-full flex-col overflow-hidden bg-surface text-on-surface"
+      className="p-safe flex h-dvh w-full flex-col overflow-hidden bg-surface text-on-surface"
     >
       {banner}
       <div className="flex min-h-0 flex-1 overflow-hidden">

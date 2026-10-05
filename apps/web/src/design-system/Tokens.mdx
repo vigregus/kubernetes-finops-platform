@@ -26,4 +26,4 @@ import { ColorItem, ColorPalette, Meta, Typeset } from "@storybook/addon-docs/bl
 
 ## Безопасные зоны
 
-`.pt-safe` и `.pb-safe` добавляют отступ под вырез и жестовую полосу телефона (`env(safe-area-inset-*)`); работают вместе с `viewport-fit=cover` в `index.html`.
+`.p-safe` добавляет отступы под вырез, скругления и жестовую полосу со всех четырёх сторон (`env(safe-area-inset-*)`) и ставится **один раз на самом внешнем элементе** (`MessengerLayout`, оверлей звонка): баннер над шапкой тоже ниже выреза, а собственные отступы компонентов складываются с вырезом. Работает вместе с `viewport-fit=cover` в `index.html`.

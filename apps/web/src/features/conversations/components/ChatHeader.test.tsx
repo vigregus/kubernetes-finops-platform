@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { conversationOf } from "../../../test-support/fixtures";
 import { ChatHeader } from "./ChatHeader";
@@ -88,14 +88,21 @@ describe("подзаголовок шапки беседы", () => {
 });
 
 describe("кнопки звонка", () => {
-  it("недоступные звонки — выключенные кнопки с причиной, а не молчаливое отсутствие", () => {
+  it("недоступные звонки — приглушённые кнопки; причина видна после нажатия и привязана к кнопкам", () => {
     render(<ChatHeader conversation={conversationOf()} callUnavailableReason="Connecting to the call service…" />);
 
-    for (const name of ["Start voice call", "Start video call"]) {
-      const button = screen.getByRole("button", { name });
-      expect((button as HTMLButtonElement).disabled).toBe(true);
-      expect(button.getAttribute("title")).toBe("Connecting to the call service…");
-    }
+    const voice = screen.getByRole("button", { name: "Start voice call" });
+    // `aria-disabled`, а не `disabled`: нажимаема и на телефоне, где нет наведения.
+    expect((voice as HTMLButtonElement).disabled).toBe(false);
+    expect(voice.getAttribute("aria-disabled")).toBe("true");
+    const reason = screen.getByRole("status");
+    expect(voice.getAttribute("aria-describedby")).toBe(reason.id);
+    // До нажатия причина только для чтения с экрана.
+    expect(reason.className).toContain("sr-only");
+
+    fireEvent.click(screen.getByRole("button", { name: "Start video call" }));
+    expect(reason.className).not.toContain("sr-only");
+    expect(reason.textContent).toBe("Connecting to the call service…");
   });
 
   it("рабочие обработчики — рабочие кнопки, причина не нужна", () => {

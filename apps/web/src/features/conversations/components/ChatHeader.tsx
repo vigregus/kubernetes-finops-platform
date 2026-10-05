@@ -1,3 +1,4 @@
+import { useEffect, useId, useState } from "react"
 import type { Conversation } from "../../../shared/lib/types"
 import { Avatar } from "../../../shared/ui/Avatar"
 import { IconButton } from "../../../shared/ui/IconButton"
@@ -18,9 +19,11 @@ interface ChatHeaderProps {
   onVoiceCall?: () => void
   onVideoCall?: () => void
   /**
-   * Звонки включены, но сейчас недоступны: кнопки рисуются **выключенными** с причиной в
-   * подсказке. Молча спрятанные, они выглядят поломкой: человек не знает, чего не хватает
-   * (защищённого соединения, связи со службой звонков).
+   * Звонки включены, но сейчас недоступны: кнопки рисуются приглушёнными, а **нажатие
+   * показывает причину** строкой под шапкой (на телефоне нет наведения, а `title`
+   * недоступной кнопки там не прочитать). Молча спрятанные, они выглядят поломкой: человек
+   * не знает, чего не хватает (защищённого соединения, связи со службой звонков). Для
+   * чтения с экрана причина привязана к кнопкам (`aria-describedby`) всегда.
    */
   callUnavailableReason?: string
 }
@@ -73,18 +76,27 @@ export function ChatHeader({
   callUnavailableReason,
 }: ChatHeaderProps) {
   const subtitleValue = subtitle(conversation)
+  const reasonId = useId()
+  const [reasonShown, setReasonShown] = useState(false)
+  useEffect(() => {
+    if (!reasonShown) return
+    const timer = window.setTimeout(() => setReasonShown(false), 8000)
+    return () => window.clearTimeout(timer)
+  }, [reasonShown])
   const blocked = conversation.blockedByMe || conversation.blockedMe
   const text = blocked ? "Unavailable" : subtitleValue?.text
 
   return (
-    // `data-presence` — то, чем приёмка читает присутствие, не разбирая текст
-    // подзаголовка: значение словаря, а не слово интерфейса. Присутствия нет —
-    // нет и атрибута (React опускает `undefined`), и это различает «сервер
-    // сказал `false`» (`data-presence="offline"`) и «сервер не сказал ничего»
-    // (атрибута нет) — то самое различие, ради которого ветвей три, а не две.
+    <>
+    {/*
+      `data-presence` — то, чем приёмка читает присутствие, не разбирая текст подзаголовка:
+      значение словаря, а не слово интерфейса. Присутствия нет — нет и атрибута (React опускает
+      `undefined`), и это различает «сервер сказал `false`» (`data-presence="offline"`) и «сервер
+      не сказал ничего» (атрибута нет) — то самое различие, ради которого ветвей три, а не две.
+    */}
     <header
       data-presence={blocked ? undefined : conversation.presence}
-      className="pt-safe z-20 flex min-h-16 flex-shrink-0 items-center justify-between bg-surface/90 px-3 shadow-[0_1px_8px_rgba(41,37,36,0.04)] backdrop-blur-md md:h-20 md:px-6"
+      className="z-20 flex min-h-16 flex-shrink-0 items-center justify-between bg-surface/90 px-3 shadow-[0_1px_8px_rgba(41,37,36,0.04)] backdrop-blur-md md:h-20 md:px-6"
     >
       <div className="flex min-w-0 flex-1 items-center gap-2 md:gap-3">
         {onBack && <IconButton icon="arrow_back_ios_new" label="Back to chats" onClick={onBack} />}
@@ -113,8 +125,8 @@ export function ChatHeader({
         {!blocked && onVideoCall && <IconButton icon="videocam" label="Start video call" onClick={onVideoCall} />}
         {!blocked && !onVoiceCall && !onVideoCall && callUnavailableReason && (
           <>
-            <IconButton icon="call" label="Start voice call" disabled hint={callUnavailableReason} />
-            <IconButton icon="videocam" label="Start video call" disabled hint={callUnavailableReason} />
+            <IconButton icon="call" label="Start voice call" unavailable describedBy={reasonId} onClick={() => setReasonShown(true)} />
+            <IconButton icon="videocam" label="Start video call" unavailable describedBy={reasonId} onClick={() => setReasonShown(true)} />
           </>
         )}
         {onOpenDetails && (
@@ -125,5 +137,17 @@ export function ChatHeader({
         )}
       </div>
     </header>
+    {!blocked && !onVoiceCall && !onVideoCall && callUnavailableReason && (
+      // Причина читается с экрана всегда (`sr-only` + `aria-describedby`), а видна —
+      // после нажатия на приглушённую кнопку.
+      <p
+        id={reasonId}
+        role="status"
+        className={reasonShown ? "bg-surface-container px-4 py-2 text-xs text-text-warm-secondary" : "sr-only"}
+      >
+        {callUnavailableReason}
+      </p>
+    )}
+    </>
   )
 }

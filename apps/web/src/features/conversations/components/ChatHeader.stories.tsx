@@ -50,13 +50,16 @@ export const NoBackOnDesktop: Story = {
   },
 }
 
-/** Звонки включены, но недоступны (нет защищённого соединения или связи): кнопки выключены, причина в подсказке. */
+/** Звонки включены, но недоступны: кнопки приглушены, нажатие показывает причину (на телефоне нет наведения). */
 export const CallsUnavailable: Story = {
   args: { conversation: { ...base, presence: "online" }, callUnavailableReason: "Connecting to the call service…" },
+  globals: { viewport: { value: "phone", isRotated: false } },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     const voice = canvas.getByRole("button", { name: "Start voice call" })
-    await expect(voice).toBeDisabled()
-    await expect(voice).toHaveAttribute("title", "Connecting to the call service…")
+    await expect(voice).toHaveAttribute("aria-disabled", "true")
+    await userEvent.click(voice)
+    await expect(canvas.getByRole("status")).not.toHaveClass("sr-only")
+    await expect(canvas.getByRole("status")).toHaveTextContent("Connecting to the call service…")
   },
 }

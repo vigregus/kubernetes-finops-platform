@@ -210,7 +210,7 @@ export function CallOverlay() {
         data-call-phase={view.phase}
         data-call-kind={view.kind}
         data-call-reason={view.endReason ?? undefined}
-        className="fixed inset-0 z-50 flex flex-col bg-stone-900 text-white"
+        className="p-safe fixed inset-0 z-50 flex flex-col bg-stone-900 text-white"
       >
         {/* Удалённый звук идёт через этот элемент и в аудиозвонке: скрытый, но играющий. */}
         <video

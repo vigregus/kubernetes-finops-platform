@@ -262,10 +262,14 @@ export function ChatPage({
    * **не монтируется**, пока её не открыли (`useIsMobile`): первая беседа списка
    * иначе подняла бы соединение и отметила прочитанным то, что человек не открывал.
    *
-   * Открытая беседа — шаг истории браузера (`pushState`): системная кнопка «назад»
-   * и жест возвращают к списку, а не уводят из приложения. Открытие по адресу
-   * (`?conversation=`, нажатие на уведомление) шага не добавляет — «назад» там
-   * просто закрывает беседу (`closeChat`).
+   * ## Навигация — одна модель на три места
+   *
+   * Состояние живёт в трёх местах: React (`chatOpen`, `activeId`), адрес и `history.state`.
+   * Они согласованы так: список — `/`, беседа — `/?conversation=<id>` со
+   * `history.state = { mobileChat: true, conversationId }`. `popstate` в **обе стороны**
+   * (назад и вперёд) восстанавливает полное состояние из `history.state`, поэтому
+   * перезагрузка, «назад» и «вперёд» дают одно и то же. Любое открытие беседы на телефоне
+   * (нажатие в списке, уведомление, адрес) идёт через `navigateToChat`.
    */
   const isMobile = useIsMobile()
   const [chatOpen, setChatOpen] = useState(() => {
@@ -285,39 +289,64 @@ export function ChatPage({
   useEffect(() => {
     isMobileRef.current = isMobile
   }, [isMobile])
+  const conversationsRef = useRef(conversations)
+  useEffect(() => {
+    conversationsRef.current = conversations
+  }, [conversations])
 
-  const openChat = useCallback((id: string) => {
+  /** Открыть беседу. На телефоне — ещё и шаг истории с адресом `/?conversation=<id>`. */
+  const navigateToChat = useCallback((id: string) => {
     setActiveId(id)
     setChatOpen(true)
-    if (isMobileRef.current) window.history.pushState({ mobileChat: true }, "")
+    if (!isMobileRef.current) return
+    const state: MobileChatState = { mobileChat: true, conversationId: id }
+    const url = chatUrl(id)
+    // Уже в беседе (другая беседа по уведомлению, повтор нажатия): шаг не добавляется, а
+    // заменяется — иначе «назад» пришлось бы нажимать по числу открытых бесед.
+    if (isMobileChatState(window.history.state)) window.history.replaceState(state, "", url)
+    else window.history.pushState(state, "", url)
   }, [])
 
+  /** «Назад к списку»: шаг истории назад; без шага (адрес, замена) — прямо и с чистым адресом. */
   const closeChat = useCallback(() => {
-    if ((window.history.state as { mobileChat?: boolean } | null)?.mobileChat === true) {
+    if (isMobileChatState(window.history.state)) {
       window.history.back()
     } else {
+      window.history.replaceState(null, "", LIST_URL)
       setChatOpen(false)
     }
   }, [])
 
+  // Открыли по адресу (`?conversation=`, нажатие на уведомление открыло вкладку) на телефоне:
+  // под беседой должен лежать список, иначе «назад» уйдёт из приложения, а адрес и экран
+  // разойдутся. Один раз, при монтировании.
+  useEffect(() => {
+    const wanted = conversationFromUrl(window.location.search)
+    if (!isMobileRef.current || wanted === null || isMobileChatState(window.history.state)) return
+    if (!conversationsRef.current.some((item) => item.id === wanted)) return
+    window.history.replaceState(null, "", LIST_URL)
+    window.history.pushState({ mobileChat: true, conversationId: wanted } satisfies MobileChatState, "", chatUrl(wanted))
+  }, [])
+
   useEffect(() => {
     const onPopState = (event: PopStateEvent) => {
-      if ((event.state as { mobileChat?: boolean } | null)?.mobileChat !== true) setChatOpen(false)
+      if (isMobileChatState(event.state)) {
+        // «Вперёд» (и «назад» на другую беседу): восстановить беседу целиком.
+        if (conversationsRef.current.some((item) => item.id === event.state.conversationId)) {
+          setActiveId(event.state.conversationId)
+          setChatOpen(true)
+          return
+        }
+      }
+      setChatOpen(false)
     }
     window.addEventListener("popstate", onPopState)
     return () => window.removeEventListener("popstate", onPopState)
   }, [])
 
-  // Нажатие на уведомление при уже открытой вкладке: Service Worker шлёт
-  // сообщение, и открывается нужная беседа.
-  useEffect(
-    () =>
-      listenForOpenConversation((id) => {
-        setActiveId(id)
-        setChatOpen(true)
-      }),
-    [],
-  )
+  // Нажатие на уведомление при уже открытой вкладке: Service Worker шлёт сообщение, и
+  // беседа открывается **тем же путём**, что и нажатием в списке (шаг истории, адрес).
+  useEffect(() => listenForOpenConversation(navigateToChat), [navigateToChat])
 
   // Web Push (G4): баннер «включить уведомления». Среда браузера — одна на
   // страницу; без подписки на сервере (`pushSubscriptions`) баннера нет.
@@ -459,10 +488,10 @@ export function ChatPage({
       setBase((current) =>
         current.some((item) => item.id === conversation.id) ? current : [conversation, ...current],
       )
-      openChat(conversation.id)
+      navigateToChat(conversation.id)
       setCreatingConversation(false)
     },
-    [currentUserId, openChat],
+    [currentUserId, navigateToChat],
   )
 
   // Слияние — на каждом рендере списка, а не при приходе события: иначе
@@ -595,7 +624,7 @@ export function ChatPage({
             // Узкий экран: беседа открывается на весь экран, подсвечивать в списке нечего.
             activeConversationId={isMobile ? null : (activeConversation?.id ?? null)}
             currentUser={currentUser}
-            onSelectConversation={openChat}
+            onSelectConversation={navigateToChat}
             collapsed={!isMobile && sidebarCollapsed}
             {...(isMobile ? {} : { onToggleCollapsed: toggleSidebar })}
             // Проп передан — кнопка новой беседы **есть** (D10). До этого среза
@@ -677,6 +706,26 @@ export function ChatPage({
       )}
     </>
   )
+}
+
+interface MobileChatState {
+  mobileChat: true
+  conversationId: string
+}
+
+function isMobileChatState(value: unknown): value is MobileChatState {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as Record<string, unknown>)["mobileChat"] === true &&
+    typeof (value as Record<string, unknown>)["conversationId"] === "string"
+  )
+}
+
+const LIST_URL = "/"
+
+function chatUrl(conversationId: string): string {
+  return `/?conversation=${encodeURIComponent(conversationId)}`
 }
 
 const SIDEBAR_COLLAPSED_KEY = "messenger.sidebar.collapsed"

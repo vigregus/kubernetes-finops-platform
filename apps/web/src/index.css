@@ -60,13 +60,19 @@
 }
 
 @layer utilities {
-  /* Вырезы и жестовая полоса телефона: `viewport-fit=cover` отдаёт странице весь экран. */
-  .pt-safe {
+  /*
+   * Вырезы, скругления и жестовая полоса телефона: `viewport-fit=cover` отдаёт странице
+   * весь экран, и отступы со всех четырёх сторон ставятся **один раз, на самом внешнем
+   * элементе** (`MessengerLayout`, оверлей звонка). Тогда баннер над шапкой тоже ниже выреза,
+   * в альбомной ориентации контент не заходит под вырез слева и справа, а собственные
+   * отступы компонентов **складываются** с вырезом, а не спорят с ним (два `padding-bottom`
+   * на одном элементе не складываются — побеждает один).
+   */
+  .p-safe {
     padding-top: env(safe-area-inset-top, 0px);
-  }
-
-  .pb-safe {
+    padding-right: env(safe-area-inset-right, 0px);
     padding-bottom: env(safe-area-inset-bottom, 0px);
+    padding-left: env(safe-area-inset-left, 0px);
   }
 
   .material-symbol {

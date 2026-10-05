@@ -71,6 +71,45 @@ test.describe("G4: мобильный интерфейс", () => {
 		await expect(page.locator("[data-screen]")).toHaveAttribute("data-screen", "chat")
 		await page.goBack()
 		await expect(page.locator("[data-screen]")).toHaveAttribute("data-screen", "list")
+		expect(new URL(page.url()).search).toBe("")
+
+		// «Вперёд»: история говорит «беседа» — экран обязан сказать то же, с тем же адресом.
+		await page.goForward()
+		await expect(page.locator("[data-screen]")).toHaveAttribute("data-screen", "chat")
+		expect(new URL(page.url()).search).toBe(`?conversation=${conversationId}`)
+	})
+
+	test("MOB-007: открытие по адресу — под беседой список; «назад» ведёт к списку и чистому адресу", async () => {
+		const page = a.page
+		const conversationId = state().conversationId
+		await page.goto(`/?conversation=${conversationId}`)
+		await expect(page.locator("[data-screen]")).toHaveAttribute("data-screen", "chat", { timeout: 60_000 })
+		await expect(page.locator("[data-composer-input]")).toBeVisible({ timeout: 60_000 })
+
+		await page.getByRole("button", { name: "Back to chats" }).tap()
+		await expect(page.locator("[data-screen]")).toHaveAttribute("data-screen", "list")
+		expect(new URL(page.url()).search).toBe("")
+		// Перезагрузка на списке остаётся на списке (адрес и экран не расходятся).
+		await page.reload()
+		await expect(page.locator("[data-screen]")).toHaveAttribute("data-screen", "list", { timeout: 60_000 })
+	})
+
+	test("MOB-002: альбомная ориентация — без горизонтальной прокрутки, композер на экране", async () => {
+		const page = a.page
+		const conversationId = state().conversationId
+		await page.setViewportSize({ width: 844, height: 390 })
+		try {
+			await page.goto("/")
+			await page.locator(`[data-conversation-id="${conversationId}"]`).tap()
+			await expect(page.locator("[data-composer-input]")).toBeVisible({ timeout: 60_000 })
+			const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
+			expect(overflow).toBeLessThanOrEqual(0)
+			const box = await page.locator("[data-composer-send]").boundingBox()
+			expect(box).not.toBeNull()
+			expect(box!.y + box!.height).toBeLessThanOrEqual(390)
+		} finally {
+			await page.setViewportSize({ width: 390, height: 844 })
+		}
 	})
 
 	test("MOB-002: экран не прокручивается вбок, композер виден целиком", async () => {

@@ -125,7 +125,7 @@ export function MessageComposer({
     return (
       <div
         data-composer-state="blocked"
-        className="pb-safe flex-shrink-0 bg-surface/90 p-2.5 shadow-[0_-2px_12px_rgba(41,37,36,0.03)] backdrop-blur-md md:p-4"
+        className="flex-shrink-0 bg-surface/90 p-2.5 shadow-[0_-2px_12px_rgba(41,37,36,0.03)] backdrop-blur-md md:p-4"
       >
         <div className="mx-auto flex max-w-4xl items-center justify-center gap-2 rounded-2xl bg-surface-container-low p-3.5 text-sm text-text-warm-muted">
           <Icon name="block" size={16} />
@@ -138,7 +138,7 @@ export function MessageComposer({
   return (
     <div
       data-composer-state="ready"
-      className="pb-safe flex-shrink-0 bg-surface/90 p-2.5 shadow-[0_-2px_12px_rgba(41,37,36,0.03)] backdrop-blur-md md:p-4"
+      className="flex-shrink-0 bg-surface/90 p-2.5 shadow-[0_-2px_12px_rgba(41,37,36,0.03)] backdrop-blur-md md:p-4"
     >
       <div className="mx-auto flex max-w-4xl flex-col gap-2">
         {voice !== undefined && voice.state.state === "recording" && (
