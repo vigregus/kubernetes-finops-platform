@@ -444,8 +444,10 @@ services:
     preStopSeconds: 0
     terminationGracePeriodSeconds: 30
     image:
-      # Заполняется тегом образа, в котором этот модуль уже есть.
-      spec: ghcr.io/vigregus/messenger-api:9a1f3ff593e8fa9aa07a46e328cbd415aac7876e
+      # Образ, в котором модуль call_sweeper уже есть: прежний тег (9a1f3ff…)
+      # его не содержит, и при пересоздании приложения до того, как Image Updater
+      # подставит свежий образ, нагрузка падала бы на импорте (замечание ревью).
+      spec: ghcr.io/vigregus/messenger-api:1a6a5eb8bcbcc12b6a8fbcf9d1b045c21a65a307
     resources:
       requests: {cpu: 25m, memory: 128Mi}
       limits: {cpu: 500m, memory: 256Mi}
