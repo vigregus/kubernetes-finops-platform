@@ -27,12 +27,29 @@ on:
     # сборки, от которого зависит образ, входит в фильтр.
     paths:
       - 'apps/web/**'
+      # Не входят в собираемое приложение (`vite build` берёт только то, что импортирует
+      # точка входа): документы, Storybook и его MDX, тесты и их поддержка, конфигурация
+      # приёмки. Их правка не меняет образа, а проверяется джобой web в contracts.yml.
+      - '!apps/web/**/*.md'
+      - '!apps/web/**/*.mdx'
+      - '!apps/web/**/*.stories.*'
+      - '!apps/web/**/*.test.*'
+      - '!apps/web/src/test-support/**'
+      - '!apps/web/src/design-system/**'
+      - '!apps/web/.storybook/**'
+      - '!apps/web/playwright.config.ts'
       - 'packages/contracts/openapi.yaml'
       - 'scripts/build-web.sh'
       - 'scripts/generate-web-client.sh'
       - '.github/workflows/web-image.yml'
   # Пересобрать артефакт без пустого коммита.
   workflow_dispatch:
+
+# Новый push в ту же ветку отменяет сборку предыдущего: образ нужен для последнего коммита, а
+# выкатка берёт опубликованный позже всех. Сборки main до конца не отменяются.
+concurrency:
+  group: web-image-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read

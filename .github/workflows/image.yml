@@ -21,8 +21,23 @@ on:
     branches: ["**"]
     paths:
       - 'apps/messenger/**'
+      # Не входят в образ (Dockerfile копирует только `messenger/` и requirements.txt):
+      # тесты, документы, dev-зависимости и конфигурация линтера не меняют того, что едет в
+      # кластер, и пересборка ради них только расходует раннеры.
+      - '!apps/messenger/tests/**'
+      - '!apps/messenger/**/*.md'
+      - '!apps/messenger/requirements-dev.txt'
+      - '!apps/messenger/pyproject.toml'
+      - '!apps/messenger/.env.example'
+      - '!apps/messenger/.gitignore'
       - '.github/workflows/image.yml'
   workflow_dispatch:
+
+# Новый push в ту же ветку отменяет сборку предыдущего: образ нужен для последнего коммита, а
+# выкатка берёт опубликованный позже всех. Сборки main до конца не отменяются.
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
