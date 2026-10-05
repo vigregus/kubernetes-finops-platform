@@ -585,7 +585,8 @@ def test_данные_turn_стабильны_для_человека_внутр
     assert username(A, TURN_AT) == username(A, TURN_AT) == username(A, inside)
     assert username(A, TURN_AT) != username(B, TURN_AT)
     # следующее окно — новое имя: старые данные не живут вечно
-    assert username(A, TURN_AT) != username(A, TURN_AT + timedelta(seconds=domain.TURN_WINDOW_SECONDS + 1))
+    later = TURN_AT + timedelta(seconds=domain.TURN_WINDOW_SECONDS + 1)
+    assert username(A, TURN_AT) != username(A, later)
 
 
 def test_новый_звонок_того_же_человека_даёт_то_же_имя_а_не_свежую_квоту(store):
