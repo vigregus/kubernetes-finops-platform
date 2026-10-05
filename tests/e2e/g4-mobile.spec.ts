@@ -180,7 +180,8 @@ test.describe("G4: мобильный интерфейс", () => {
 			const text = `list-unread ${Date.now()}`
 			await b.page.locator("[data-composer-input]").fill(text)
 			await b.page.locator("[data-composer-send]").click()
-			await expect(b.page.getByText(text)).toBeVisible({ timeout: 30_000 })
+			// Текст в ленте и в превью списка: считаем только ленту сообщений.
+			await expect(b.page.getByText(text).first()).toBeVisible({ timeout: 30_000 })
 		} finally {
 			await b.context.close()
 		}
