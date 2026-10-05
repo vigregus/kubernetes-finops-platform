@@ -564,23 +564,61 @@ async def send_signal(
 @dataclass(slots=True)
 class IceResult:
     servers: list[dict[str, object]] | None = None
+    ttl_seconds: int = 0
     rejection: Reason | None = None
+    retry_after_seconds: int | None = None
 
 
 async def ice_servers(
-    conn: asyncpg.Connection, *, turn: TurnProvider, user_id: UserId, call_id: uuid.UUID
+    conn: asyncpg.Connection,
+    *,
+    turn: TurnProvider,
+    limiter: RateLimiter,
+    user_id: UserId,
+    call_id: uuid.UUID,
+    now: datetime | None = None,
 ) -> IceResult:
-    """Данные для TURN — только участнику **живого** звонка и на ≈ 10 минут."""
+    """Данные для TURN — только участнику **живого** звонка, до конца его срока.
+
+    Данные **стабильны** для пары «звонок, участник» (`CoturnProvider`): повторный
+    запрос возвращает то же имя пользователя, и квота coturn на пользователя
+    действует. Срок — конец допустимой длины звонка, а не десять минут: движок
+    передаёт `iceServers` один раз и не обновляет их.
+
+    Выдача ограничена по частоте: запрос — это обращение к провайдеру (у
+    управляемого — платное), а недоступный счётчик не повод открывать её (`ALLOW`:
+    данные привязаны к звонку и участнику, и квота coturn держит остальное).
+    """
+    moment = now or datetime.now(UTC)
     call = await repo.fetch(conn, call_id)
     if call is None or not call.involves(user_id):
         return IceResult(rejection=Reason.CALL_NOT_FOUND)
     if call.ended:
         return IceResult(rejection=Reason.CALL_ENDED)
-    servers = await turn.ice_servers(ttl_seconds=domain.TURN_TTL_SECONDS)
+
+    expires_at = int(call.created_at.timestamp()) + domain.TURN_MAX_CALL_SECONDS
+    ttl = expires_at - int(moment.timestamp())
+    if ttl <= 0:
+        return IceResult(rejection=Reason.CALL_ENDED)
+
+    decision = await limiter.take(
+        f"call-ice:{call_id}:{user_id}",
+        limit=domain.TURN_REQUESTS_PER_MINUTE,
+        window_seconds=60,
+        on_failure=OnFailure.ALLOW,
+    )
+    if not decision.allowed:
+        return IceResult(
+            rejection=Reason.RATE_LIMITED, retry_after_seconds=decision.retry_after_seconds
+        )
+
+    servers = await turn.ice_servers(
+        ttl_seconds=ttl, expires_at=expires_at, subject=f"{call_id}:{user_id}"
+    )
     if servers is None:
         # Звонок без релея всё равно возможен: клиент строит соединение без него.
-        return IceResult(servers=[])
-    return IceResult(servers=[server.as_dict() for server in servers])
+        return IceResult(servers=[], ttl_seconds=ttl)
+    return IceResult(servers=[server.as_dict() for server in servers], ttl_seconds=ttl)
 
 
 # --- подметальщик -------------------------------------------------------------------

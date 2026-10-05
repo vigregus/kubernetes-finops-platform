@@ -25,7 +25,6 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, ge
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.requests import Request
 
-from messenger.domain import call as domain_call
 from messenger.domain.call import Call, CallKind
 from messenger.domain.conversation_list import (
     ActivityCursor,
@@ -1327,13 +1326,19 @@ async def call_ice_servers(
     runtime = request.app.state.runtime
     async with runtime.connection() as conn:
         result = await calls_service.ice_servers(
-            conn, turn=runtime.turn, user_id=user.user_id, call_id=call_id
+            conn,
+            turn=runtime.turn,
+            limiter=runtime.limiter,
+            user_id=user.user_id,
+            call_id=call_id,
         )
     if result.rejection is not None:
+        if result.retry_after_seconds is not None:
+            response.headers["Retry-After"] = str(result.retry_after_seconds)
         return _problem_response(to_problem(result.rejection), response)
     # Учётные данные не кэшируются ни браузером, ни посредником.
     return JSONResponse(
-        {"ice_servers": result.servers or [], "ttl_seconds": domain_call.TURN_TTL_SECONDS},
+        {"ice_servers": result.servers or [], "ttl_seconds": result.ttl_seconds},
         headers={"Cache-Control": "no-store"},
     )
 

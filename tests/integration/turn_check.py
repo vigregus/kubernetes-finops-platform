@@ -6,6 +6,8 @@
  * учётные данные, выданные `CoturnProvider` (HMAC от общего секрета), принимает
    сам сервер — выделение релея получается, адрес в диапазоне портов из манифеста;
  * чужой пароль и **просроченный** срок отвергнуты (`401`);
+ * **данные идут через релей**: два клиента, байты A → релей → B и обратно, по
+   Send/Data Indication и по каналу (ChannelBind/ChannelData), сверка побайтно;
  * релей **не пускает во внутреннюю сеть**: разрешение на адрес пода или
    локальной сети отвергнуто (`403`), на публичный — выдано.
 
@@ -34,6 +36,8 @@ RELAY_PORTS = range(30500, 30520)
 
 ALLOCATE, ALLOCATE_OK, ALLOCATE_ERR = 0x0003, 0x0103, 0x0113
 PERMISSION, PERMISSION_OK, PERMISSION_ERR = 0x0008, 0x0108, 0x0118
+CHANNEL_BIND, CHANNEL_BIND_OK = 0x0009, 0x0109
+SEND_INDICATION, DATA_INDICATION = 0x0016, 0x0017
 
 
 def attribute(kind: int, value: bytes) -> bytes:
@@ -119,10 +123,100 @@ class TurnClient:
         return self.ask(message(PERMISSION, request, key))
 
 
-def credentials(secret: str, *, ttl: int = 600) -> tuple[str, str]:
+    def send(self, peer: tuple[str, int], data: bytes) -> None:
+        """Send Indication: «отправь это пиру через мой релей» (без ответа)."""
+        payload = message(SEND_INDICATION, [attribute(0x0012, xor_address(*peer)),
+                                            attribute(0x0013, data)])
+        self.sock.sendto(payload, self.target)
+
+    def bind_channel(self, username: str, password: str, number: int,
+                     peer: tuple[str, int]) -> tuple[int, dict[int, bytes]]:
+        key = self.authorize(username, password)
+        request = [attribute(0x000C, struct.pack("!HH", number, 0)),
+                   attribute(0x0012, xor_address(*peer)), *self._identity]
+        return self.ask(message(CHANNEL_BIND, request, key))
+
+    def send_channel(self, number: int, data: bytes) -> None:
+        """ChannelData: короткая форма отправки по привязанному каналу."""
+        self.sock.sendto(struct.pack("!HH", number, len(data)) + data, self.target)
+
+    def receive(self) -> tuple[tuple[str, int], bytes] | None:
+        """Ждёт Data Indication: «пир прислал тебе это». `None` — не дождались."""
+        try:
+            while True:
+                data, _ = self.sock.recvfrom(2048)
+                if len(data) >= 20 and parse(data)[0] == DATA_INDICATION:
+                    _, attributes = parse(data)
+                    return decode_xor_address(attributes[0x0012]), attributes[0x0013]
+        except TimeoutError:
+            return None
+
+
+def credentials(secret: str, *, ttl: int = 600, subject: str | None = None) -> tuple[str, str]:
     provider = CoturnProvider(secret=secret, urls=("turn:x",))
-    server = asyncio.run(provider.ice_servers(ttl_seconds=ttl))[0]
+    server = asyncio.run(provider.ice_servers(ttl_seconds=ttl, subject=subject))[0]
     return server.username or "", server.credential or ""
+
+
+def allocated(host: str, secret: str, subject: str):
+    """Клиент TURN с выделением: (клиент, имя, пароль, релейный адрес) или `None`."""
+    username, password = credentials(secret, subject=subject)
+    client = TurnClient(host)
+    client.challenge()
+    kind, attributes = client.allocate(username, password)
+    if kind != ALLOCATE_OK or 0x0016 not in attributes:
+        return None
+    return client, username, password, decode_xor_address(attributes[0x0016])
+
+
+def relay_traffic(host: str, secret: str) -> None:
+    """**Данные идут** через релей между двумя клиентами — не только выделение.
+
+    Выделение и разрешение доказывают, что сервер принял данные, но не что он
+    пересылает хоть байт: сломанный релей прошёл бы такие проверки. Здесь
+    клиент A через свой релей отправляет байты клиенту B (и обратно), и они
+    сверяются побайтно.
+    """
+    a = allocated(host, secret, f"relay-a-{secrets.token_hex(4)}")
+    b = allocated(host, secret, f"relay-b-{secrets.token_hex(4)}")
+    check("два клиента получили свои релейные адреса", a is not None and b is not None)
+    if a is None or b is None:
+        return
+    a_client, a_user, a_pass, a_relay = a
+    b_client, b_user, b_pass, b_relay = b
+    check("у клиентов разные релейные порты", a_relay[1] != b_relay[1], f"{a_relay} {b_relay}")
+
+    # Разрешение — на адрес **релея пира**: пакет от него придёт с адреса релея.
+    kind_a, attr_a = a_client.permit(a_user, a_pass, b_relay[0])
+    kind_b, attr_b = b_client.permit(b_user, b_pass, a_relay[0])
+    ok = kind_a == PERMISSION_OK and kind_b == PERMISSION_OK
+    check("разрешения между релеями выданы (стенд: TURN_ALLOW_SELF_PEER)", ok,
+          f"A {kind_a:#06x}/{error_code(attr_a)}, B {kind_b:#06x}/{error_code(attr_b)}: "
+          "если 403 — релей назван частным адресом, и без внешнего адреса пира не разрешить")
+    if not ok:
+        return
+
+    for label, sender, target_relay, receiver, sender_relay, payload in (
+        ("A → релей → B", a_client, b_relay, b_client, a_relay, secrets.token_bytes(48)),
+        ("B → релей → A", b_client, a_relay, a_client, b_relay, secrets.token_bytes(48)),
+    ):
+        sender.send(target_relay, payload)
+        got = receiver.receive()
+        check(f"данные {label} дошли побайтно (Send → Data Indication)",
+              got is not None and got[1] == payload, f"получено: {got}")
+        check(f"{label}: пир в Data Indication — релей отправителя",
+              got is not None and got[0] == sender_relay, f"получено: {got}")
+
+    # Канал (ChannelBind + ChannelData) — то, чем пользуется браузер вместо Send.
+    kind, attributes = a_client.bind_channel(a_user, a_pass, 0x4000, b_relay)
+    check("канал привязан (ChannelBind)", kind == CHANNEL_BIND_OK,
+          f"тип {kind:#06x}, код {error_code(attributes)}")
+    if kind == CHANNEL_BIND_OK:
+        payload = secrets.token_bytes(1000)
+        a_client.send_channel(0x4000, payload)
+        got = b_client.receive()
+        check("данные по каналу (ChannelData, 1000 байт) дошли побайтно",
+              got is not None and got[1] == payload, f"получено: {None if got is None else len(got[1])}")
 
 
 def run() -> None:
@@ -159,6 +253,9 @@ def run() -> None:
         kind, attributes = client.permit(username, password, "8.8.8.8")
         check("разрешение на публичный адрес выдано", kind == PERMISSION_OK,
               f"тип {kind:#06x}, код {error_code(attributes)}")
+
+    # --- данные идут через релей: A ↔ B -------------------------------------------------
+    relay_traffic(host, secret)
 
     # --- чужой пароль и просроченный срок -------------------------------------------------
     other = TurnClient(host)

@@ -17,8 +17,13 @@
 #    CGNAT-диапазоны; прямой путь между двумя устройствами в одной сети релея не
 #    требует, поэтому запрет его не ломает.
 #  * **Стоимость ограничена.** Релей — главная статья расходов на звонки
-#    (оценка, часть 5). `--max-bps` обрезает сеанс чуть выше видео 1 Мбит/с и звука
-#    (потолок клиента — 720p), `--user-quota` и `--total-quota` — число выделений.
+#    (оценка, часть 5). `--max-bps` задан в **байтах** в секунду, а не в битах:
+#    250 000 Б/с ≈ 2 Мбит/с на сеанс — с запасом над видео 1 Мбит/с (потолок
+#    клиента, 720p), звуком и накладными. `--bps-capacity` — потолок на весь сервер
+#    (≈ 20 Мбит/с), `--user-quota` и `--total-quota` — число выделений. Учётные
+#    данные стабильны для пары «звонок, участник» (`CoturnProvider`), поэтому
+#    квота на пользователя действительно ограничивает одного участника, а не
+#    сбрасывается новыми данными при каждом запросе.
 #  * **Диапазон релейных портов узкий** (20 портов): у Kubernetes нет «диапазона
 #    UDP» на Service, каждый порт перечислен. Для стенда этого хватает на ~10
 #    одновременных релейных звонков; облачный вариант — другой диапазон и NLB
@@ -107,42 +112,63 @@ spec:
           type: RuntimeDefault
       containers:
         - name: coturn
-          image: coturn/coturn:4.7.0-alpine
+          # По digest, а не по тегу: тег подвижен, и образ, на который смотрит
+          # нагрузка, не должен меняться без правки git (как у остальных образов).
+          # Тег — 4.7.0-alpine; digest — индекс манифестов (обе архитектуры).
+          image: coturn/coturn@sha256:2a0c41042b02c6daa33f35ce3781da20fe0d08da6cf2746c8ae62a890802cc36
+          # Оболочка, а не прямой запуск: два флага добавляются только когда заданы
+          # переменные (`${X:+...}`), а пустой `--external-ip=` coturn не принимает.
+          command: ["/bin/sh", "-c"]
           args:
-            - -n
-            - --log-file=stdout
-            - --simple-log
-            - --no-cli
-            - --no-tls
-            - --no-dtls
-            - --fingerprint
-            - --realm=turn.finops.local
-            - --listening-port=3478
-            - --min-port=30500
-            - --max-port=30519
-            - --use-auth-secret
-            - --static-auth-secret=$(TURN_SECRET)
-            - --no-multicast-peers
-            - --no-loopback-peers
-            - --denied-peer-ip=0.0.0.0-0.255.255.255
-            - --denied-peer-ip=10.0.0.0-10.255.255.255
-            - --denied-peer-ip=100.64.0.0-100.127.255.255
-            - --denied-peer-ip=127.0.0.0-127.255.255.255
-            - --denied-peer-ip=169.254.0.0-169.254.255.255
-            - --denied-peer-ip=172.16.0.0-172.31.255.255
-            - --denied-peer-ip=192.168.0.0-192.168.255.255
-            - --denied-peer-ip=224.0.0.0-255.255.255.255
-            - --max-bps=1500000
-            - --user-quota=4
-            - --total-quota=100
-            - --prometheus
-            - --pidfile=/tmp/turnserver.pid
+            - |
+              exec turnserver -n --log-file=stdout --simple-log --no-cli \
+                --no-tls --no-dtls --fingerprint \
+                --realm=turn.finops.local --listening-port=3478 \
+                --min-port=30500 --max-port=30519 \
+                --use-auth-secret --static-auth-secret="$TURN_SECRET" \
+                --no-multicast-peers --no-tcp-relay \
+                --denied-peer-ip=0.0.0.0-0.255.255.255 \
+                --denied-peer-ip=10.0.0.0-10.255.255.255 \
+                --denied-peer-ip=100.64.0.0-100.127.255.255 \
+                --denied-peer-ip=127.0.0.0-127.255.255.255 \
+                --denied-peer-ip=169.254.0.0-169.254.255.255 \
+                --denied-peer-ip=172.16.0.0-172.31.255.255 \
+                --denied-peer-ip=192.168.0.0-192.168.255.255 \
+                --denied-peer-ip=224.0.0.0-255.255.255.255 \
+                --max-bps=250000 --bps-capacity=2500000 \
+                --user-quota=4 --total-quota=100 \
+                --prometheus --pidfile=/tmp/turnserver.pid \
+                ${TURN_EXTERNAL_IP:+--external-ip=$TURN_EXTERNAL_IP/$POD_IP} \
+                ${TURN_ALLOW_SELF_PEER:+--allowed-peer-ip=$POD_IP}
           env:
             - name: TURN_SECRET
               valueFrom:
                 secretKeyRef:
                   name: messenger-turn
                   key: secret
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            # Публичный адрес, который coturn называет клиентам в релейном адресе
+            # (`XOR-RELAYED-ADDRESS`). **Без него релей работает только внутри
+            # кластера**: за NAT/балансировщиком coturn назвал бы адрес пода, и
+            # браузер извне не отправил бы на него ни пакета. Берётся из ConfigMap
+            # `messenger-turn-config` (ключ `external-ip`); нет ConfigMap — флаг не
+            # добавляется. Формат coturn: `публичный/частный`, частный — адрес пода.
+            - name: TURN_EXTERNAL_IP
+              valueFrom:
+                configMapKeyRef:
+                  name: messenger-turn-config
+                  key: external-ip
+                  optional: true
+            # Только для стенда: разрешить в качестве пира адрес **самого пода**.
+            # Без внешнего адреса релей двух сторон назван адресом пода (частным), и
+            # частные диапазоны запрещены — проверка «пакет проходит A → релей → B»
+            # (`tests/integration/turn_check.py`) невозможна. С внешним адресом
+            # (публичным) флаг не нужен и **выключается**.
+            - name: TURN_ALLOW_SELF_PEER
+              value: "true"
           ports:
             - {name: turn-udp, containerPort: 3478, protocol: UDP}
             - {name: turn-tcp, containerPort: 3478, protocol: TCP}

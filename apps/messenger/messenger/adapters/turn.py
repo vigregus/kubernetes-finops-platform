@@ -46,8 +46,18 @@ class IceServer:
 
 
 class TurnProvider(Protocol):
-    async def ice_servers(self, *, ttl_seconds: int) -> list[IceServer] | None:
+    async def ice_servers(
+        self,
+        *,
+        ttl_seconds: int,
+        expires_at: int | None = None,
+        subject: str | None = None,
+    ) -> list[IceServer] | None:
         """Список для клиента или `None`, если провайдер недоступен.
+
+        `expires_at` (unix-время) и `subject` (кому: «звонок:участник») нужны тем, кто
+        умеет выдавать **стабильные** данные: один и тот же субъект в один и тот же
+        срок получает одно и то же имя пользователя. Остальные их игнорируют.
 
         `None`, а не исключение: недоступный TURN не должен ронять звонок — у
         большинства людей прямой путь работает и без него.
@@ -66,7 +76,13 @@ class StaticProvider:
 
     servers: tuple[IceServer, ...] = ()
 
-    async def ice_servers(self, *, ttl_seconds: int) -> list[IceServer] | None:
+    async def ice_servers(
+        self,
+        *,
+        ttl_seconds: int,
+        expires_at: int | None = None,
+        subject: str | None = None,
+    ) -> list[IceServer] | None:
         return list(self.servers)
 
 
@@ -80,19 +96,39 @@ class CoturnProvider:
     API: общий секрет — единственное, что их связывает. Сеть не участвует вовсе, и
     недоступного провайдера, как у управляемого сервиса, не бывает.
 
-    Метка случайная, а не идентификатор человека: имя пользователя попадает в
-    журналы TURN, и `user_id` там означал бы утечку «кто с кем созванивается» в
-    систему, у которой иной круг доступа.
+    **Данные стабильны** для одной пары «звонок, участник»: метка — это HMAC от
+    субъекта тем же секретом, а срок задаёт вызывающий (`expires_at`). Каждый
+    запрос получает то же имя пользователя, и поэтому `--user-quota` у coturn
+    ограничивает **одного участника**: со случайной меткой каждый запрос рождал бы
+    нового пользователя со свежей квотой, и десяток запросов выедал весь пул
+    релейных портов.
+
+    Метка не обратима в идентификатор человека (ключевой хеш), а не `user_id`:
+    имя пользователя попадает в журналы TURN, и `user_id` там означал бы утечку
+    «кто с кем созванивается» в систему с иным кругом доступа.
     """
 
     secret: str
     urls: tuple[str, ...]
     now: Callable[[], float] = field(default=time.time, repr=False)
 
-    async def ice_servers(self, *, ttl_seconds: int) -> list[IceServer] | None:
-        expires = int(self.now()) + ttl_seconds
-        username = f"{expires}:{secrets.token_hex(8)}"
-        digest = hmac.new(self.secret.encode(), username.encode(), hashlib.sha1).digest()  # noqa: S324 - схему задаёт coturn
+    async def ice_servers(
+        self,
+        *,
+        ttl_seconds: int,
+        expires_at: int | None = None,
+        subject: str | None = None,
+    ) -> list[IceServer] | None:
+        expires = expires_at if expires_at is not None else int(self.now()) + ttl_seconds
+        if subject is None:
+            label = secrets.token_hex(8)
+        else:
+            keyed = hmac.new(self.secret.encode(), subject.encode(), hashlib.sha256)
+            label = keyed.hexdigest()[:16]
+        username = f"{expires}:{label}"
+        # SHA-1 здесь не выбор, а схема самого coturn (`use-auth-secret`).
+        mac = hmac.new(self.secret.encode(), username.encode(), hashlib.sha1)  # noqa: S324
+        digest = mac.digest()
         return [
             IceServer(
                 urls=self.urls,
@@ -112,7 +148,13 @@ class CloudflareProvider:
     timeout_seconds: float = 3.0
     transport: httpx.AsyncBaseTransport | None = field(default=None, repr=False)
 
-    async def ice_servers(self, *, ttl_seconds: int) -> list[IceServer] | None:
+    async def ice_servers(
+        self,
+        *,
+        ttl_seconds: int,
+        expires_at: int | None = None,
+        subject: str | None = None,
+    ) -> list[IceServer] | None:
         url = f"{self.base_url}/v1/turn/keys/{self.key_id}/credentials/generate-ice-servers"
         try:
             async with httpx.AsyncClient(

@@ -125,6 +125,26 @@ def test_coturn_выдаёт_данные_по_схеме_use_auth_secret():
     assert server.credential == expected
 
 
+def test_coturn_данные_стабильны_для_субъекта_и_срока():
+    """Новый пользователь на каждый запрос выедал бы квоту coturn (`--user-quota`)."""
+    provider = coturn()
+
+    def issue(subject, expires_at=1_800_010_000):
+        return run(provider.ice_servers(ttl_seconds=60, expires_at=expires_at, subject=subject))[0]
+
+    first, again = issue("call-1:user-a"), issue("call-1:user-a")
+    assert (first.username, first.credential) == (again.username, again.credential)
+    assert first.username.startswith("1800010000:")
+    other = issue("call-1:user-b")
+    assert other.username != first.username
+    assert other.username.split(":")[0] == "1800010000"
+
+
+def test_метка_не_раскрывает_субъекта():
+    server = run(coturn().ice_servers(ttl_seconds=60, expires_at=1, subject="call-1:user-a"))[0]
+    assert "user-a" not in server.username and "call-1" not in server.username
+
+
 def test_coturn_метка_случайная_и_не_несёт_личности():
     first = run(coturn().ice_servers(ttl_seconds=600))[0].username
     second = run(coturn().ice_servers(ttl_seconds=600))[0].username

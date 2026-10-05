@@ -18,6 +18,7 @@ import httpx
 from login_check import API, ORIGIN, admin_token, create_user
 from realtime_revoke_check import _auth_headers, _connect, _login
 from relay_check import pool_settings
+from turn_check import ALLOCATE_OK, TurnClient
 from typing_check import check, command, drain, failures, wait_publication
 
 from messenger.repositories.postgres import create_pool
@@ -189,6 +190,26 @@ async def run() -> None:
             check("CALL-004: стенд выдаёт данные своего coturn (имя «срок:метка» и подпись)",
                   bool(servers) and ":" in str(servers[0].get("username", ""))
                   and bool(servers[0].get("credential")), str(servers)[:160])
+            ttl = ice.json().get("ttl_seconds", 0) if ice.status_code == 200 else 0
+            check("срок данных — до конца допустимого звонка, а не десять минут", ttl > 3600,
+                  f"ttl_seconds={ttl}")
+            again = await call("GET", f"/calls/{call_id}/ice-servers", a)
+            same = again.status_code == 200 and again.json().get("ice_servers") == servers
+            check("данные стабильны: повторный запрос возвращает то же имя (квота coturn действует)",
+                  same, f"{servers[:1]} / {again.text[:120]}")
+            theirs = await call("GET", f"/calls/{call_id}/ice-servers", b)
+            other = theirs.json().get("ice_servers", [{}])[0].get("username") if theirs.status_code == 200 else None
+            check("у второго участника другое имя", other is not None
+                  and other != servers[0].get("username"), str(other))
+            # Данные, выданные самим API, принимает настоящий coturn: цепочка
+            # API → общий секрет → подпись → сервер замкнута, а не проверена по частям.
+            host = os.environ.get("TURN_ADDRESS", "messenger-turn.messenger.svc.cluster.local")
+            if servers and servers[0].get("username"):
+                turn_client = TurnClient(host)
+                turn_client.challenge()
+                kind, _ = turn_client.allocate(servers[0]["username"], servers[0]["credential"])
+                check("CALL-004: coturn принял данные, выданные API (выделение релея получено)",
+                      kind == ALLOCATE_OK, f"тип {kind:#06x}")
 
             # --- CALL-007: сигнал без истории ----------------------------------------
             with contextlib.suppress(Exception):

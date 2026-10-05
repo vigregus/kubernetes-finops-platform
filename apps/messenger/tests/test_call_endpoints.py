@@ -266,11 +266,20 @@ def test_текущий_звонок_есть_и_его_нет(client, monkeypat
 
 def test_ice_серверы_отдаются_с_сроком(client, monkeypatch):
     authenticated(monkeypatch)
-    patch(monkeypatch, "ice_servers", service.IceResult(servers=[{"urls": ["stun:x"]}]))
+    servers = [{"urls": ["stun:x"]}]
+    patch(monkeypatch, "ice_servers", service.IceResult(servers=servers, ttl_seconds=9000))
     r = client.get(f"/calls/{CALL_ID}/ice-servers")
     assert r.status_code == 200
-    assert r.json() == {"ice_servers": [{"urls": ["stun:x"]}], "ttl_seconds": 600}
+    assert r.json() == {"ice_servers": [{"urls": ["stun:x"]}], "ttl_seconds": 9000}
     assert r.headers["cache-control"] == "no-store"
+
+
+def test_частые_запросы_ice_получают_429_и_retry_after(client, monkeypatch):
+    authenticated(monkeypatch)
+    patch(monkeypatch, "ice_servers",
+          service.IceResult(rejection=Reason.RATE_LIMITED, retry_after_seconds=11))
+    r = client.get(f"/calls/{CALL_ID}/ice-servers")
+    assert r.status_code == 429 and r.headers["retry-after"] == "11"
 
 
 def test_ice_серверы_постороннему_404(client, monkeypatch):
