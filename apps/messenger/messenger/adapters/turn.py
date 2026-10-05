@@ -12,8 +12,14 @@
 """
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import logging
 import os
+import secrets
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -62,6 +68,38 @@ class StaticProvider:
 
     async def ice_servers(self, *, ttl_seconds: int) -> list[IceServer] | None:
         return list(self.servers)
+
+
+@dataclass(slots=True)
+class CoturnProvider:
+    """Свой coturn: краткоживущие данные считаются **локально**, без внешнего API.
+
+    Схема `use-auth-secret` самого coturn: имя пользователя — `{срок}:{метка}`
+    (срок — unix-время окончания), пароль — `base64(HMAC-SHA1(секрет, имя))`.
+    Сервер проверяет подпись и срок сам, поэтому ему не нужна ни база, ни связь с
+    API: общий секрет — единственное, что их связывает. Сеть не участвует вовсе, и
+    недоступного провайдера, как у управляемого сервиса, не бывает.
+
+    Метка случайная, а не идентификатор человека: имя пользователя попадает в
+    журналы TURN, и `user_id` там означал бы утечку «кто с кем созванивается» в
+    систему, у которой иной круг доступа.
+    """
+
+    secret: str
+    urls: tuple[str, ...]
+    now: Callable[[], float] = field(default=time.time, repr=False)
+
+    async def ice_servers(self, *, ttl_seconds: int) -> list[IceServer] | None:
+        expires = int(self.now()) + ttl_seconds
+        username = f"{expires}:{secrets.token_hex(8)}"
+        digest = hmac.new(self.secret.encode(), username.encode(), hashlib.sha1).digest()  # noqa: S324 - схему задаёт coturn
+        return [
+            IceServer(
+                urls=self.urls,
+                username=username,
+                credential=base64.b64encode(digest).decode(),
+            )
+        ]
 
 
 @dataclass(slots=True)
@@ -130,8 +168,19 @@ def _parse_ice_servers(body: object) -> list[IceServer] | None:
 
 
 def provider_from_env() -> TurnProvider:
-    """`TURN_PROVIDER`: `cloudflare` или (по умолчанию) фиксированный список STUN."""
+    """`TURN_PROVIDER`: `coturn`, `cloudflare` или (по умолчанию) фиксированный список STUN."""
     kind = os.getenv("TURN_PROVIDER", "static").strip().lower()
+    if kind == "coturn":
+        secret = os.getenv("TURN_COTURN_SECRET", "")
+        urls = tuple(
+            url.strip() for url in os.getenv("TURN_COTURN_URLS", "").split(",") if url.strip()
+        )
+        if secret and urls:
+            return CoturnProvider(secret=secret, urls=urls)
+        log.warning(
+            "coturn не настроен, звонки идут без релея",
+            extra={"event": "turn_unconfigured", "result": "failed"},
+        )
     if kind == "cloudflare":
         key_id = os.getenv("TURN_CLOUDFLARE_KEY_ID", "")
         token = os.getenv("TURN_CLOUDFLARE_API_TOKEN", "")

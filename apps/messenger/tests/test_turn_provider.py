@@ -95,3 +95,60 @@ def test_cloudflare_без_ключей_откатывается_на_stun(monke
     monkeypatch.delenv("TURN_CLOUDFLARE_KEY_ID", raising=False)
     monkeypatch.delenv("TURN_CLOUDFLARE_API_TOKEN", raising=False)
     assert isinstance(turn.provider_from_env(), turn.StaticProvider)
+
+
+# --- свой coturn ----------------------------------------------------------------------
+
+
+def coturn(now=1_800_000_000.0) -> turn.CoturnProvider:
+    return turn.CoturnProvider(
+        secret="shared-secret", urls=("turn:t.example:3478?transport=udp",), now=lambda: now
+    )
+
+
+def test_coturn_выдаёт_данные_по_схеме_use_auth_secret():
+    import base64
+    import hashlib
+    import hmac
+
+    servers = run(coturn().ice_servers(ttl_seconds=600))
+    assert servers is not None and len(servers) == 1
+    server = servers[0]
+    assert server.urls == ("turn:t.example:3478?transport=udp",)
+    # Имя — «срок:метка»; срок — ровно сейчас + 10 минут.
+    expires, _, label = (server.username or "").partition(":")
+    assert expires == str(1_800_000_000 + 600) and label
+    # Пароль — HMAC-SHA1 от имени общим секретом: ровно то, что проверит сам coturn.
+    expected = base64.b64encode(
+        hmac.new(b"shared-secret", server.username.encode(), hashlib.sha1).digest()
+    ).decode()
+    assert server.credential == expected
+
+
+def test_coturn_метка_случайная_и_не_несёт_личности():
+    first = run(coturn().ice_servers(ttl_seconds=600))[0].username
+    second = run(coturn().ice_servers(ttl_seconds=600))[0].username
+    assert first != second
+
+
+def test_coturn_не_ходит_в_сеть_и_не_падает():
+    assert run(coturn().ice_servers(ttl_seconds=60)) is not None
+
+
+def test_coturn_из_окружения(monkeypatch):
+    monkeypatch.setenv("TURN_PROVIDER", "coturn")
+    monkeypatch.setenv("TURN_COTURN_SECRET", "s")
+    monkeypatch.setenv("TURN_COTURN_URLS", "turn:a:3478, turns:b:443?transport=tcp")
+    provider = turn.provider_from_env()
+    assert isinstance(provider, turn.CoturnProvider)
+    assert provider.urls == ("turn:a:3478", "turns:b:443?transport=tcp")
+
+
+def test_coturn_без_секрета_или_адресов_откатывается_на_stun(monkeypatch):
+    monkeypatch.setenv("TURN_PROVIDER", "coturn")
+    monkeypatch.delenv("TURN_COTURN_SECRET", raising=False)
+    monkeypatch.setenv("TURN_COTURN_URLS", "turn:a:3478")
+    assert isinstance(turn.provider_from_env(), turn.StaticProvider)
+    monkeypatch.setenv("TURN_COTURN_SECRET", "s")
+    monkeypatch.delenv("TURN_COTURN_URLS")
+    assert isinstance(turn.provider_from_env(), turn.StaticProvider)
