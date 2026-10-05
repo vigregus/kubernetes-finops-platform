@@ -87,7 +87,11 @@ function fakeAlert() {
   return { env, log }
 }
 
-function givenProvider(ops: CallsOperations, alertEnv: AlertEnv = fakeAlert().env) {
+function givenProvider(
+  ops: CallsOperations,
+  alertEnv: AlertEnv = fakeAlert().env,
+  engineEnv: EngineEnv = fakeEnv(),
+) {
   const fake = givenFakeCentrifuge()
   const ctx: { current: CallsContextValue | null } = { current: null }
   function Probe() {
@@ -101,7 +105,7 @@ function givenProvider(ops: CallsOperations, alertEnv: AlertEnv = fakeAlert().en
       issueCallsTicket={givenTicketIssuer().issueTicket}
       viewerId={VIEWER}
       peerNameFor={() => "Alice"}
-      env={fakeEnv()}
+      env={engineEnv}
       createCentrifuge={fake.factory}
       alertEnv={alertEnv}
     >
@@ -228,6 +232,29 @@ describe("качество видео", () => {
 
     const second = givenProvider(fakeOps().ops)
     expect(second.ctx.current?.videoQuality).toBe("low")
+  })
+
+  it("сохранённое качество действует с первой секунды звонка, а не только после смены", async () => {
+    store.set("messenger.call.videoQuality", "low")
+    const requests: unknown[] = []
+    const env = fakeEnv()
+    const original = env.getUserMedia
+    env.getUserMedia = async (c) => {
+      requests.push(c)
+      return original(c)
+    }
+    const { ops } = fakeOps({ start: vi.fn(async () => api({ role: "caller", kind: "video", state: "accepted", version: 2 })) })
+    const { ctx } = givenProvider(ops, undefined, env)
+    await act(async () => ctx.current?.startCall(CONV, "video", "Bob"))
+    await vi.waitFor(() => expect(requests.length).toBeGreaterThan(0))
+    // `low` снимает 720p (а не 1080p, как auto): качество дошло до движка при создании
+    expect((requests[0] as { video: { height: { ideal: number } } }).video.height.ideal).toBe(720)
+  })
+
+  it("прежнее сохранённое имя `high` читается как HD", () => {
+    store.set("messenger.call.videoQuality", "high")
+    const { ctx } = givenProvider(fakeOps().ops)
+    expect(ctx.current?.videoQuality).toBe("hd")
   })
 
   it("мусор в хранилище читается как auto", () => {

@@ -194,10 +194,10 @@ test.describe("G4: звонки", () => {
 			.poll(() => videoEncoding(a.page), { timeout: 10_000 })
 			.toMatchObject({ maxBitrate: 350_000, scaleResolutionDownBy: 2 })
 		await a.page.getByRole("button", { name: "Video quality" }).click()
-		await a.page.getByRole("menuitemradio", { name: /^High/ }).click()
+		await a.page.getByRole("menuitemradio", { name: /^Full HD/ }).click()
 		await expect
 			.poll(() => videoEncoding(a.page), { timeout: 10_000 })
-			.toMatchObject({ maxBitrate: 1_500_000, scaleResolutionDownBy: 1 })
+			.toMatchObject({ maxBitrate: 4_000_000, scaleResolutionDownBy: 1 })
 		await expect(PEER(a)).toHaveAttribute("data-call-phase", "active")
 		await expectMediaFlowing(b.page)
 
@@ -275,5 +275,47 @@ test.describe("G4: звонки", () => {
 			data: { type: "offer", sdp: "v=0" },
 		})
 		expect(response.status()).toBe(401)
+	})
+
+	/**
+	 * Релей из браузера (CALL-004/CALL-011b): соединение **принуждается** идти через TURN, и
+	 * проверяется выбранная пара — `relay` — и что медиа идёт. Это соединяет две уже доказанные
+	 * половины: браузерный WebRTC и данные через coturn (`turn_check.py`).
+	 *
+	 * Только когда coturn достижим для браузера: на локальном стенде UDP из minikube наружу не
+	 * выходит (`docs/local-setup.md`, «Звонки и TURN»). Включается `E2E_TURN_RELAY=1`, когда
+	 * `turn.finops.local` указывает на достижимый coturn.
+	 */
+	test("CALL-004: принудительный релей — выбранная пара relay, медиа идёт", async () => {
+		test.skip(!process.env.E2E_TURN_RELAY, "coturn недостижим для браузера на этом стенде")
+		for (const who of [a, b]) {
+			await who.page.evaluate(() => window.localStorage.setItem("messenger.call.forceRelay", "1"))
+		}
+		await a.page.getByRole("button", { name: "Start voice call" }).click()
+		await expect(b.page.getByRole("alertdialog", { name: "Incoming call" })).toBeVisible({ timeout: 20_000 })
+		await b.page.getByRole("button", { name: "Accept call" }).click()
+		await expect(PEER(a)).toHaveAttribute("data-call-phase", "active", { timeout: 60_000 })
+
+		const selected = await a.page.evaluate(async () => {
+			const peers = (window as unknown as { __peers?: RTCPeerConnection[] }).__peers ?? []
+			for (const peer of peers) {
+				const report = await peer.getStats()
+				const byId = new Map<string, Record<string, unknown>>()
+				report.forEach((entry: Record<string, unknown>, id: string) => byId.set(id, entry))
+				for (const entry of byId.values()) {
+					if (entry["type"] === "transport" && typeof entry["selectedCandidatePairId"] === "string") {
+						const pair = byId.get(entry["selectedCandidatePairId"])
+						const local = byId.get(String(pair?.["localCandidateId"]))
+						return String(local?.["candidateType"])
+					}
+				}
+			}
+			return "unknown"
+		})
+		expect(selected).toBe("relay")
+		await expectMediaFlowing(a.page)
+		for (const who of [a, b]) {
+			await who.page.evaluate(() => window.localStorage.removeItem("messenger.call.forceRelay"))
+		}
 	})
 })

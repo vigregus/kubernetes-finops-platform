@@ -2,7 +2,11 @@ import { describe, expect, it } from "vitest"
 
 import {
   CallEngine,
-  VIDEO_MAX_BITRATE,
+  AUDIO_MAX_BITRATE,
+  VIDEO_AUTO_MAX_BITRATE,
+  captureFor,
+  orderCodecs,
+  parseVideoQuality,
   VIDEO_PRESETS,
   connectionType,
   encodingFor,
@@ -17,8 +21,12 @@ class FakeTrack {
   enabled = true
   stopped = false
   readonly kind: "audio" | "video"
+  contentHint = ""
   constructor(kind: "audio" | "video") {
     this.kind = kind
+  }
+  applyConstraints(_constraints?: unknown) {
+    return Promise.resolve()
   }
   stop() {
     this.stopped = true
@@ -242,10 +250,10 @@ describe("вызываемый", () => {
 })
 
 describe("медиа", () => {
-  it("видеозвонок просит камеру и микрофон с потолком 720p", async () => {
+  it("видеозвонок по умолчанию просит у камеры Full HD (auto) и микрофон", async () => {
     const r = rig({ kind: "video" })
     await r.engine.start()
-    expect(r.media.requests[0]?.video).toMatchObject({ height: { max: 720 } })
+    expect(r.media.requests[0]?.video).toMatchObject({ width: { ideal: 1920 }, height: { ideal: 1080 } })
     expect(r.engine.hasVideo()).toBe(true)
   })
 
@@ -433,19 +441,20 @@ describe("обновление данных TURN (долгий релейный 
 describe("качество исходящего видео", () => {
   it("auto — потолок оценки стоимости и без масштабирования", () => {
     expect(encodingFor("auto")).toEqual({
-      maxBitrate: VIDEO_MAX_BITRATE,
+      maxBitrate: VIDEO_AUTO_MAX_BITRATE,
       scaleResolutionDownBy: 1,
       maxFramerate: 30,
     })
   })
 
   it("пресеты строго по возрастанию: ниже — меньше кадр, битрейт и частота", () => {
-    const { low, medium, high } = VIDEO_PRESETS
+    const { low, medium, hd, fhd } = VIDEO_PRESETS
     expect(low.maxBitrate).toBeLessThan(medium.maxBitrate)
-    expect(medium.maxBitrate).toBeLessThan(high.maxBitrate)
+    expect(medium.maxBitrate).toBeLessThan(hd.maxBitrate)
+    expect(hd.maxBitrate).toBeLessThan(fhd.maxBitrate)
     expect(low.scaleResolutionDownBy).toBeGreaterThan(medium.scaleResolutionDownBy)
-    expect(medium.scaleResolutionDownBy).toBeGreaterThan(high.scaleResolutionDownBy)
-    expect(low.maxFramerate).toBeLessThan(high.maxFramerate)
+    expect(medium.scaleResolutionDownBy).toBeGreaterThan(hd.scaleResolutionDownBy)
+    expect(low.maxFramerate).toBeLessThan(hd.maxFramerate)
   })
 
   it("при установлении связи применяется начальное качество, и только к видео", async () => {
@@ -453,7 +462,9 @@ describe("качество исходящего видео", () => {
     await r.engine.start()
     r.peer.emitState("connected")
     await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(r.peer.applied).toEqual([{ kind: "video", encoding: expect.objectContaining(VIDEO_PRESETS.low) }])
+    expect(r.peer.applied.filter((a) => a.kind === "video")).toEqual([
+      { kind: "video", encoding: expect.objectContaining(VIDEO_PRESETS.low) },
+    ])
   })
 
   it("смена качества посреди звонка не пересоздаёт соединение", async () => {
@@ -463,10 +474,10 @@ describe("качество исходящего видео", () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
     r.peer.applied.length = 0
 
-    r.engine.setVideoQuality("high")
+    r.engine.setVideoQuality("fhd")
     r.engine.setVideoQuality("medium")
-    expect(r.peer.applied.map((a) => a.encoding["maxBitrate"])).toEqual([
-      VIDEO_PRESETS.high.maxBitrate,
+    expect(r.peer.applied.filter((a) => a.kind === "video").map((a) => a.encoding["maxBitrate"])).toEqual([
+      VIDEO_PRESETS.fhd.maxBitrate,
       VIDEO_PRESETS.medium.maxBitrate,
     ])
     expect(r.peer.closed).toBe(false)
@@ -476,14 +487,17 @@ describe("качество исходящего видео", () => {
     const r = rig({ kind: "video", videoQuality: "low" })
     await r.engine.start()
     r.engine.setVideoQuality("auto")
-    expect(r.peer.applied.at(-1)?.encoding).toMatchObject({ scaleResolutionDownBy: 1, maxBitrate: VIDEO_MAX_BITRATE })
+    expect(r.peer.applied.filter((a) => a.kind === "video").at(-1)?.encoding).toMatchObject({
+      scaleResolutionDownBy: 1,
+      maxBitrate: VIDEO_AUTO_MAX_BITRATE,
+    })
   })
 
   it("аудиозвонок: качество видео ничего не трогает", async () => {
     const r = rig({ kind: "audio" })
     await r.engine.start()
     r.engine.setVideoQuality("low")
-    expect(r.peer.applied).toEqual([])
+    expect(r.peer.applied.filter((a) => a.kind === "video")).toEqual([])
   })
 })
 
@@ -545,5 +559,102 @@ describe("путь соединения при смене сети (метрик
     }
     await settle()
     expect(r.events.filter((e) => e.startsWith("connected"))).toEqual(["connected:direct"])
+  })
+})
+
+
+describe("Full HD и звук как у лучших видеозвонков", () => {
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0))
+
+  it("захват камеры следует за выбором: Full HD и auto — 1080p, остальное — 720p", () => {
+    expect(captureFor("fhd")).toMatchObject({ width: 1920, height: 1080 })
+    expect(captureFor("auto")).toMatchObject({ width: 1920, height: 1080 })
+    for (const quality of ["low", "medium", "hd"] as const) {
+      expect(captureFor(quality)).toMatchObject({ width: 1280, height: 720 })
+    }
+  })
+
+  it("начальное качество определяет, что просят у камеры", async () => {
+    const r = rig({ kind: "video", videoQuality: "hd" })
+    await r.engine.start()
+    expect(r.media.requests[0]?.video).toMatchObject({ height: { ideal: 720 } })
+  })
+
+  it("звук: Opus с повышенным потолком и высоким приоритетом, видео не затронуто", async () => {
+    const r = rig({ kind: "video" })
+    await r.engine.start()
+    r.peer.emitState("connected")
+    await settle()
+    const audio = r.peer.applied.find((a) => a.kind === "audio")
+    expect(audio?.encoding).toMatchObject({
+      maxBitrate: AUDIO_MAX_BITRATE,
+      priority: "high",
+      networkPriority: "high",
+    })
+  })
+
+  it("микрофон просит речь в 48 кГц моно с подавлением шума", () => {
+    const audio = mediaConstraints("audio").audio as Record<string, unknown>
+    expect(audio).toMatchObject({
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+      channelCount: 1,
+      sampleRate: 48_000,
+    })
+  })
+
+  it("переход на Full HD посреди звонка просит у камеры 1080p, без пересоздания соединения", async () => {
+    const r = rig({ kind: "video", videoQuality: "hd" })
+    await r.engine.start()
+    const track = r.peer.senders.find((s) => s.track.kind === "video")?.track as unknown as {
+      applyConstraints: (c: unknown) => Promise<void>
+      constraints?: Array<Record<string, { ideal: number }>>
+    }
+    const seen: Array<Record<string, { ideal: number }>> = []
+    track.applyConstraints = async (c) => void seen.push(c as Record<string, { ideal: number }>)
+    r.engine.setVideoQuality("fhd")
+    expect(seen.at(-1)?.["height"]).toEqual({ ideal: 1080 })
+    expect(r.peer.closed).toBe(false)
+  })
+
+  it("камера отдаёт contentHint «motion»: плавность важнее резкости каждого кадра", async () => {
+    const r = rig({ kind: "video" })
+    await r.engine.start()
+    const video = r.peer.senders.find((s) => s.track.kind === "video")?.track as unknown as { contentHint?: string }
+    expect(video.contentHint).toBe("motion")
+  })
+})
+
+describe("порядок кодеков", () => {
+  const codec = (mimeType: string, sdpFmtpLine?: string) =>
+    ({ mimeType, clockRate: 90000, ...(sdpFmtpLine ? { sdpFmtpLine } : {}) }) as RTCRtpCodec
+
+  const list = [
+    codec("video/VP8"),
+    codec("video/VP9"),
+    codec("video/H264", "level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42e01f"),
+    codec("video/H264", "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"),
+    codec("video/rtx"),
+  ]
+
+  it("на устройствах Apple H.264 с режимом пакетизации 1 идёт первым, остальной порядок сохраняется", () => {
+    const ordered = orderCodecs(list, true).map((c) => `${c.mimeType}|${c.sdpFmtpLine ?? ""}`)
+    expect(ordered[0]).toContain("packetization-mode=1")
+    expect(ordered[1]).toContain("packetization-mode=0")
+    expect(ordered.slice(2)).toEqual(["video/VP8|", "video/VP9|", "video/rtx|"])
+  })
+
+  it("без предпочтения порядок браузера не трогается", () => {
+    expect(orderCodecs(list, false)).toEqual(list)
+  })
+})
+
+describe("сохранённое качество", () => {
+  it("прежнее имя 720p (`high`) читается как `hd`; мусор — как auto", () => {
+    expect(parseVideoQuality("high")).toBe("hd")
+    expect(parseVideoQuality("fhd")).toBe("fhd")
+    expect(parseVideoQuality("ultra")).toBe("auto")
+    expect(parseVideoQuality(null)).toBe("auto")
   })
 })

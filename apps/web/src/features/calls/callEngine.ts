@@ -59,6 +59,10 @@ export interface EngineOptions {
   readonly onFailed: (reason: "media_denied" | "failed") => void
   /** Начальное качество исходящего видео; по умолчанию `auto`. */
   readonly videoQuality?: VideoQuality
+  /** Принудительный релей (проверка TURN): `relay` — кандидаты только через сервер. */
+  readonly iceTransportPolicy?: RTCIceTransportPolicy
+  /** Предпочесть H.264 (аппаратное кодирование на устройствах Apple). */
+  readonly preferH264?: boolean
   readonly reconnectWindowMs?: number
   readonly candidateFlushMs?: number
   /** Подмена таймеров — для прогона без реального времени. */
@@ -68,56 +72,116 @@ export interface EngineOptions {
   }
 }
 
-/** Потолок видео — 720p; в оценке стоимости заложен 1 Мбит/с на участника. */
-export const VIDEO_MAX_BITRATE = 1_000_000
-
 /**
  * Качество **исходящего** видео. Управляет тем, что человек отправляет, а не тем,
  * что он видит: чужую картинку определяет собеседник со своего экрана.
  *
- * `auto` — потолок оценки стоимости (1 Мбит/с) и адаптация самого браузера под
- * сеть; пресеты задают потолок явно. Пресет — не гарантия: при плохой сети браузер
- * опустит качество ниже заданного, а не выше.
+ * `auto` — до Full HD с потолком 2,5 Мбит/с и адаптацией самого браузера под сеть
+ * (при плохой связи он опустит разрешение и частоту сам). Пресеты задают
+ * разрешение и потолок явно. Пресет — не гарантия: при плохой сети браузер опустит
+ * качество ниже заданного, а не выше.
  */
-export type VideoQuality = "auto" | "low" | "medium" | "high"
+export type VideoQuality = "auto" | "low" | "medium" | "hd" | "fhd"
 
-export const VIDEO_QUALITIES: readonly VideoQuality[] = ["auto", "low", "medium", "high"]
+export const VIDEO_QUALITIES: readonly VideoQuality[] = ["auto", "low", "medium", "hd", "fhd"]
+
+/** Прежнее имя пресета 720p (`high`), сохранённое в браузере до появления Full HD. */
+export function parseVideoQuality(value: string | null | undefined): VideoQuality {
+  if (value === "high") return "hd"
+  return (VIDEO_QUALITIES as readonly string[]).includes(value ?? "") ? (value as VideoQuality) : "auto"
+}
 
 interface VideoPreset {
-  /** Во сколько раз уменьшить кадр (720p / 2 = 360p). */
+  /** Во сколько раз уменьшить кадр относительно захвата. */
   readonly scaleResolutionDownBy: number
   readonly maxBitrate: number
   readonly maxFramerate: number
 }
 
-/**
- * Разрешение считается от захвата 720p (`mediaConstraints`). `high` выше потолка
- * оценки стоимости — это выбор человека, а не умолчание.
- */
 export const VIDEO_PRESETS: Readonly<Record<Exclude<VideoQuality, "auto">, VideoPreset>> = {
   low: { scaleResolutionDownBy: 2, maxBitrate: 350_000, maxFramerate: 15 },
   medium: { scaleResolutionDownBy: 1.5, maxBitrate: 700_000, maxFramerate: 24 },
-  high: { scaleResolutionDownBy: 1, maxBitrate: 1_500_000, maxFramerate: 30 },
+  hd: { scaleResolutionDownBy: 1, maxBitrate: 2_000_000, maxFramerate: 30 },
+  fhd: { scaleResolutionDownBy: 1, maxBitrate: 4_000_000, maxFramerate: 30 },
 }
+
+/** Что просить у камеры. Full HD и `auto` снимают 1080p, остальное — 720p: лишние пиксели ничего не дают. */
+export interface Capture {
+  readonly width: number
+  readonly height: number
+  readonly frameRate: number
+}
+
+export function captureFor(quality: VideoQuality): Capture {
+  return quality === "auto" || quality === "fhd"
+    ? { width: 1920, height: 1080, frameRate: 30 }
+    : { width: 1280, height: 720, frameRate: 30 }
+}
+
+/**
+ * Потолок `auto`. В оценке стоимости заложен 1 Мбит/с, но на прямом пути (≈ 85%
+ * звонков) трафик между браузерами бесплатен; цену задаёт релей, и его потолок —
+ * в coturn (`--max-bps`).
+ */
+export const VIDEO_AUTO_MAX_BITRATE = 2_500_000
 
 /** Что записать в кодирование отправителя для выбранного качества. */
 export function encodingFor(quality: VideoQuality): RTCRtpEncodingParameters {
   if (quality === "auto") {
-    return { maxBitrate: VIDEO_MAX_BITRATE, scaleResolutionDownBy: 1, maxFramerate: 30 }
+    return { maxBitrate: VIDEO_AUTO_MAX_BITRATE, scaleResolutionDownBy: 1, maxFramerate: 30 }
   }
   return { ...VIDEO_PRESETS[quality] }
 }
 
-export function mediaConstraints(kind: "audio" | "video"): MediaStreamConstraints {
+/**
+ * Звук — как у лучших видеозвонков: Opus с повышенным потолком и высоким приоритетом
+ * сети (звук не должен страдать раньше картинки). 64 кбит/с — широкая полоса речи с
+ * запасом; цена — копейки против видео.
+ */
+export const AUDIO_MAX_BITRATE = 64_000
+
+/**
+ * Порядок кодеков видео. На устройствах Apple H.264 кодируется аппаратно (меньше
+ * нагрева и задержки, чем программный VP8/VP9) — это и есть «как в айфонах»; на
+ * остальных порядок браузера не трогается: у него свой лучший выбор.
+ */
+export function orderCodecs(
+  codecs: readonly RTCRtpCodec[],
+  preferH264: boolean,
+): RTCRtpCodec[] {
+  if (!preferH264) return [...codecs]
+  const rank = (codec: RTCRtpCodec) => {
+    const mime = codec.mimeType.toLowerCase()
+    if (mime !== "video/h264") return 1
+    // Режим пакетизации 1 и профиль 42e01f принимают все; с них и начинаем.
+    return (codec.sdpFmtpLine ?? "").includes("packetization-mode=1") ? 0 : 0.5
+  }
+  return [...codecs].sort((a, b) => rank(a) - rank(b))
+}
+
+export function mediaConstraints(
+  kind: "audio" | "video",
+  quality: VideoQuality = "auto",
+): MediaStreamConstraints {
+  const capture = captureFor(quality)
   return {
-    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    audio: {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+      // Речь в 48 кГц моно: стерео для голоса — лишние биты. `voiceIsolation` —
+      // выделение голоса из шума, где браузер умеет (необязательное: нет — игнорируется).
+      channelCount: 1,
+      sampleRate: 48_000,
+      ...({ voiceIsolation: true } as Record<string, unknown>),
+    },
     video:
       kind === "video"
         ? {
             facingMode: "user",
-            width: { ideal: 1280, max: 1280 },
-            height: { ideal: 720, max: 720 },
-            frameRate: { ideal: 30, max: 30 },
+            width: { ideal: capture.width },
+            height: { ideal: capture.height },
+            frameRate: { ideal: capture.frameRate, max: capture.frameRate },
           }
         : false,
   }
@@ -188,10 +252,27 @@ export class CallEngine {
       this.opts.onLocalStream(stream)
 
       const ice = await this.opts.iceServers()
-      const pc = this.opts.env.createPeer({ iceServers: ice.servers })
+      const pc = this.opts.env.createPeer({
+        iceServers: ice.servers,
+        ...(this.opts.iceTransportPolicy === undefined
+          ? {}
+          : { iceTransportPolicy: this.opts.iceTransportPolicy }),
+      })
       this.pc = pc
       this.scheduleRefresh(ice.ttlSeconds)
-      stream.getTracks().forEach((track) => pc.addTrack(track, stream))
+      stream.getTracks().forEach((track) => {
+        // Камера — это движение, а не неподвижная картинка: кодек бережёт плавность,
+        // а не резкость каждого кадра.
+        if (track.kind === "video") {
+          try {
+            ;(track as MediaStreamTrack & { contentHint: string }).contentHint = "motion"
+          } catch {
+            // не поддерживается — не повод ронять звонок
+          }
+        }
+        pc.addTrack(track, stream)
+      })
+      this.preferCodecs(pc)
 
       pc.ontrack = (event) => {
         const remote = event.streams[0] ?? new MediaStream([event.track])
@@ -208,11 +289,11 @@ export class CallEngine {
   private async acquireMedia(): Promise<MediaStream | null> {
     const { env, kind } = this.opts
     try {
-      return await env.getUserMedia(mediaConstraints(kind))
+      return await env.getUserMedia(mediaConstraints(kind, this.quality))
     } catch {
       if (kind === "video") {
         try {
-          return await env.getUserMedia(mediaConstraints("audio"))
+          return await env.getUserMedia(mediaConstraints("audio", this.quality))
         } catch {
           return null
         }
@@ -405,6 +486,24 @@ export class CallEngine {
     const pc = this.pc
     if (pc === null) return
     for (const sender of pc.getSenders()) {
+      if (sender.track?.kind === "audio") {
+        // Звук важнее картинки: выше потолок и приоритет сети — при плохой связи
+        // страдает видео, а не речь.
+        try {
+          const params = sender.getParameters()
+          const encodings = params.encodings?.length ? params.encodings : [{}]
+          encodings[0] = {
+            ...encodings[0],
+            maxBitrate: AUDIO_MAX_BITRATE,
+            priority: "high",
+            networkPriority: "high",
+          } as RTCRtpEncodingParameters
+          void sender.setParameters({ ...params, encodings }).catch(() => undefined)
+        } catch {
+          // см. выше
+        }
+        continue
+      }
       if (sender.track?.kind !== "video") continue
       try {
         const params = sender.getParameters()
@@ -421,6 +520,36 @@ export class CallEngine {
   setVideoQuality(quality: VideoQuality): void {
     this.quality = quality
     this.applyQuality()
+    this.applyCapture()
+  }
+
+  /** Разрешение камеры следует за выбором: Full HD снимает 1080p, прочее — 720p. */
+  private applyCapture(): void {
+    const capture = captureFor(this.quality)
+    for (const track of this.local?.getVideoTracks() ?? []) {
+      void track
+        .applyConstraints({
+          width: { ideal: capture.width },
+          height: { ideal: capture.height },
+          frameRate: { ideal: capture.frameRate, max: capture.frameRate },
+        })
+        .catch(() => undefined)
+    }
+  }
+
+  /** H.264 вперёд там, где он аппаратный. Любой сбой — порядок браузера остаётся. */
+  private preferCodecs(pc: RTCPeerConnection): void {
+    if (!this.opts.preferH264) return
+    try {
+      const capabilities = RTCRtpReceiver.getCapabilities("video")
+      if (capabilities === null) return
+      const ordered = orderCodecs(capabilities.codecs, true)
+      for (const transceiver of pc.getTransceivers()) {
+        if (transceiver.sender.track?.kind === "video") transceiver.setCodecPreferences(ordered)
+      }
+    } catch {
+      // см. выше
+    }
   }
 
   // --- управление медиа -----------------------------------------------------------

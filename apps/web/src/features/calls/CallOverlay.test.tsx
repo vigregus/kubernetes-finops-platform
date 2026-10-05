@@ -47,7 +47,7 @@ describe("выбор качества видео на экране звонка"
     expect(audio.queryByRole("button", { name: "Video quality" })).toBeNull()
   })
 
-  it("меню открывается и предлагает Auto и три пресета, текущий отмечен", () => {
+  it("меню открывается и предлагает Auto и четыре пресета, текущий отмечен", () => {
     const { getByRole, getAllByRole, container } = renderWith(value({ videoQuality: "medium" }))
     fireEvent.click(getByRole("button", { name: "Video quality" }))
     const items = getAllByRole("menuitemradio")
@@ -56,9 +56,16 @@ describe("выбор качества видео на экране звонка"
       "Auto",
       "Low · 360p",
       "Medium · 480p",
-      "High · 720p",
+      "HD · 720p",
+      "Full HD · 1080p",
     ])
-    expect(items.map((item) => item.getAttribute("aria-checked"))).toEqual(["false", "false", "true", "false"])
+    expect(items.map((item) => item.getAttribute("aria-checked"))).toEqual([
+      "false",
+      "false",
+      "true",
+      "false",
+      "false",
+    ])
     expect(container.querySelector("[data-call-quality='medium']")).not.toBeNull()
   })
 
@@ -66,7 +73,8 @@ describe("выбор качества видео на экране звонка"
     ["Auto", "auto"],
     ["Low · 360p", "low"],
     ["Medium · 480p", "medium"],
-    ["High · 720p", "high"],
+    ["HD · 720p", "hd"],
+    ["Full HD · 1080p", "fhd"],
   ])("выбор «%s» вызывает смену качества и закрывает меню", (label, expected) => {
     const ctx = value()
     const { getByRole, queryByRole } = renderWith(ctx)

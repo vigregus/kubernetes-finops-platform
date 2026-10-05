@@ -29,7 +29,7 @@ import { isRecord } from "../messages/message-adapter"
 import { createCallChannelClient, type CentrifugeFactory } from "../realtime/realtimeClient"
 import {
   CallEngine,
-  VIDEO_QUALITIES,
+  parseVideoQuality,
   type EngineEnv,
   type VideoQuality,
   type WireSignal,
@@ -54,11 +54,18 @@ export const KEEPALIVE_MS = 30_000
 
 const QUALITY_KEY = "messenger.call.videoQuality"
 
+function forceRelay(): boolean {
+  try {
+    return window.localStorage.getItem("messenger.call.forceRelay") === "1"
+  } catch {
+    return false
+  }
+}
+
 /** Выбор человека живёт в браузере: удобство, а не состояние (может не прочитаться). */
 function loadVideoQuality(): VideoQuality {
   try {
-    const value = window.localStorage.getItem(QUALITY_KEY)
-    return (VIDEO_QUALITIES as readonly string[]).includes(value ?? "") ? (value as VideoQuality) : "auto"
+    return parseVideoQuality(window.localStorage.getItem(QUALITY_KEY))
   } catch {
     return "auto"
   }
@@ -276,6 +283,13 @@ export function CallsProvider({
       env,
       role: current.role,
       kind: current.kind,
+      // Выбранное раньше качество действует с первой секунды, а не только после смены.
+      videoQuality: videoQualityRef.current,
+      // На устройствах Apple H.264 кодируется аппаратно — «как в айфонах».
+      preferH264: /Mac OS X|iPhone|iPad|iPod/.test(navigator.userAgent),
+      // Отладочный переключатель проверки TURN: `localStorage["messenger.call.forceRelay"]="1"`
+      // заставляет соединение идти только через релей. В интерфейсе его нет намеренно.
+      ...(forceRelay() ? { iceTransportPolicy: "relay" as const } : {}),
       // Сигналы уходят **строго по одному**: `offer` и пачка кандидатов,
       // отправленные параллельно, достигают сервера в любом порядке, а номер им
       // выдаётся по порядку прихода — и `offer` получал бы номер больше, чем

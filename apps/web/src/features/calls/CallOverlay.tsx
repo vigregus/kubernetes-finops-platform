@@ -29,7 +29,8 @@ const QUALITY_LABEL: Readonly<Record<VideoQuality, string>> = {
   auto: "Auto",
   low: "Low · 360p",
   medium: "Medium · 480p",
-  high: "High · 720p",
+  hd: "HD · 720p",
+  fhd: "Full HD · 1080p",
 }
 
 /**
