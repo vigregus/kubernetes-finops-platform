@@ -591,7 +591,7 @@ async def centrifugo_publish_proxy(
 
 @app.post("/realtime/token", response_model=dict[str, object])
 async def issue_realtime_token(
-    request: Request, response: Response
+    request: Request, response: Response, scope: Literal["calls"] | None = None
 ) -> dict[str, object] | Response:
     """Короткий ticket для подключения через connect-proxy.
 
@@ -613,6 +613,7 @@ async def issue_realtime_token(
             realtime=runtime.centrifugo,
             device_id=_device_from(None, request),
             user_agent=request.headers.get("user-agent"),
+            scope=scope,
         )
     if not result.ok:
         return _auth_failure(result.rejection, response)

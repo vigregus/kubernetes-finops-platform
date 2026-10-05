@@ -59,8 +59,16 @@ async def issue_token_for_user(
     realtime: CentrifugoClient | None,
     device_id: DeviceId | None = None,
     user_agent: str | None = None,
+    scope: str | None = None,
 ) -> RealtimeTokenResult:
-    """Выдаёт короткий ticket, который проверит connect-proxy."""
+    """Выдаёт короткий ticket, который проверит connect-proxy.
+
+    `scope="calls"` — билет **только** на личный канал звонков (`call:{id}`): у
+    звонка свое соединение, потому что оно живёт дольше открытой беседы и не
+    должно переподключаться при её смене (потерянный на переподключении сигнал
+    ломает установку звонка, а истории у канала нет). Такое соединение не
+    получает сообщений бесед и набора — ему они не нужны.
+    """
     auth = await identity.authenticate(
         conn,
         token=token,
@@ -77,6 +85,13 @@ async def issue_token_for_user(
         return RealtimeTokenResult(rejection=TokenRejection.KEYS_UNAVAILABLE)
 
     user_id = str(auth.user.user_id)
+    if scope == "calls":
+        issued, expires_at = realtime.issue_token(
+            user_id,
+            str(auth.session.session_id),
+            channels=[call_domain.call_channel(user_id)] if calls_service.enabled() else [],
+        )
+        return RealtimeTokenResult(token=issued, expires_at=expires_at)
     # Каналы бесед перечисляются явно и на момент выдачи. Токен короткий
     # именно поэтому: исключённый из беседы теряет подписку при следующем
     # соединении, а не когда-нибудь. Долгоживущий токен со списком каналов
@@ -91,10 +106,6 @@ async def issue_token_for_user(
         # участнику и на момент выдачи (SEC-008). Публикует в него клиент сам,
         # но через publish-proxy (`services/typing.py`).
         channels += [typing_domain.typing_channel(uuid.UUID(str(c))) for c in conversations]
-    if calls_service.enabled():
-        # Личный канал звонков (без истории): подписка выдаётся только владельцу
-        # и только когда звонки включены на окружении.
-        channels.append(call_domain.call_channel(user_id))
     issued, expires_at = realtime.issue_token(
         user_id,
         str(auth.session.session_id),

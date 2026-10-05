@@ -194,6 +194,56 @@ def test_выключенный_набор_не_выдаёт_канал(monkeypa
     assert channels == [f"user:{USER_ID}", f"conversation:{беседа}"]
 
 
+def test_билет_звонков_даёт_только_личный_канал_звонков(monkeypatch):
+    """У звонка своё соединение и свой единственный канал (CALL-006, CALL-007)."""
+    import uuid as _uuid
+
+    async def _authenticate(*args, **kwargs):
+        return _auth()
+
+    realtime = FakeRealtime()
+    monkeypatch.setattr(identity, "authenticate", _authenticate)
+    monkeypatch.setenv("CALLS_ENABLED", "true")
+    _беседы(monkeypatch, [_uuid.uuid4()])
+
+    asyncio.run(service.issue_token_for_user(
+        None, token="token", keys=None, settings=None, realtime=realtime, scope="calls",
+    ))
+    _, _, channels = realtime.issued[0]
+    assert channels == [f"call:{USER_ID}"]
+
+
+def test_обычный_билет_канала_звонков_не_содержит(monkeypatch):
+    """Соединение беседы не подписывается на сигналы: его пересоздание их потеряло бы."""
+    async def _authenticate(*args, **kwargs):
+        return _auth()
+
+    realtime = FakeRealtime()
+    monkeypatch.setattr(identity, "authenticate", _authenticate)
+    monkeypatch.setenv("CALLS_ENABLED", "true")
+    _беседы(monkeypatch, [])
+
+    asyncio.run(service.issue_token_for_user(
+        None, token="token", keys=None, settings=None, realtime=realtime,
+    ))
+    _, _, channels = realtime.issued[0]
+    assert not any(channel.startswith("call:") for channel in channels)
+
+
+def test_билет_звонков_при_выключенных_звонках_без_каналов(monkeypatch):
+    async def _authenticate(*args, **kwargs):
+        return _auth()
+
+    realtime = FakeRealtime()
+    monkeypatch.setattr(identity, "authenticate", _authenticate)
+    monkeypatch.setenv("CALLS_ENABLED", "false")
+
+    asyncio.run(service.issue_token_for_user(
+        None, token="token", keys=None, settings=None, realtime=realtime, scope="calls",
+    ))
+    assert realtime.issued[0][2] == []
+
+
 def test_выдача_токена_при_отказе_токена(monkeypatch):
     async def _authenticate(*args, **kwargs):
         return identity.AuthResult(rejection=TokenRejection.BAD_SIGNATURE)

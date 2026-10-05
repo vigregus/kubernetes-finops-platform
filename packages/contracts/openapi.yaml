@@ -925,7 +925,17 @@ paths:
         `data.ticket` команды connect; connect-proxy проверяет живую сессию
         и сам возвращает Centrifugo настоящий user и разрешённые каналы.
         Отозванный ticket нельзя повторно использовать для подключения.
+
+        `scope=calls` — билет **только** на личный канал звонков (`call:{user_id}`).
+        У звонка своё соединение: оно живёт дольше открытой беседы и не должно
+        переподключаться при её смене, потому что потерянный при этом сигнал ломает
+        установку звонка, а истории у канала нет.
       operationId: issueRealtimeToken
+      parameters:
+        - name: scope
+          in: query
+          required: false
+          schema: { type: string, enum: [calls] }
       responses:
         '200':
           description: Токен и его срок
