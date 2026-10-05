@@ -513,6 +513,19 @@ CALL_SIGNAL = Counter(
 )
 
 
+# Живые звонки: считает подметальщик в каждом такте (он и так читает все живые строки).
+# Число — «не меньше»: подметальщик берёт пачку (100) и пропускает звонки, которые в этот
+# миг принимает человек (`SKIP LOCKED`). Для дашборда этого хватает: нужен порядок и тренд,
+# а не бухгалтерия.
+CALLS_LIVE = Gauge(
+    "messenger_calls_live", "Живые звонки на момент последнего такта подметальщика (G4)", ["service"]
+)
+
+
+def calls_live(count: int) -> None:
+    CALLS_LIVE.labels(service=SERVICE).set(count)
+
+
 def call_started(kind: str) -> None:
     CALL_STARTED.labels(service=SERVICE, kind=kind).inc()
 

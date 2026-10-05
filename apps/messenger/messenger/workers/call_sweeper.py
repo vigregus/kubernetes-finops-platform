@@ -80,6 +80,8 @@ async def run(stop: asyncio.Event) -> None:
                 continue
 
         metrics.dependency_up("postgres", up=True)
+        # Что осталось живым после этого такта: звонки, которым срок ещё не вышел.
+        metrics.calls_live(result.examined - result.ended)
         # Запись на каждый такт, а не только когда что-то завершили: молчащий
         # подметальщик и подметальщик, которому нечего завершать, различимы
         # только по этому.

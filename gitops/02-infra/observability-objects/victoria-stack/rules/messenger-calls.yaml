@@ -1,0 +1,90 @@
+# Оповещения по звонкам (ADR 0007, CALL-008). Те же метрики, что на 09 · Calls.
+#
+# Здесь только то, что требует человека. «Звонок завершился отказом собеседника»
+# или «не ответил» — не отказ системы и сюда не попадает: оповещение считает
+# **принятые** звонки, которые не состоялись, и сам путь соединения.
+#
+# Пороги осознанно мягкие, а порог по числу звонков — защита от шума: пока звонков
+# единицы, одна неудача даёт «100% отказов», и оповещение на такой доле звонило бы
+# по каждому чиху. Поэтому каждое условие требует минимума звонков за окно.
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMRule
+metadata:
+  name: messenger-calls
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: victoria-metrics-k8s-stack
+spec:
+  groups:
+    - name: messenger-calls
+      interval: 30s
+      rules:
+        - alert: CallsEstablishFailureHigh
+          expr: |
+            (
+              sum(increase(messenger_call_ended_total{namespace="messenger",reason="failed"}[15m]))
+                /
+              (sum(increase(messenger_call_connection_total{namespace="messenger"}[15m]))
+                + sum(increase(messenger_call_ended_total{namespace="messenger",reason="failed"}[15m])))
+            ) > 0.3
+            and
+            (sum(increase(messenger_call_connection_total{namespace="messenger"}[15m]))
+              + sum(increase(messenger_call_ended_total{namespace="messenger",reason="failed"}[15m]))) >= 5
+          for: 10m
+          labels:
+            severity: warning
+            finops.internal/component: messenger
+          annotations:
+            summary: 'Звонки: {{ $value | humanizePercentage }} принятых не состоялись (>30% за 15 мин, ≥5 звонков)'
+            description: 'Принятый звонок не дошёл до «медиа пошло» или оборвался насовсем. Сначала смотрят путь соединения и coturn (09 · Calls): релей перегружен или недоступен, UDP закрыт, сигнализация теряет сигналы (messenger_call_signal_total{result=rate_limited|invalid}).'
+
+        - alert: CallsRelayShareHigh
+          expr: |
+            (
+              sum(increase(messenger_call_connection_total{namespace="messenger",type="relay"}[30m]))
+                /
+              sum(increase(messenger_call_connection_total{namespace="messenger"}[30m]))
+            ) > 0.5
+            and sum(increase(messenger_call_connection_total{namespace="messenger"}[30m])) >= 5
+          for: 15m
+          labels:
+            severity: info
+            finops.internal/component: messenger
+          annotations:
+            summary: 'Звонки: через релей идёт {{ $value | humanizePercentage }} (допущение оценки — 15%)'
+            description: 'Доля релея TURN выше расчёта стоимости (docs/messenger/16-calls-estimate.md): релей — главная статья расходов. Возможные причины: сети без UDP у части людей, сломанный прямой путь (STUN недоступен), смена поведения браузера.'
+
+        - alert: CallSetupSlowP95
+          expr: |
+            histogram_quantile(0.95, sum by (le) (rate(messenger_call_setup_seconds_bucket{namespace="messenger"}[15m]))) > 10
+            and sum(increase(messenger_call_connection_total{namespace="messenger"}[15m])) >= 5
+          for: 15m
+          labels:
+            severity: warning
+            finops.internal/component: messenger
+          annotations:
+            summary: 'Звонки: p95 установки {{ $value | printf "%.1f" }} с (>10 с за 15 мин)'
+            description: 'От «принял» до «медиа пошло» дольше десяти секунд у каждого двадцатого звонка. Смотрят сбор кандидатов ICE, доступность coturn и задержку API на /calls/{id}/signals.'
+
+        - alert: CallSweeperStopped
+          expr: |
+            min(messenger_dependency_up{namespace="messenger",service="call-sweeper",dependency="postgres"}) == 0
+            or absent(messenger_dependency_up{namespace="messenger",service="call-sweeper",dependency="postgres"})
+          for: 10m
+          labels:
+            severity: warning
+            finops.internal/component: messenger
+          annotations:
+            summary: 'call-sweeper не работает: итоги просроченных звонков запаздывают'
+            description: 'Корректность звонка от подметальщика не зависит (просроченный звонок завершается при любом действии над ним), но без него «пропущенный» не появляется в ленте, пока человек не коснётся звонка, а линия остаётся занятой.'
+
+        - alert: TurnAllocationsNearQuota
+          expr: |
+            sum(turn_total_allocations) > 80
+          for: 5m
+          labels:
+            severity: warning
+            finops.internal/component: messenger
+          annotations:
+            summary: 'coturn: {{ $value }} выделений из 100 (квота сервера)'
+            description: 'Выделения релея близки к `--total-quota`; свободных портов диапазона — всего 20. Новые релейные звонки начнут отвергаться. Проверить, не копит ли выделения один человек (квота на пользователя — 4), и расширить диапазон портов.'

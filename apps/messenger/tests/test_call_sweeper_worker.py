@@ -86,6 +86,14 @@ def test_такт_пишет_запись_даже_когда_завершать
     assert stand.pool.closed
 
 
+def test_число_живых_звонков_идёт_в_метрику(monkeypatch):
+    seen: list[int] = []
+    Stand(monkeypatch, result=service.SweepResult(examined=5, ended=2))
+    monkeypatch.setattr(worker.metrics, "calls_live", seen.append)
+    asyncio.run(worker.run(asyncio.Event()))
+    assert seen == [3]
+
+
 def test_число_завершённых_попадает_в_запись(monkeypatch, caplog_info):
     Stand(monkeypatch, result=service.SweepResult(examined=4, ended=2)).run()
     record = records(caplog_info, "call_sweep")[-1]
