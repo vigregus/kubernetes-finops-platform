@@ -2,7 +2,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite"
 import { NotificationPrompt } from "./NotificationPrompt"
 
 const meta: Meta<typeof NotificationPrompt> = {
-  title: "Notifications/NotificationPrompt",
+  title: "Molecules/NotificationPrompt",
   component: NotificationPrompt,
   parameters: {
     docs: {

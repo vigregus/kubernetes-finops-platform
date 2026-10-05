@@ -2,7 +2,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite"
 import { SessionRow } from "./SessionRow"
 
 const meta: Meta<typeof SessionRow> = {
-  title: "Auth/SessionRow",
+  title: "Molecules/SessionRow",
   component: SessionRow,
   args: { onLogOut: () => {} },
   decorators: [(Story) => <div className="w-96 p-4"><Story /></div>],

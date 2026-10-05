@@ -3,7 +3,7 @@ import { SessionsPanel } from "./SessionsPanel"
 import { deviceSessions } from "../../../shared/lib/mock-data"
 
 const meta: Meta<typeof SessionsPanel> = {
-  title: "Auth/SessionsPanel",
+  title: "Organisms/SessionsPanel",
   component: SessionsPanel,
   args: { sessions: deviceSessions, onLogOut: () => {}, onLogOutEverywhere: () => {} },
 }

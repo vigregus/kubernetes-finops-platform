@@ -2,7 +2,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite"
 import { EmailVerificationBanner } from "./EmailVerificationBanner"
 
 const meta: Meta<typeof EmailVerificationBanner> = {
-  title: "Auth/EmailVerificationBanner",
+  title: "Molecules/EmailVerificationBanner",
   component: EmailVerificationBanner,
   parameters: {
     docs: {

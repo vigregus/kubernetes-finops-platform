@@ -33,16 +33,17 @@ export function ConversationSidebar({
   onNewConversation,
 }: ConversationSidebarProps) {
   return (
-    <aside className="flex w-[360px] flex-shrink-0 flex-col justify-between bg-surface-container-low shadow-[2px_0_16px_rgba(41,37,36,0.03)]">
+    <aside className="relative flex w-full flex-shrink-0 flex-col justify-between bg-surface-container-low shadow-[2px_0_16px_rgba(41,37,36,0.03)] md:w-[360px]">
       <div className="flex min-h-0 flex-1 flex-col">
-        <div className="flex h-20 items-center justify-between px-6">
+        <div className="pt-safe flex-shrink-0">
+        <div className="flex h-14 items-center justify-between px-3 md:h-20 md:px-6">
           <div className="flex items-center gap-3">
             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-accent-terracotta text-on-primary shadow-sm">
               <Icon name="forum" size={22} />
             </div>
             <div>
               <span className="text-lg font-semibold tracking-tight text-on-surface">Vector</span>
-              <p className="text-xs text-text-warm-muted">Messages &amp; People</p>
+              <p className="hidden text-xs text-text-warm-muted md:block">Messages &amp; People</p>
             </div>
           </div>
           {onNewConversation && (
@@ -51,7 +52,7 @@ export function ConversationSidebar({
               aria-label="New conversation"
               title="Start new chat"
               onClick={onNewConversation}
-              className="group flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl bg-surface-cream text-on-surface shadow-[0_2px_6px_rgba(41,37,36,0.04)] transition-all hover:bg-surface-warm-subtle active:scale-95"
+              className="group hidden h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl md:flex bg-surface-cream text-on-surface shadow-[0_2px_6px_rgba(41,37,36,0.04)] transition-all hover:bg-surface-warm-subtle active:scale-95"
             >
               <Icon
                 name="edit_square"
@@ -60,6 +61,7 @@ export function ConversationSidebar({
               />
             </button>
           )}
+        </div>
         </div>
 
         {/*
@@ -71,7 +73,7 @@ export function ConversationSidebar({
           поле вернётся тем срезом, который принесёт пагинацию.
         */}
 
-        <div className="flex items-center justify-between px-6 py-1">
+        <div className="flex items-center justify-between px-4 py-1 md:px-6">
           <span className="text-xs font-semibold uppercase tracking-wider text-text-warm-muted">Chats</span>
           {/*
             Число подписано как число **загруженных**: список пагинирован, и
@@ -84,7 +86,7 @@ export function ConversationSidebar({
           </span>
         </div>
 
-        <nav className="mt-1 flex-1 space-y-1 overflow-y-auto px-2">
+        <nav className="mt-1 flex-1 space-y-1.5 overflow-y-auto px-3 pb-24 md:space-y-1 md:px-2 md:pb-0">
           {conversations.map((conversation) => (
             <ConversationListItem
               key={conversation.id}
@@ -96,9 +98,25 @@ export function ConversationSidebar({
         </nav>
       </div>
 
-      <div className="bg-surface-container-low/95 p-3">
+      <div className="pb-safe bg-surface-container-low/95 p-3">
         <CurrentUserFooter user={currentUser} />
       </div>
+
+      {/*
+        Только узкий экран: на широком та же кнопка стоит в шапке. Плавающая, как в
+        шаблоне, и над подвалом с профилем; вырез жестовой полосы учтён.
+      */}
+      {onNewConversation && (
+        <button
+          type="button"
+          aria-label="Start new conversation"
+          onClick={onNewConversation}
+          className="group absolute bottom-24 right-4 z-30 flex h-14 items-center gap-2 rounded-full bg-accent-terracotta px-4 text-sm font-bold tracking-wide text-on-primary shadow-[0_8px_20px_rgba(234,88,12,0.35)] transition-all hover:bg-status-error active:scale-95 md:hidden"
+        >
+          <Icon name="edit_square" size={24} />
+          New Chat
+        </button>
+      )}
     </aside>
   )
 }

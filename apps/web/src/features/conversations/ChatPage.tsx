@@ -51,6 +51,7 @@ import { TypingIndicator } from "../messages/components/TypingIndicator"
 import { useVoiceRecorder } from "../attachments/useVoiceRecorder"
 import { browserVoiceDeps } from "../attachments/voiceRecorder"
 import { MessengerLayout } from "../../shared/ui/MessengerLayout"
+import { useIsMobile } from "../../shared/lib/useIsMobile"
 import { useCalls } from "../calls/CallsProvider"
 import type {
   ChatMessage,
@@ -256,9 +257,58 @@ export function ChatPage({
     return conversations.find((item) => item.id === wanted)?.id ?? conversations[0]?.id ?? null
   })
 
+  /**
+   * Узкий экран: список бесед и беседа занимают его по очереди. Панель беседы там
+   * **не монтируется**, пока её не открыли (`useIsMobile`): первая беседа списка
+   * иначе подняла бы соединение и отметила прочитанным то, что человек не открывал.
+   *
+   * Открытая беседа — шаг истории браузера (`pushState`): системная кнопка «назад»
+   * и жест возвращают к списку, а не уводят из приложения. Открытие по адресу
+   * (`?conversation=`, нажатие на уведомление) шага не добавляет — «назад» там
+   * просто закрывает беседу (`closeChat`).
+   */
+  const isMobile = useIsMobile()
+  const [chatOpen, setChatOpen] = useState(() => {
+    const wanted = conversationFromUrl(window.location.search)
+    return wanted !== null && conversations.some((item) => item.id === wanted)
+  })
+  const isMobileRef = useRef(isMobile)
+  useEffect(() => {
+    isMobileRef.current = isMobile
+  }, [isMobile])
+
+  const openChat = useCallback((id: string) => {
+    setActiveId(id)
+    setChatOpen(true)
+    if (isMobileRef.current) window.history.pushState({ mobileChat: true }, "")
+  }, [])
+
+  const closeChat = useCallback(() => {
+    if ((window.history.state as { mobileChat?: boolean } | null)?.mobileChat === true) {
+      window.history.back()
+    } else {
+      setChatOpen(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    const onPopState = (event: PopStateEvent) => {
+      if ((event.state as { mobileChat?: boolean } | null)?.mobileChat !== true) setChatOpen(false)
+    }
+    window.addEventListener("popstate", onPopState)
+    return () => window.removeEventListener("popstate", onPopState)
+  }, [])
+
   // Нажатие на уведомление при уже открытой вкладке: Service Worker шлёт
   // сообщение, и открывается нужная беседа.
-  useEffect(() => listenForOpenConversation(setActiveId), [])
+  useEffect(
+    () =>
+      listenForOpenConversation((id) => {
+        setActiveId(id)
+        setChatOpen(true)
+      }),
+    [],
+  )
 
   // Web Push (G4): баннер «включить уведомления». Среда браузера — одна на
   // страницу; без подписки на сервере (`pushSubscriptions`) баннера нет.
@@ -400,10 +450,10 @@ export function ChatPage({
       setBase((current) =>
         current.some((item) => item.id === conversation.id) ? current : [conversation, ...current],
       )
-      setActiveId(conversation.id)
+      openChat(conversation.id)
       setCreatingConversation(false)
     },
-    [currentUserId],
+    [currentUserId, openChat],
   )
 
   // Слияние — на каждом рендере списка, а не при приходе события: иначе
@@ -515,6 +565,7 @@ export function ChatPage({
   return (
     <>
       <MessengerLayout
+        screen={!isMobile ? "both" : chatOpen && activeConversation !== null ? "chat" : "list"}
         // `=== false`, а не `!currentUser.emailVerified`: `undefined` —
         // «сервер об этом не сообщал», а не «не подтверждён» (тот же довод,
         // что у `peerReadState`/`lastSeenAt` в `shared/lib/types.ts`), и
@@ -532,9 +583,10 @@ export function ChatPage({
         sidebar={
           <ConversationSidebar
             conversations={withTyping}
-            activeConversationId={activeConversation?.id ?? null}
+            // Узкий экран: беседа открывается на весь экран, подсвечивать в списке нечего.
+            activeConversationId={isMobile ? null : (activeConversation?.id ?? null)}
             currentUser={currentUser}
-            onSelectConversation={setActiveId}
+            onSelectConversation={openChat}
             // Проп передан — кнопка новой беседы **есть** (D10). До этого среза
             // он оставался непереданным, и кнопки не существовало вовсе: не
             // «спрятана», а не нарисована.
@@ -563,6 +615,7 @@ export function ChatPage({
            */
           <ConversationPane
             key={activeConversation.id}
+            onBack={isMobile ? closeChat : undefined}
             conversation={activeConversation}
             currentUserId={currentUserId}
             history={history}
@@ -616,6 +669,8 @@ export function ChatPage({
 }
 
 interface ConversationPaneProps {
+  /** Узкий экран: вернуться к списку бесед. На широком не передаётся. */
+  onBack?: () => void
   conversation: Conversation
   currentUserId: string
   history: HistorySource
@@ -668,6 +723,7 @@ interface ConversationPaneProps {
  * сообщения по номерам собеседника.
  */
 function ConversationPane({
+  onBack,
   conversation,
   currentUserId,
   history,
@@ -1114,6 +1170,7 @@ function ConversationPane({
     >
       <ChatHeader
         conversation={typingNames.length > 0 ? { ...conversation, typingNames: [...typingNames] } : conversation}
+        {...(onBack === undefined ? {} : { onBack })}
         {...callHandlers}
       />
 

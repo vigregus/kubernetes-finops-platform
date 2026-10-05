@@ -2,7 +2,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite"
 import { DeletedMessageNotice } from "./DeletedMessageNotice"
 
 const meta: Meta<typeof DeletedMessageNotice> = {
-  title: "Messages/DeletedMessageNotice",
+  title: "Molecules/DeletedMessageNotice",
   component: DeletedMessageNotice,
   parameters: { docs: { description: { component: "09-data-lifecycle.md: deletion is a tombstone (deleted_at set, payload nulled), not a physical delete — ordering and unread counts stay consistent." } } },
   args: { timestamp: "10:38 AM" },

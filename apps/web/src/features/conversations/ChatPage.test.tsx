@@ -1708,3 +1708,93 @@ describe("звук нового сообщения", () => {
     }
   });
 });
+
+
+describe("узкий экран: список и беседа по очереди", () => {
+  const originalMatchMedia = window.matchMedia;
+
+  /** Телефон: `matchMedia` отвечает «узкий экран». Среда по умолчанию — не телефон. */
+  function givenPhone() {
+    window.matchMedia = ((query: string) => ({
+      matches: true,
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+      onchange: null,
+    })) as unknown as typeof window.matchMedia;
+  }
+
+  afterEach(() => {
+    window.matchMedia = originalMatchMedia;
+    window.history.replaceState(null, "", "/");
+  });
+
+  it("сначала список: панель беседы не смонтирована, соединение и история не подняты", async () => {
+    givenPhone();
+    const { container, calls } = setup({
+      conversations: [ANNA],
+      tail: () => Promise.resolve(tailOf([messageOf(1)])),
+    });
+
+    expect(container.querySelector("[data-screen]")?.getAttribute("data-screen")).toBe("list");
+    expect(container.querySelector("[data-conversation-id]")).toBeTruthy();
+    expect(container.querySelector("[data-composer-input]")).toBeNull();
+    // Первая беседа списка не открыта человеком: её история не грузится и не читается.
+    await Promise.resolve();
+    expect(calls.tails).toEqual([]);
+    expect(calls.receipts).toEqual([]);
+  });
+
+  it("нажатие открывает беседу, «назад» возвращает к списку", async () => {
+    givenPhone();
+    const { container } = setup({
+      conversations: [ANNA],
+      tail: () => Promise.resolve(tailOf([messageOf(1)])),
+    });
+
+    fireEvent.click(container.querySelector("[data-conversation-id]")!);
+    await waitFor(() => expect(screen.getByText("message 1")).toBeTruthy());
+    expect(container.querySelector("[data-screen]")?.getAttribute("data-screen")).toBe("chat");
+    expect(container.querySelector("[data-conversation-id]")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Back to chats" }));
+    await waitFor(() =>
+      expect(container.querySelector("[data-screen]")?.getAttribute("data-screen")).toBe("list"),
+    );
+    expect(container.querySelector("[data-composer-input]")).toBeNull();
+  });
+
+  it("системная кнопка «назад» (popstate) тоже возвращает к списку", async () => {
+    givenPhone();
+    const { container } = setup({
+      conversations: [ANNA],
+      tail: () => Promise.resolve(tailOf([messageOf(1)])),
+    });
+
+    fireEvent.click(container.querySelector("[data-conversation-id]")!);
+    await waitFor(() => expect(screen.getByText("message 1")).toBeTruthy());
+
+    act(() => {
+      window.history.replaceState(null, "", "/");
+      window.dispatchEvent(new PopStateEvent("popstate", { state: null }));
+    });
+    await waitFor(() =>
+      expect(container.querySelector("[data-screen]")?.getAttribute("data-screen")).toBe("list"),
+    );
+  });
+
+  it("широкий экран не меняется: обе колонки, стрелки «назад» нет", async () => {
+    const { container } = setup({
+      conversations: [ANNA],
+      tail: () => Promise.resolve(tailOf([messageOf(1)])),
+    });
+
+    await waitFor(() => expect(screen.getByText("message 1")).toBeTruthy());
+    expect(container.querySelector("[data-screen]")?.getAttribute("data-screen")).toBe("both");
+    expect(container.querySelector("[data-conversation-id]")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Back to chats" })).toBeNull();
+  });
+});

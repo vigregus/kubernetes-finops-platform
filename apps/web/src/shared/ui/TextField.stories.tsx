@@ -2,7 +2,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite"
 import { TextField } from "./TextField"
 
 const meta: Meta<typeof TextField> = {
-  title: "Shared UI/TextField",
+  title: "Atoms/TextField",
   component: TextField,
   args: { placeholder: "Type something..." },
   decorators: [(Story) => <div className="w-72 rounded-xl bg-surface-cream p-3"><Story /></div>],

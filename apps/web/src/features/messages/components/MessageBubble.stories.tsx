@@ -2,7 +2,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite"
 import { MessageBubble } from "./MessageBubble"
 
 const meta: Meta<typeof MessageBubble> = {
-  title: "Messages/MessageBubble",
+  title: "Molecules/MessageBubble",
   component: MessageBubble,
   parameters: { docs: { description: { component: "States per 07-engineering-standard.md Часть 6: sending -> sent -> delivered -> read, or retrying (offline outbox or a retried attempt) / failed." } } },
   decorators: [(Story) => <div className="max-w-md p-6"><Story /></div>],

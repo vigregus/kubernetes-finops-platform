@@ -5,6 +5,11 @@ import { IconButton } from "../../../shared/ui/IconButton"
 interface ChatHeaderProps {
   conversation: Conversation
   /**
+   * Назад к списку бесед — на узком экране, где список и беседа занимают экран по
+   * очереди. На широком не передаётся: список и так рядом.
+   */
+  onBack?: () => void
+  /**
    * Обработчики четырёх элементов шапки. Необязателен каждый по отдельности, и
    * это не удобство, а правило: элемент без обработчика не рендерится вовсе.
    */
@@ -52,7 +57,7 @@ function subtitle(conversation: Conversation) {
   return undefined
 }
 
-export function ChatHeader({ conversation, onSearch, onOpenDetails, onVoiceCall, onVideoCall }: ChatHeaderProps) {
+export function ChatHeader({ conversation, onBack, onSearch, onOpenDetails, onVoiceCall, onVideoCall }: ChatHeaderProps) {
   const subtitleValue = subtitle(conversation)
   const blocked = conversation.blockedByMe || conversation.blockedMe
   const text = blocked ? "Unavailable" : subtitleValue?.text
@@ -65,9 +70,10 @@ export function ChatHeader({ conversation, onSearch, onOpenDetails, onVoiceCall,
     // (атрибута нет) — то самое различие, ради которого ветвей три, а не две.
     <header
       data-presence={blocked ? undefined : conversation.presence}
-      className="z-20 flex h-20 flex-shrink-0 items-center justify-between bg-surface/90 px-6 shadow-[0_1px_8px_rgba(41,37,36,0.04)] backdrop-blur-md"
+      className="pt-safe z-20 flex min-h-16 flex-shrink-0 items-center justify-between bg-surface/90 px-3 shadow-[0_1px_8px_rgba(41,37,36,0.04)] backdrop-blur-md md:h-20 md:px-6"
     >
-      <div className="flex min-w-0 flex-1 items-center gap-3">
+      <div className="flex min-w-0 flex-1 items-center gap-2 md:gap-3">
+        {onBack && <IconButton icon="arrow_back_ios_new" label="Back to chats" onClick={onBack} />}
         <Avatar name={conversation.name} src={conversation.avatarUrl} presence={blocked ? undefined : conversation.presence} />
         <div className="min-w-0 flex-1">
           <h1 className="truncate text-lg font-semibold tracking-tight text-on-surface">{conversation.name}</h1>

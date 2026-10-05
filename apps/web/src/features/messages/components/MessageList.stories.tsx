@@ -21,7 +21,7 @@ const WITH_MESSAGES = messagesByConversation[conversations[0].id] ?? []
 const HEAD = WITH_MESSAGES.at(-1)?.seq ?? 0
 
 const meta: Meta<typeof MessageList> = {
-  title: "Messages/MessageList",
+  title: "Organisms/MessageList",
   component: MessageList,
   parameters: { layout: "fullscreen" },
 }

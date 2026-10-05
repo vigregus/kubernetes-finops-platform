@@ -49,6 +49,9 @@ export function ConversationListItem({ conversation, active, onSelect }: Convers
         active
           ? "bg-surface-cream text-on-surface shadow-[0_2px_8px_rgba(41,37,36,0.06)]"
           : "text-on-surface-variant hover:bg-surface-cream/70 hover:text-on-surface",
+        // Узкий экран: белая карточка на фоне, как в шаблоне. Подсветка «активной»
+        // там не нужна: беседа открывается на весь экран, а не рядом со списком.
+        "max-md:bg-surface-container-lowest max-md:shadow-[0_1px_4px_rgba(41,37,36,0.03)] max-md:active:scale-[0.99]",
       )}
     >
       {active && <span className="absolute bottom-2 left-0 top-2 w-1.5 rounded-r-full bg-accent-terracotta" />}

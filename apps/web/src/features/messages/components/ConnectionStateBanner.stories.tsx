@@ -2,7 +2,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite"
 import { ConnectionStateBanner } from "./ConnectionStateBanner"
 
 const meta: Meta<typeof ConnectionStateBanner> = {
-  title: "Messages/ConnectionStateBanner",
+  title: "Molecules/ConnectionStateBanner",
   component: ConnectionStateBanner,
   parameters: {
     docs: {

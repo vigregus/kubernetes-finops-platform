@@ -2,7 +2,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite"
 import { SettingsSessionsPage } from "./SettingsSessionsPage"
 
 const meta: Meta<typeof SettingsSessionsPage> = {
-  title: "Auth/SettingsSessionsPage",
+  title: "Pages/SettingsSessionsPage",
   component: SettingsSessionsPage,
   parameters: { layout: "fullscreen" },
 }
