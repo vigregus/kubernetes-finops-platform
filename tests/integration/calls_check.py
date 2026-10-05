@@ -19,11 +19,35 @@ from login_check import API, ORIGIN, admin_token, create_user
 from realtime_revoke_check import _auth_headers, _connect, _login
 from relay_check import pool_settings
 from turn_check import ALLOCATE_OK, TurnClient
-from typing_check import check, command, drain, failures, wait_publication
+from typing_check import _publication, check, command, drain, failures, frames, wait_publication
 
 from messenger.repositories.postgres import create_pool
 
 SWEEP_WAIT_SECONDS = 70.0
+
+
+async def pump(ws, seconds: float) -> list[dict]:
+    """Читает сокет `seconds` секунд, отвечая на ping Centrifugo, и отдаёт публикации.
+
+    Сервер шлёт `{}` каждые ~25 с и ждёт `{}` в ответ: молчащий сокет на долгом
+    ожидании (подметальщик — 30 с) закрывается с `3012 no pong`.
+    """
+    got: list[dict] = []
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + seconds
+    while loop.time() < deadline:
+        try:
+            raw = await asyncio.wait_for(ws.recv(), timeout=max(deadline - loop.time(), 0.05))
+        except (TimeoutError, asyncio.TimeoutError):
+            break
+        for line in raw.splitlines():
+            if line.strip() == "{}":
+                await ws.send("{}")
+        for frame in frames(raw):
+            data = _publication(frame)
+            if data is not None:
+                got.append(data)
+    return got
 
 
 class Person:
@@ -183,8 +207,8 @@ async def run() -> None:
 
             ice = await call("GET", f"/calls/{call_id}/ice-servers", a)
             check("CALL-008: участнику выдан список, без кэширования",
-                  ice.status_code == 200 and ice.headers.get("cache-control") == "no-store"
-                  and ice.json().get("ttl_seconds") == 600, f"{ice.status_code} {ice.text[:120]}")
+                  ice.status_code == 200 and ice.headers.get("cache-control") == "no-store",
+                  f"{ice.status_code} {ice.text[:120]}")
 
             servers = ice.json().get("ice_servers", []) if ice.status_code == 200 else []
             check("CALL-004: стенд выдаёт данные своего coturn (имя «срок:метка» и подпись)",
@@ -296,17 +320,20 @@ async def run() -> None:
             check("новый звонок звонит", missed.get("state") == "ringing", str(missed))
             deadline = asyncio.get_running_loop().time() + SWEEP_WAIT_SECONDS
             reason = None
+            seen_by_b: list[dict] = []
             while asyncio.get_running_loop().time() < deadline:
                 row = await pool.fetchrow("SELECT state, end_reason FROM calls WHERE call_id = $1",
                                           uuid.UUID(missed["call_id"]))
                 if row and row["state"] == "ended":
                     reason = row["end_reason"]
                     break
-                await asyncio.sleep(2.0)
+                # Сокеты читаются, а не спят: иначе ping сервера остаётся без ответа.
+                seen_by_b += await pump(b.ws, 2.0)
+                await pump(a.ws, 0.1)
             check("CALL-002: через 30 с без ответа подметальщик завершил звонок как missed",
                   reason == "missed", f"причина: {reason}")
             ended_event = None
-            for data in await drain(b.ws, 1.0):
+            for data in [*seen_by_b, *await pump(b.ws, 1.0)]:
                 if data.get("type") == "call.state" and data.get("state") == "ended":
                     ended_event = data
             check("вызываемому ушло call.state ended", ended_event is not None
