@@ -7,10 +7,13 @@
 системным сообщением **в той же транзакции**, что завершает его: «звонок
 завершён, а в ленте пусто» — состояние, из которого нет выхода (`CALL-009`).
 
-События в Centrifugo уходят **после** фиксации и по принципу «лучшее из
-возможного»: потерянное событие не портит состояние — клиент узнаёт его через
-`GET /calls/current` и сигналом `keepalive` — а откат транзакции из-за
-недоступного Centrifugo сделал бы звонки зависимыми от второго хранилища.
+События в Centrifugo уходят **строго после** фиксации: публикация внутри
+транзакции показывала бы получателю состояние, которого другое соединение с базой
+ещё не видит (он нажимает «принять», получает `404` и закрывает звонок, а через
+миллисекунды звонок «появляется»). Состояние — истина в Postgres; потерянное
+событие клиент узнаёт через `GET /calls/current`, а потерянный сигнал — через
+`GET /calls/{id}/signals?after=` (миграция `0017`): `publish() == true` значит
+«принято Centrifugo», а не «получил браузер».
 """
 from __future__ import annotations
 
@@ -83,18 +86,28 @@ async def _publish(realtime: Publisher | None, events: list[Event]) -> None:
 
 
 async def _publish_required(realtime: Publisher | None, events: list[Event]) -> None:
-    """Событие **обязано** дойти: иначе исключение, и транзакция откатывается.
+    """Событие **обязано** быть принято Centrifugo: иначе исключение.
 
-    Канал звонков без истории: потерянный `offer` или `answer` не вернуть, и
-    «успех» с потерянным сигналом оставляет звонящего уверенным, что собеседник его
-    получил. Недоставленное входящее — звонок, которого собеседник не увидит.
-    Откат уносит и выданный номер сигнала, поэтому повтор клиента получает тот же.
+    Вызывается **после** фиксации. Канал звонков без истории, и «успех» при
+    недоставленном событии оставляет звонящего уверенным, что собеседник его
+    получил. Что делать с отказом, решает вызывающий: сигнал остаётся в базе, и
+    повтор клиента с тем же `signal_id` публикует тот же номер; недоставленное
+    входящее закрывается (`_abort_undelivered`).
     """
     if realtime is None:
         raise RealtimeUnavailable
     for channel, data in events:
         if not await realtime.publish(channel, data):
             raise RealtimeUnavailable
+
+
+async def _try_publish(realtime: Publisher | None, events: list[Event]) -> bool:
+    """`True`, если все события приняты Centrifugo; без исключения."""
+    try:
+        await _publish_required(realtime, events)
+    except RealtimeUnavailable:
+        return False
+    return True
 
 
 def _state_events(call: Call, *, accepted_elsewhere: bool = False) -> list[Event]:
@@ -153,14 +166,6 @@ async def _transition(
 # --- начать звонок ----------------------------------------------------------------
 
 
-class _Rollback(Exception):
-    """Откат транзакции с готовым отказом: исключение — единственный способ откатить."""
-
-    def __init__(self, reason: Reason) -> None:
-        super().__init__(reason.value)
-        self.reason = reason
-
-
 async def start_call(
     conn: asyncpg.Connection,
     *,
@@ -171,16 +176,13 @@ async def start_call(
 ) -> CallResult:
     if not enabled():
         return CallResult(rejection=Reason.CALLS_UNAVAILABLE)
-    try:
-        return await _start_call(
-            conn,
-            realtime=realtime,
-            caller_id=caller_id,
-            conversation_id=conversation_id,
-            kind=kind,
-        )
-    except _Rollback as rollback:
-        return CallResult(rejection=rollback.reason)
+    return await _start_call(
+        conn,
+        realtime=realtime,
+        caller_id=caller_id,
+        conversation_id=conversation_id,
+        kind=kind,
+    )
 
 
 async def _start_call(
@@ -238,17 +240,34 @@ async def _start_call(
         else:
             outcome = CallResult(rejection=Reason.ALREADY_IN_CALL)
 
-        # Входящий звонок **обязан** дойти до вызываемого: у канала нет истории, и
-        # звонок, которого собеседник не увидит, — это 30 секунд гудков в пустоту.
-        # Публикация идёт до фиксации: не дошло — звонок не создаётся (откат).
-        if outcome.call is not None and outcome.events:
-            try:
-                await _publish_required(realtime, outcome.events)
-            except RealtimeUnavailable:
-                raise _Rollback(Reason.REALTIME_UNAVAILABLE) from None
-
     await _publish(realtime, expiry_events)
+    # Входящий звонок **обязан** дойти до вызываемого: у канала нет истории, и
+    # звонок, которого собеседник не увидит, — это 30 секунд гудков в пустоту.
+    # Публикация после фиксации (иначе вызываемый примет звонок, которого другое
+    # соединение с базой ещё не видит). Не принято Centrifugo — звонок закрывается
+    # `failed` и линия освобождается: откатить уже зафиксированное нельзя.
+    if outcome.call is not None and outcome.events:
+        try:
+            await _publish_required(realtime, outcome.events)
+        except RealtimeUnavailable:
+            await _abort_undelivered(conn, realtime, outcome.call.call_id)
+            return CallResult(rejection=Reason.REALTIME_UNAVAILABLE)
     return outcome
+
+
+async def _abort_undelivered(
+    conn: asyncpg.Connection, realtime: Publisher | None, call_id: uuid.UUID
+) -> None:
+    """Входящий не дошёл: звонок, о котором вызываемый не узнает, закрывается."""
+    events: list[Event] = []
+    async with conn.transaction():
+        call = await repo.fetch(conn, call_id, lock=True)
+        if call is not None and not call.ended:
+            updated = await _transition(
+                conn, call, domain.Change(state=CallState.ENDED, reason=EndReason.FAILED)
+            )
+            events.extend(_state_events(updated))
+    await _publish(realtime, events)
 
 
 async def _expire_live(conn: asyncpg.Connection, user_id: UserId, events: list[Event]) -> None:
@@ -407,14 +426,12 @@ async def accept(
     call_id: uuid.UUID,
     tab: str | None = None,
 ) -> CallResult:
-    try:
-        return await _accept(conn, realtime, user_id, call_id, tab)
-    except _Rollback as rollback:
-        return CallResult(rejection=rollback.reason)
+    return await _accept(conn, realtime, user_id, call_id, tab)
 
 
 async def _accept(conn, realtime, user_id, call_id, tab) -> CallResult:
     events: list[Event] = []
+    to_caller: Event | None = None
     async with conn.transaction():
         call, expired = await _open(conn, call_id, user_id, events)
         if call is None:
@@ -430,18 +447,18 @@ async def _accept(conn, realtime, user_id, call_id, tab) -> CallResult:
                 outcome = CallResult(call=call)
             else:
                 updated = await _transition(conn, call, change, accepted_by=tab)
-                # Звонящему — обычное «принято»: по нему он начинает `offer`, и потерянное
-                # событие оставило бы звонок стоять. Поэтому оно **обязательное**: не
-                # дошло — принятие откатывается, и вызываемый может нажать ещё раз.
-                to_caller = (domain.call_channel(updated.caller_id), domain.state_event(updated))
-                try:
-                    await _publish_required(realtime, [to_caller])
-                except RealtimeUnavailable:
-                    raise _Rollback(Reason.REALTIME_UNAVAILABLE) from None
                 # Остальным вкладкам вызываемого — «принято в другой»: лучшее из возможного.
                 events.extend(_state_events(updated, accepted_elsewhere=True)[1:])
                 outcome = CallResult(call=updated)
+                to_caller = (domain.call_channel(updated.caller_id), domain.state_event(updated))
     await _publish(realtime, events)
+    if to_caller is not None:
+        # Звонящему — «принято»: по нему он начинает `offer`. Публикуется после
+        # фиксации (иначе звонящий пойдёт за данными TURN и увидит `ringing`). Не
+        # принято Centrifugo — звонок остаётся принятым: откатывать нечего, а
+        # звонящий сверяется с сервером каждые 5 секунд, пока ждёт.
+        if not await _try_publish(realtime, [to_caller]):
+            metrics.call_signal("state_undelivered")
     return outcome
 
 
@@ -588,31 +605,19 @@ async def send_signal(
     call_id: uuid.UUID,
     data: object,
 ) -> CallResult:
-    """Сигнал собеседнику: проверка участия → номер от сервера → публикация.
+    """Сигнал собеседнику: проверка участия → запись с номером → публикация.
 
     Клиент не публикует в Centrifugo сам: у него нет такого права, и «подделка
     автора события» закрыта именно этим (`CALL-006`). Собеседнику уходит то, что
     сервер **понял** (`parse_signal`), а не то, что прислали.
 
-    Недоставленный сигнал — `503`, а не `204`: см. `_publish_required`.
+    Сигнал **записывается** (миграция `0017`) и лишь после фиксации публикуется:
+    пропущенное при обрыве соединения получатель забирает через `list_signals`.
+    Повтор с тем же `signal_id` не заводит второй номер — находит записанный и
+    публикует его снова (идемпотентность на сервере, а не только отсев дублей у
+    получателя). Недоставленный сигнал — `503`, а не `204`: клиент повторяет, и
+    повтор безопасен.
     """
-    try:
-        return await _send_signal(
-            conn, realtime=realtime, limiter=limiter, user_id=user_id, call_id=call_id, data=data
-        )
-    except _Rollback as rollback:
-        return CallResult(rejection=rollback.reason)
-
-
-async def _send_signal(
-    conn: asyncpg.Connection,
-    *,
-    realtime: Publisher | None,
-    limiter: RateLimiter,
-    user_id: UserId,
-    call_id: uuid.UUID,
-    data: object,
-) -> CallResult:
     signal = domain.parse_signal(data)
     if signal is None:
         metrics.call_signal("invalid")
@@ -634,6 +639,7 @@ async def _send_signal(
         )
 
     events: list[Event] = []
+    to_peer: Event | None = None
     async with conn.transaction():
         call, expired = await _open(conn, call_id, user_id, events)
         if call is None:
@@ -646,31 +652,75 @@ async def _send_signal(
             # `offer` для вызываемого, который ещё не решил, отвечать ли.
             outcome = CallResult(rejection=Reason.CALL_NOT_READY)
         else:
-            seq = await repo.next_signal_seq(conn, call.call_id)
-            events.append(
-                (
-                    domain.call_channel(call.peer_of(user_id)),
-                    domain.signal_event(call=call, signal=signal, seq=seq),
-                )
+            body = domain.signal_body(signal)
+            stored = (
+                await repo.find_signal(conn, call.call_id, user_id, signal.signal_id)
+                if signal.signal_id is not None
+                else None
             )
-            metrics.call_signal("sent")
-            # Публикация **внутри** транзакции, пока строка звонка заблокирована:
-            # номер выдан под этой блокировкой, и два сигнала одного звонка
-            # публикуются в порядке номеров. После фиксации публикации двух
-            # запросов обгоняли бы друг друга, и сигнал с меньшим номером
-            # отбрасывался бы получателем как устаревший. Цена названа: строка
-            # звонка занята на время одного HTTP-запроса к Centrifugo (до 2 с).
-            # **Обязательная**: канал звонков без истории, и сигнал, который не дошёл, не
-            # восстановить. Не дошёл — откат (номер не расходуется), клиент получает
-            # `503` и повторяет с тем же `signal_id`.
-            try:
-                await _publish_required(realtime, events)
-            except RealtimeUnavailable:
-                metrics.call_signal("undelivered")
-                raise _Rollback(Reason.REALTIME_UNAVAILABLE) from None
-            return CallResult(call=call)
+            if stored is not None:
+                seq, body = stored.seq, stored.body
+            else:
+                seq = await repo.next_signal_seq(conn, call.call_id)
+                await repo.insert_signal(
+                    conn,
+                    call_id=call.call_id,
+                    seq=seq,
+                    sender_id=user_id,
+                    signal_id=signal.signal_id,
+                    body=body,
+                    ttl_seconds=domain.SIGNAL_TTL_SECONDS,
+                )
+            to_peer = (
+                domain.call_channel(call.peer_of(user_id)),
+                domain.stored_signal_event(
+                    call_id=call.call_id, seq=seq, body=body, signal_id=signal.signal_id
+                ),
+            )
+            outcome = CallResult(call=call)
     await _publish(realtime, events)
+    if to_peer is not None:
+        # Строго после фиксации: получатель, не нашедший сигнал в базе, — это ровно то
+        # окно, которое закрывает запись. Порядок публикаций двух запросов не
+        # гарантирован, и это не страшно: получатель применяет сигналы по номеру и
+        # при разрыве нумерации забирает недостающее.
+        try:
+            await _publish_required(realtime, [to_peer])
+        except RealtimeUnavailable:
+            metrics.call_signal("undelivered")
+            return CallResult(rejection=Reason.REALTIME_UNAVAILABLE)
+        metrics.call_signal("sent")
     return outcome
+
+
+@dataclass(slots=True)
+class SignalsResult:
+    events: list[dict[str, object]] = field(default_factory=list)
+    rejection: Reason | None = None
+
+
+async def list_signals(
+    conn: asyncpg.Connection, *, user_id: UserId, call_id: uuid.UUID, after: int
+) -> SignalsResult:
+    """Пропущенные сигналы собеседника: после переподключения и при разрыве нумерации.
+
+    Только участнику; чужой звонок неотличим от несуществующего. У завершённого
+    звонка выдача пуста по сроку: сигналы живут минуту.
+    """
+    call = await repo.fetch(conn, call_id)
+    if call is None or not call.involves(user_id):
+        return SignalsResult(rejection=Reason.CALL_NOT_FOUND)
+    stored = await repo.list_signals(
+        conn, call_id, for_user=user_id, after=max(after, 0), limit=domain.SIGNALS_PAGE
+    )
+    return SignalsResult(
+        events=[
+            domain.stored_signal_event(
+                call_id=call_id, seq=item.seq, body=item.body, signal_id=item.signal_id
+            )
+            for item in stored
+        ]
+    )
 
 
 # --- TURN ---------------------------------------------------------------------------
@@ -769,5 +819,6 @@ async def sweep(
             updated = await _transition(conn, call, change)
             all_events.extend(_state_events(updated))
             ended += 1
+        await repo.purge_signals(conn)
     await _publish(realtime, all_events)
     return SweepResult(examined=len(live), ended=ended)

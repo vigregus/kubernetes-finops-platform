@@ -209,6 +209,31 @@ async def run() -> None:
                 reply = await call("POST", f"/calls/{call_id}/signals", a, bad)
                 check(f"CALL-006: {label} отвергнут: 400", reply.status_code == 400, f"{reply.status_code}")
 
+            # --- RES-004: запись сигнала, идемпотентность, выдача пропущенного ------------
+            idem = {"type": "ice", "signal_id": "idem-1",
+                    "candidates": [{"candidate": "candidate:9 1 udp 1 10.0.0.2 5001 typ host"}]}
+            first = await call("POST", f"/calls/{call_id}/signals", a, idem)
+            again = await call("POST", f"/calls/{call_id}/signals", a, idem)
+            check("RES-004: повтор с тем же signal_id принят: 204 и 204",
+                  first.status_code == 204 and again.status_code == 204,
+                  f"{first.status_code} {again.status_code}")
+            seen = [await wait_publication(b.ws, timeout=10.0) for _ in range(2)]
+            check("RES-004: оба раза опубликован один и тот же номер, а не два сигнала",
+                  all(item is not None for item in seen) and seen[0]["seq"] == seen[1]["seq"] == 3
+                  and seen[0].get("signal_id") == "idem-1", str(seen))
+            missed = await call("GET", f"/calls/{call_id}/signals?after=0", b)
+            listed = missed.json().get("signals", []) if missed.status_code == 200 else []
+            check("RES-004: B забирает пропущенное: только сигналы собеседника, по порядку, без дублей",
+                  [item.get("seq") for item in listed] == [1, 3]
+                  and listed[0]["signal"] == {"type": "offer", "sdp": "v=0\r\n"}
+                  and listed[1].get("signal_id") == "idem-1", str(listed)[:200])
+            later = await call("GET", f"/calls/{call_id}/signals?after=3", b)
+            check("RES-004: после последнего номера выдача пуста",
+                  later.status_code == 200 and later.json() == {"signals": []}, later.text[:100])
+            stranger = await call("GET", f"/calls/{call_id}/signals?after=0", c)
+            check("RES-004: постороннему выдача — 404 (чужой звонок неотличим от несуществующего)",
+                  stranger.status_code == 404, f"{stranger.status_code}")
+
             ice = await call("GET", f"/calls/{call_id}/ice-servers", a)
             check("CALL-008: участнику выдан список, без кэширования",
                   ice.status_code == 200 and ice.headers.get("cache-control") == "no-store",

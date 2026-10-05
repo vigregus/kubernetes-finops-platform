@@ -380,6 +380,9 @@ export function CallsProvider({
           if (seq === null || wire === null) return
           // Сигнал чужого звонка и устаревший отбрасываются здесь (`CALL-007`).
           if (!shouldApplySignal(viewRef.current, callId, seq)) return
+          // Движка ещё нет: сигнал не помечается применённым, и сверка заберёт его с
+          // сервера, когда движок поднимется (раньше он терялся навсегда).
+          if (engineRef.current === null) return
           const signalId = str(payload.signal_id)
           if (signalId !== null) {
             if (appliedSignalIdsRef.current.has(signalId)) return
@@ -413,6 +416,30 @@ export function CallsProvider({
    * закрыта, медиа пропало) закрывает не новая вкладка, а закрытие страницы
    * (`pagehide`) или тишина `keepalive` на сервере.
    */
+  const pullingRef = useRef(false)
+
+  /**
+   * Забирает пропущенные сигналы собеседника. `publish() == true` у Centrifugo значит
+   * «принято», а не «получил браузер»: сигнал, отправленный в момент короткого обрыва
+   * соединения, в канал не вернётся. Сервер хранит его минуту (`GET …/signals`), и
+   * здесь он применяется тем же обработчиком по номеру (старые и дубли отсеиваются).
+   */
+  const pullSignals = useCallback(async () => {
+    const view = viewRef.current
+    if (pullingRef.current || !isLive(view) || view.callId === null || view.phase === "incoming") {
+      return
+    }
+    pullingRef.current = true
+    try {
+      const events = await ops.signals(view.callId, view.lastSignalSeq)
+      for (const event of events) handleEventRef.current(event)
+    } catch {
+      // Следующая сверка повторит: ничего не потеряно, сигнал лежит на сервере.
+    } finally {
+      pullingRef.current = false
+    }
+  }, [ops])
+
   const reconcile = useCallback(async () => {
     let call
     try {
@@ -442,7 +469,9 @@ export function CallsProvider({
     const next = apply({ type: "api-call", call, peerName: null })
     if (next.phase === "ended" && prev.phase !== "ended") teardown()
     else if (next.phase === "connecting") ensureEngine()
-  }, [ops, apply, peerNameFor, ensureEngine, teardown])
+    // Сигналы — после состояния: движок уже поднят, и `offer` есть кому применить.
+    if (next.phase !== "ended") await pullSignals()
+  }, [ops, apply, peerNameFor, ensureEngine, teardown, pullSignals])
 
   const reconcileRef = useRef(reconcile)
   useEffect(() => {

@@ -19,7 +19,7 @@ import { bootStateOf, completeLogin } from "./features/auth/callback";
 import { createTelemetryClient } from "./features/telemetry/telemetryClient";
 import type { AttachmentClient } from "./features/attachments/attachmentUpload";
 import type { PushSubscriptionApi } from "./features/notifications/pushClient";
-import { toCallSignal, toCallView, type CallsOperations } from "./features/calls/callsApi";
+import { toCallSignal, toCallView, toSignalPayload, type CallsOperations } from "./features/calls/callsApi";
 import { ensureDeviceId, loadDeviceId, saveDeviceId } from "./features/auth/deviceId";
 import { CALLBACK_PATH } from "./features/auth/session";
 import { createSessionState } from "./features/auth/sessionState";
@@ -226,6 +226,10 @@ const callsOperations: CallsOperations = {
   connected: async (callId, connectionType) =>
     toCallView(await callsApi.reportCallConnected({ callId, callConnected: { connectionType } })),
   signal: (callId, signal) => callsApi.sendCallSignal({ callId, callSignal: toCallSignal(signal) }),
+  signals: async (callId, after) => {
+    const { signals } = await callsApi.listCallSignals({ callId, after });
+    return signals.map(toSignalPayload);
+  },
   iceServers: async (callId) => {
     const { iceServers, ttlSeconds } = await callsApi.getCallIceServers({ callId });
     return {

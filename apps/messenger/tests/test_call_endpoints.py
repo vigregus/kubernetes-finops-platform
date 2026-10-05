@@ -98,6 +98,7 @@ ENDPOINTS = [
     ("post", f"/calls/{CALL_ID}/keepalive", None),
     ("post", f"/calls/{CALL_ID}/signals", {"type": "offer", "sdp": "v=0"}),
     ("get", f"/calls/{CALL_ID}/ice-servers", None),
+    ("get", f"/calls/{CALL_ID}/signals?after=3", None),
 ]
 
 
@@ -251,6 +252,21 @@ def test_сигнал_не_объект_отвергается_до_сервис
     authenticated(monkeypatch)
     patch(monkeypatch, "send_signal", result(make_call()))
     assert client.post(f"/calls/{CALL_ID}/signals", json=[1, 2]).status_code == 422
+
+
+def test_пропущенные_сигналы_отдаются_после_номера(client, monkeypatch):
+    authenticated(monkeypatch)
+    events = [{"type": "call.signal", "call_id": str(CALL_ID), "seq": 4, "signal": {"type": "offer"}}]
+    fake = patch(monkeypatch, "list_signals", service.SignalsResult(events=events))
+    r = client.get(f"/calls/{CALL_ID}/signals?after=3")
+    assert r.status_code == 200 and r.json() == {"signals": events}
+    assert fake.kwargs["after"] == 3 and fake.kwargs["user_id"] == ME
+
+
+def test_пропущенные_сигналы_чужого_звонка_404(client, monkeypatch):
+    authenticated(monkeypatch)
+    patch(monkeypatch, "list_signals", service.SignalsResult(rejection=Reason.CALL_NOT_FOUND))
+    assert client.get(f"/calls/{CALL_ID}/signals").status_code == 404
 
 
 def test_текущий_звонок_есть_и_его_нет(client, monkeypatch):

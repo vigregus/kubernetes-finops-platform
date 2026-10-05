@@ -1315,6 +1315,24 @@ async def call_signal(
     return Response(status_code=204)
 
 
+@app.get("/calls/{call_id}/signals", response_model=dict[str, object])
+async def call_signals_missed(
+    call_id: uuid.UUID, request: Request, response: Response, after: int = 0
+) -> dict[str, object] | Response:
+    """Пропущенные сигналы собеседника: после переподключения и при разрыве нумерации."""
+    user, failure = await _call_user(request, response)
+    if failure is not None:
+        return failure
+    runtime = request.app.state.runtime
+    async with runtime.connection() as conn:
+        result = await calls_service.list_signals(
+            conn, user_id=user.user_id, call_id=call_id, after=after
+        )
+    if result.rejection is not None:
+        return _problem_response(to_problem(result.rejection), response)
+    return {"signals": result.events}
+
+
 @app.get("/calls/{call_id}/ice-servers", response_model=dict[str, object])
 async def call_ice_servers(
     call_id: uuid.UUID, request: Request, response: Response

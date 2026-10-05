@@ -2,7 +2,7 @@
  * Операции звонков в форме, нужной клиенту. Сборка из сгенерированного `CallsApi`
  * — в `main.tsx` (там живёт клиент API), здесь — только форма и перевод модели.
  */
-import type { Call, CallSignal } from "../../api/generated"
+import type { Call, CallSignal, CallSignalEvent } from "../../api/generated"
 import type { IceConfig, WireSignal } from "./callEngine"
 import type { ApiCallView } from "./callState"
 
@@ -20,6 +20,13 @@ export interface CallsOperations {
   keepalive(callId: string): Promise<ApiCallView>
   connected(callId: string, connectionType: "direct" | "relay"): Promise<ApiCallView>
   signal(callId: string, signal: WireSignal): Promise<void>
+  /**
+   * Пропущенные сигналы собеседника с номером больше `after`, по порядку. Каждый —
+   * в той же форме, что публикация канала (`call.signal`): их применяет тот же
+   * обработчик. Канал звонков без истории, поэтому после обрыва соединения это
+   * единственный путь вернуть потерянный `offer`/`answer`.
+   */
+  signals(callId: string, after: number): Promise<readonly unknown[]>
   /** Данные STUN/TURN и срок их действия (минуты): клиент обновляет их до конца срока. */
   iceServers(callId: string): Promise<IceConfig>
 }
@@ -56,4 +63,19 @@ export function toCallSignal(signal: WireSignal): CallSignal {
     }
   }
   return { ...id, type: signal.type, sdp: signal.sdp }
+}
+
+/** Сигнал из выдачи пропущенных → форма публикации канала (`call.signal`). */
+export function toSignalPayload(event: CallSignalEvent): Record<string, unknown> {
+  return {
+    type: "call.signal",
+    call_id: event.callId,
+    seq: event.seq,
+    ...(event.signalId === undefined ? {} : { signal_id: event.signalId }),
+    signal: {
+      type: event.signal.type,
+      ...(event.signal.sdp === undefined ? {} : { sdp: event.signal.sdp }),
+      ...(event.signal.candidates === undefined ? {} : { candidates: event.signal.candidates }),
+    },
+  }
 }

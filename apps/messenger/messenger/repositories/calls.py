@@ -7,7 +7,9 @@
 """
 from __future__ import annotations
 
+import json
 import uuid
+from dataclasses import dataclass
 from datetime import timedelta
 
 import asyncpg
@@ -188,6 +190,79 @@ async def next_signal_seq(conn: asyncpg.Connection, call_id: uuid.UUID) -> int:
     if value is None:
         raise RuntimeError("звонок исчез до выдачи номера сигнала")
     return int(value)
+
+
+@dataclass(frozen=True, slots=True)
+class StoredSignal:
+    seq: int
+    sender_id: uuid.UUID
+    signal_id: str | None
+    body: dict[str, object]
+
+
+def _to_signal(row: asyncpg.Record) -> StoredSignal:
+    body = row["body"]
+    return StoredSignal(
+        seq=row["seq"],
+        sender_id=row["sender_id"],
+        signal_id=row["signal_id"],
+        body=json.loads(body) if isinstance(body, str) else dict(body),
+    )
+
+
+async def find_signal(
+    conn: asyncpg.Connection, call_id: uuid.UUID, sender_id: uuid.UUID, signal_id: str
+) -> StoredSignal | None:
+    """Уже записанный сигнал с тем же `signal_id` от того же отправителя (повтор)."""
+    row = await conn.fetchrow(
+        """
+        SELECT seq, sender_id, signal_id, body FROM call_signals
+         WHERE call_id = $1 AND sender_id = $2 AND signal_id = $3
+        """,
+        call_id, sender_id, signal_id,
+    )
+    return _to_signal(row) if row else None
+
+
+async def insert_signal(
+    conn: asyncpg.Connection,
+    *,
+    call_id: uuid.UUID,
+    seq: int,
+    sender_id: uuid.UUID,
+    signal_id: str | None,
+    body: dict[str, object],
+    ttl_seconds: int,
+) -> None:
+    await conn.execute(
+        """
+        INSERT INTO call_signals (call_id, seq, sender_id, signal_id, body, expires_at)
+        VALUES ($1, $2, $3, $4, $5::jsonb, now() + make_interval(secs => $6))
+        """,
+        call_id, seq, sender_id, signal_id, json.dumps(body), float(ttl_seconds),
+    )
+
+
+async def list_signals(
+    conn: asyncpg.Connection, call_id: uuid.UUID, *, for_user: uuid.UUID, after: int, limit: int
+) -> list[StoredSignal]:
+    """Сигналы **собеседника** с номером больше `after`, не просроченные, по порядку."""
+    rows = await conn.fetch(
+        """
+        SELECT seq, sender_id, signal_id, body FROM call_signals
+         WHERE call_id = $1 AND sender_id <> $2 AND seq > $3 AND expires_at > now()
+         ORDER BY seq
+         LIMIT $4
+        """,
+        call_id, for_user, after, limit,
+    )
+    return [_to_signal(row) for row in rows]
+
+
+async def purge_signals(conn: asyncpg.Connection) -> int:
+    """Удаляет просроченные сигналы; число удалённых."""
+    result = await conn.execute("DELETE FROM call_signals WHERE expires_at <= now()")
+    return int(result.split()[-1])
 
 
 async def touch(conn: asyncpg.Connection, call_id: uuid.UUID) -> None:

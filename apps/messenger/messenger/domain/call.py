@@ -51,6 +51,11 @@ MAX_CANDIDATE_LENGTH = 1024
 # Не чаще этого числа сигналов в минуту на звонок (с запасом: звонок шлёт
 # `offer`, `answer` и десятки кандидатов пачками).
 SIGNALS_PER_MINUTE = 120
+# Сколько живёт сигнал в хранилище (миграция 0017): время на переподключение
+# получателя, а не история. Старый `offer` предыдущего согласования не воскресает.
+SIGNAL_TTL_SECONDS = 60
+# Предел одной выдачи пропущенных сигналов (`GET /calls/{id}/signals`).
+SIGNALS_PAGE = 200
 
 # Данные TURN живут **минуты**, а не часы: coturn ничего не знает о таблице звонков,
 # и данные, выданные на три часа, пережили бы звонок, который длился двадцать секунд
@@ -364,18 +369,32 @@ def state_event(call: Call, *, accepted_elsewhere: bool = False) -> dict[str, ob
     }
 
 
-def signal_event(*, call: Call, signal: Signal, seq: int) -> dict[str, object]:
+def signal_body(signal: Signal) -> dict[str, object]:
+    """Что собеседник получает от сигнала: только понятое сервером."""
     body: dict[str, object] = {"type": signal.kind}
     if signal.sdp is not None:
         body["sdp"] = signal.sdp
     if signal.kind == "ice":
         body["candidates"] = list(signal.candidates)
+    return body
+
+
+def stored_signal_event(
+    *, call_id: uuid.UUID, seq: int, body: dict[str, object], signal_id: str | None
+) -> dict[str, object]:
+    """Событие сигнала: одно и то же и в канале, и в выдаче пропущенного."""
     event: dict[str, object] = {
         "type": "call.signal",
-        "call_id": str(call.call_id),
+        "call_id": str(call_id),
         "seq": seq,
         "signal": body,
     }
-    if signal.signal_id is not None:
-        event["signal_id"] = signal.signal_id
+    if signal_id is not None:
+        event["signal_id"] = signal_id
     return event
+
+
+def signal_event(*, call: Call, signal: Signal, seq: int) -> dict[str, object]:
+    return stored_signal_event(
+        call_id=call.call_id, seq=seq, body=signal_body(signal), signal_id=signal.signal_id
+    )

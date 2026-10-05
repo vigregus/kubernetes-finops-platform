@@ -96,14 +96,20 @@ class Store:
         self.members = [A, B]
         self.direct = True
         self.connection: dict[uuid.UUID, str] = {}
+        self.signals: list[service.repo.StoredSignal] = []
+        self.signal_calls: list[uuid.UUID] = []
 
     def snapshot(self):
-        return (dict(self.calls), dict(self.live), list(self.messages), dict(self.summaries))
+        return (
+            dict(self.calls), dict(self.live), list(self.messages), dict(self.summaries),
+            list(self.signals), list(self.signal_calls),
+        )
 
     def restore(self, snap):
         self.calls, self.live, self.messages, self.summaries = (
             dict(snap[0]), dict(snap[1]), list(snap[2]), dict(snap[3]),
         )
+        self.signals, self.signal_calls = list(snap[4]), list(snap[5])
 
 
 @pytest.fixture
@@ -186,6 +192,26 @@ def store(monkeypatch):
         st.calls[call_id] = replace(old, signal_seq=old.signal_seq + 1)
         return old.signal_seq + 1
 
+    async def find_signal(conn, call_id, sender_id, signal_id):
+        for stored, owner in zip(st.signals, st.signal_calls, strict=True):
+            if owner == call_id and stored.sender_id == sender_id and stored.signal_id == signal_id:
+                return stored
+        return None
+
+    async def insert_signal(conn, *, call_id, seq, sender_id, signal_id, body, ttl_seconds):
+        st.signals.append(service.repo.StoredSignal(seq, sender_id, signal_id, body))
+        st.signal_calls.append(call_id)
+
+    async def list_signals(conn, call_id, *, for_user, after, limit):
+        return [
+            stored
+            for stored, owner in zip(st.signals, st.signal_calls, strict=True)
+            if owner == call_id and stored.sender_id != for_user and stored.seq > after
+        ][:limit]
+
+    async def purge_signals(conn):
+        return 0
+
     async def touch(conn, call_id):
         return None
 
@@ -229,6 +255,10 @@ def store(monkeypatch):
         (service.repo, "fetch_live_for_user", fetch_live_for_user),
         (service.repo, "apply", apply),
         (service.repo, "next_signal_seq", next_signal_seq),
+        (service.repo, "find_signal", find_signal),
+        (service.repo, "insert_signal", insert_signal),
+        (service.repo, "list_signals", list_signals),
+        (service.repo, "purge_signals", purge_signals),
         (service.repo, "touch", touch),
         (service.repo, "connection_type", connection_type),
         (service.repo, "set_connection_type", set_connection_type),
@@ -677,30 +707,92 @@ def test_неудача_идемпотентна_и_только_для_учас
 # --- порядок сигналов ---------------------------------------------------------------------
 
 
-def test_сигнал_публикуется_пока_строка_звонка_заблокирована(store):
-    """Публикация после фиксации позволяла двум запросам обогнать друг друга (CALL-007)."""
+def test_сигнал_публикуется_только_после_фиксации(store):
+    """Публикация до фиксации показывала получателю то, чего другое соединение не видит."""
     call_id = start().call.call_id
-    run(service.accept(Conn(), realtime=Realtime(), user_id=B, call_id=call_id))
+    rt_accept = Realtime()
+    run(service.accept(Conn(), realtime=rt_accept, user_id=B, call_id=call_id))
     rt = Realtime()
     signal(call_id, A, OFFER, rt)
     signal(call_id, A, {"type": "ice", "candidates": [{"candidate": "c"}]}, rt)
-    assert rt.inside_tx == [True, True]
+    assert rt.inside_tx == [False, False]
+    assert rt_accept.inside_tx and not any(rt_accept.inside_tx)
     assert [e["seq"] for _, e in rt.sent] == [1, 2]
+
+
+def test_входящий_и_принятие_публикуются_после_фиксации(store):
+    rt = Realtime()
+    call_id = start(rt=rt).call.call_id
+    assert rt.inside_tx == [False]
+    rt2 = Realtime()
+    run(service.accept(Conn(), realtime=rt2, user_id=B, call_id=call_id))
+    assert rt2.inside_tx and not any(rt2.inside_tx)
 
 
 # --- недоставленный сигнал не считается доставленным ----------------------------------------
 
 
-def test_сигнал_не_ушёл_в_centrifugo_503_а_не_204_и_номер_не_расходуется(store):
+def test_сигнал_не_ушёл_в_centrifugo_503_а_не_204_и_повтор_не_расходует_номер(store):
     call_id = accepted_call(store)
     broken = Realtime(ok=False)
-    result = signal(call_id, A, OFFER, broken)
+    data = {**OFFER, "signal_id": "sig-1"}
+    result = signal(call_id, A, data, broken)
     assert result.rejection is Reason.REALTIME_UNAVAILABLE
-    # откат: номер сигнала не выдан, и повтор клиента получит тот же
-    assert store.calls[call_id].signal_seq == 0
+    # сигнал записан (получатель может забрать его сам), номер выдан один раз
+    assert [s.seq for s in store.signals] == [1]
     healthy = Realtime()
-    again = signal(call_id, A, OFFER, healthy)
+    again = signal(call_id, A, data, healthy)
     assert again.ok and healthy.sent[0][1]["seq"] == 1
+    assert [s.seq for s in store.signals] == [1]
+
+
+def test_повтор_с_тем_же_идентификатором_это_тот_же_сигнал_а_не_второй(store):
+    """Серверная идемпотентность: потерянный ответ и повтор не создают второй `offer`."""
+    call_id = accepted_call(store)
+    rt = Realtime()
+    data = {**OFFER, "signal_id": "sig-7"}
+    assert signal(call_id, A, data, rt).ok
+    assert signal(call_id, A, data, rt).ok
+    assert [e["seq"] for _, e in rt.sent] == [1, 1]
+    assert len(store.signals) == 1
+    assert store.calls[call_id].signal_seq == 1
+    # другой идентификатор — другой сигнал
+    assert signal(call_id, A, {**OFFER, "signal_id": "sig-8"}, rt).ok
+    assert [s.seq for s in store.signals] == [1, 2]
+
+
+def test_пропущенные_сигналы_собеседника_выдаются_после_номера_по_порядку(store):
+    call_id = accepted_call(store)
+    rt = Realtime()
+    signal(call_id, A, OFFER, rt)
+    signal(call_id, A, {"type": "ice", "candidates": [{"candidate": "c"}]}, rt)
+    signal(call_id, B, {"type": "answer", "sdp": "v=0"}, rt)
+    got = run(service.list_signals(Conn(), user_id=B, call_id=call_id, after=0))
+    assert [e["seq"] for e in got.events] == [1, 2]
+    assert got.events[0]["signal"]["type"] == "offer"
+    assert got.events[0]["call_id"] == str(call_id)
+    after = run(service.list_signals(Conn(), user_id=B, call_id=call_id, after=1))
+    assert [e["seq"] for e in after.events] == [2]
+    # свои сигналы не возвращаются
+    mine = run(service.list_signals(Conn(), user_id=A, call_id=call_id, after=0))
+    assert [e["seq"] for e in mine.events] == [3]
+
+
+def test_пропущенные_сигналы_только_участнику(store):
+    call_id = accepted_call(store)
+    result = run(service.list_signals(Conn(), user_id=C, call_id=call_id, after=0))
+    assert result.rejection is Reason.CALL_NOT_FOUND
+
+
+def test_метрика_sent_не_растёт_при_недоставленном_сигнале(store, monkeypatch):
+    seen: list[str] = []
+    monkeypatch.setattr(service.metrics, "call_signal", seen.append)
+    call_id = accepted_call(store)
+    signal(call_id, A, OFFER, Realtime(ok=False))
+    assert seen == ["undelivered"]
+    seen.clear()
+    signal(call_id, A, {**OFFER, "signal_id": "x"}, Realtime())
+    assert seen == ["sent"]
 
 
 def test_без_realtime_сигнал_не_считается_отправленным(store):
@@ -717,21 +809,28 @@ def test_идентификатор_сигнала_доходит_до_полу�
     assert rt.sent[0][1]["signal_id"] == "sig-1"
 
 
-def test_входящий_не_дошёл_звонок_не_создаётся(store):
+def test_входящий_не_дошёл_звонок_закрывается_и_линия_свободна(store):
     broken = Realtime(ok=False)
     result = start(rt=broken)
     assert result.rejection is Reason.REALTIME_UNAVAILABLE
-    assert store.calls == {} and store.live == {}
-    # и линия свободна: следующая попытка проходит
+    # зафиксированное не откатить: звонок закрыт как неудавшийся, а не висит гудками
+    (call,) = store.calls.values()
+    assert call.state is CallState.ENDED and call.end_reason is EndReason.FAILED
+    assert store.live == {}
+    # и следующая попытка проходит
     assert start(rt=Realtime()).ok
 
 
-def test_принятие_не_дошло_до_звонящего_откатывается_и_повтор_возможен(store):
+def test_принятие_не_дошло_до_звонящего_звонок_остаётся_принятым(store, monkeypatch):
+    """Состояние в базе — истина; звонящий узнаёт его сверкой за 5 секунд."""
+    seen: list[str] = []
+    monkeypatch.setattr(service.metrics, "call_signal", seen.append)
     call_id = start().call.call_id
     broken = Realtime(ok=False)
     result = run(service.accept(Conn(), realtime=broken, user_id=B, call_id=call_id))
-    assert result.rejection is Reason.REALTIME_UNAVAILABLE
-    assert store.calls[call_id].state is CallState.RINGING
+    assert result.ok and store.calls[call_id].state is CallState.ACCEPTED
+    assert "state_undelivered" in seen
+    # и повторное «принять» идемпотентно
     assert run(service.accept(Conn(), realtime=Realtime(), user_id=B, call_id=call_id)).ok
 
 
