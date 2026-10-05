@@ -24,6 +24,15 @@ name: Контракты и миграции
 # (`check-dashboards.py`) при этом не пропускаются — см. джобу
 # `gitops-checks` ниже: она задевает как раз то, что могло бы сломаться
 # в gitops-манифестах, включая load-testing.
+#
+# Что запускается, определяет джоба `changes` по списку изменённых файлов (выходы `server`, `web`,
+# `gitops`):
+#   * только документы (`docs/**`, `*.md`) и прочее, что ни одна проверка не читает, — ничего
+#     тяжёлого, только вердикт `success` у пропущенных джоб;
+#   * только `apps/web/**` (и `tests/e2e/**`) — джоба web, без pytest, образа API и миграций;
+#   * только `apps/messenger/**`, `db/**` — contracts, code, image, migrations, без npm ci,
+#     Playwright и Storybook (самое долгое);
+#   * `packages/**`, `scripts/**`, `.github/**` и любой неизвестный путь — всё: безопасный дефолт.
 on:
   pull_request:
   push:
@@ -31,6 +40,13 @@ on:
 
 permissions:
   contents: read
+
+# Новый запуск на тот же PR отменяет предыдущий: проверка нужна для последнего коммита, а
+# устаревший прогон только занимает раннеры (очередь Actions и без того узкое место). Для
+# push в main отмены нет: каждый коммит main проверяется до конца.
+concurrency:
+  group: contracts-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # Классифицирует diff PR/push ровно на то, что нужно остальным джобам:
@@ -44,7 +60,8 @@ jobs:
     name: Что изменилось
     runs-on: ubuntu-latest
     outputs:
-      app: ${{ steps.classify.outputs.app }}
+      server: ${{ steps.classify.outputs.server }}
+      web: ${{ steps.classify.outputs.web }}
       gitops: ${{ steps.classify.outputs.gitops }}
     steps:
       - uses: actions/checkout@v4
@@ -57,28 +74,52 @@ jobs:
           echo "изменённые файлы:"
           echo "$FILES"
 
-          app=false
+          server=false
+          web=false
           gitops=false
           while IFS= read -r f; do
             [ -z "$f" ] && continue
             case "$f" in
-              gitops/04-messenger/load-testing/*|docs/messenger/15-load-testing-platform.md)
+              # Не влияет ни на одну проверку: ни одна из них не читает документы
+              # (проверено: `check-log-streams.py` называет документ только в
+              # комментарии). Изменение, состоящее из одного такого, не запускает ничего
+              # тяжёлого.
+              docs/*|*.md|LICENSE*|.gitignore|.editorconfig|.claude/*)
+                ;;
+              gitops/04-messenger/load-testing/*)
                 ;;
               gitops/*)
                 gitops=true
                 ;;
+              # Веб: собирает и проверяет только он.
+              apps/web/*|tests/e2e/*)
+                web=true
+                ;;
+              # Сервер и база: contracts, code, image, migrations.
+              apps/messenger/*|db/*|tests/integration/*)
+                server=true
+                ;;
+              # Общее для обоих: контракт, скрипты проверок и сборки, сам конвейер.
+              packages/*|scripts/*|.github/*)
+                server=true
+                web=true
+                ;;
+              # Неизвестный путь — безопасный дефолт: проверять всё, а не пропустить по недосмотру.
               *)
-                app=true
+                server=true
+                web=true
                 ;;
             esac
           done <<< "$FILES"
 
-          # Пустой diff (например push с искусственной базой) — безопасный
-          # дефолт: считать изменением "app", чтобы не потерять проверку
-          # по недосмотру, а не молча пропустить всё.
-          [ -z "$FILES" ] && app=true
+          # Пустой diff (например push с искусственной базой) — тот же безопасный дефолт.
+          if [ -z "$FILES" ]; then
+            server=true
+            web=true
+          fi
 
-          echo "app=$app" >> "$GITHUB_OUTPUT"
+          echo "server=$server" >> "$GITHUB_OUTPUT"
+          echo "web=$web" >> "$GITHUB_OUTPUT"
           echo "gitops=$gitops" >> "$GITHUB_OUTPUT"
 
   # Лёгкая, всегда быстрая проверка происхождения метрик в дашбордах и
@@ -90,7 +131,7 @@ jobs:
   gitops-checks:
     name: "GitOps: дашборды и применённые манифесты"
     needs: changes
-    if: needs.changes.outputs.app == 'true' || needs.changes.outputs.gitops == 'true'
+    if: needs.changes.outputs.server == 'true' || needs.changes.outputs.web == 'true' || needs.changes.outputs.gitops == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -103,7 +144,7 @@ jobs:
 
   contracts:
     needs: changes
-    if: needs.changes.outputs.app == 'true'
+    if: needs.changes.outputs.server == 'true'
     name: CTR-001..003
     runs-on: ubuntu-latest
     steps:
@@ -142,7 +183,7 @@ jobs:
   code:
     name: Слои и модульные тесты
     needs: changes
-    if: needs.changes.outputs.app == 'true'
+    if: needs.changes.outputs.server == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -213,14 +254,14 @@ jobs:
 
   web:
     name: CTR-004 — клиент из контракта, сборка и образ
-    # `if: needs.changes.outputs.app` — не фильтр на триггере (см. шапку
+    # `if: needs.changes.outputs.web` — не фильтр на триггере (см. шапку
     # файла, почему это не одно и то же): джоба пропускает шаги, но сам
     # workflow запускается всегда, и обязательная проверка получает
     # вердикт `success`, а не зависает в «ожидании». Джоба самая долгая —
     # соблазн вернуть фильтр на триггер велик, но это именно тот случай,
     # который шапка файла запрещает.
     needs: changes
-    if: needs.changes.outputs.app == 'true'
+    if: needs.changes.outputs.web == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -385,7 +426,7 @@ jobs:
   migrations:
     name: Миграции применяются с нуля
     needs: changes
-    if: needs.changes.outputs.app == 'true'
+    if: needs.changes.outputs.server == 'true'
     runs-on: ubuntu-latest
     services:
       postgres:
