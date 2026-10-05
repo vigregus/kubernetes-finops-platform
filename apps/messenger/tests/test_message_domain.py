@@ -97,7 +97,8 @@ def test_итог_звонка_несёт_длительность_а_текст
     нашла `500` на `hangup`, потому что правило пускало длительность только в голосовое."""
     from messenger.domain.message import MessageKind, MessagePayload, validate_message_payload
 
-    validate_message_payload(MessageKind.SYSTEM, MessagePayload(text="call.completed.audio", duration_ms=75_000))
+    done = MessagePayload(text="call.completed.audio", duration_ms=75_000)
+    validate_message_payload(MessageKind.SYSTEM, done)
     validate_message_payload(MessageKind.SYSTEM, MessagePayload(text="call.missed.audio"))
     import pytest
 
