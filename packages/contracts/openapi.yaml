@@ -24,6 +24,7 @@ tags:
   - name: attachments
   - name: sessions
   - name: telemetry
+  - name: push
 
 paths:
   /auth/callback:
@@ -115,6 +116,69 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Me' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /push/vapid-public-key:
+    get:
+      tags: [push]
+      summary: Открытый ключ VAPID для оформления подписки
+      description: |
+        Браузер оформляет подписку Web Push на **наш** сервер по этому ключу
+        (`applicationServerKey`). Ключ не секрет, но отдаётся только вошедшему:
+        потребитель один — клиент после входа. Закрытого ключа у API нет вовсе.
+      operationId: getPushPublicKey
+      responses:
+        '200':
+          description: Ключ в base64url (несжатая точка P-256)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PushPublicKey' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503':
+          description: Уведомления выключены или не настроены (`push_unavailable`)
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /me/push-subscription:
+    put:
+      tags: [push]
+      summary: Подписка Web Push этого устройства
+      description: |
+        Подписка идёт на **устройство** входа, а не на пользователя: у человека
+        ноутбук может быть открыт, а телефон спать, и уведомление нужно только
+        телефону. Повтор заменяет подписку (браузер сменил её — `NTF-007`).
+
+        Адрес подписки — это то, куда **сервер** отправит запрос по просьбе
+        клиента, поэтому принимаются только адреса известных служб push
+        браузеров (FCM, Mozilla, Apple, Windows), по `https`, без учётных
+        данных и нестандартных портов. Остальное — `400 invalid_subscription`.
+      operationId: putPushSubscription
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PushSubscription' }
+      responses:
+        '204': { description: Подписка принята }
+        '400':
+          description: Подписке нельзя верить (`invalid_subscription`)
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503':
+          description: Уведомления выключены или не настроены (`push_unavailable`)
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+    delete:
+      tags: [push]
+      summary: Снять подписку этого устройства
+      description: Повтор и «подписки не было» — тоже `204`.
+      operationId: deletePushSubscription
+      responses:
+        '204': { description: Подписки на устройстве нет }
         '401': { $ref: '#/components/responses/Unauthorized' }
 
   /users:
@@ -1245,6 +1309,28 @@ components:
           type: string
           format: uri
           description: Предподписанная ссылка с ограниченным сроком.
+
+    PushPublicKey:
+      type: object
+      required: [public_key]
+      properties:
+        public_key: { type: string, description: Открытый ключ VAPID, base64url }
+
+    PushSubscription:
+      type: object
+      description: >-
+        `PushSubscription.toJSON()` браузера. Лишние поля (`expirationTime`)
+        допускаются и игнорируются.
+      required: [endpoint, keys]
+      properties:
+        endpoint: { type: string, format: uri, maxLength: 2048 }
+        keys:
+          type: object
+          required: [p256dh, auth]
+          properties:
+            p256dh: { type: string, description: Открытый ключ получателя, base64url }
+            auth: { type: string, description: Секрет аутентификации, base64url }
+        expirationTime: { type: number, nullable: true }
 
     AttachmentStatus:
       type: object

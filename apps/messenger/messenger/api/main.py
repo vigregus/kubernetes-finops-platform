@@ -63,6 +63,7 @@ from messenger.services import history as history_service
 from messenger.services import identity as identity_service
 from messenger.services import login as login_service
 from messenger.services import messages as message_service
+from messenger.services import push as push_service
 from messenger.services import realtime as realtime_service
 from messenger.services import receipts as receipts_service
 from messenger.services import runtime as runtime_service
@@ -1037,6 +1038,66 @@ async def me(request: Request, response: Response) -> dict[str, object] | Respon
         "email_verified": user.email_verified,
         "capabilities": sorted(c.value for c in capabilities_of(user)),
     }
+
+
+@app.get("/push/vapid-public-key", response_model=dict[str, object])
+async def push_public_key(request: Request, response: Response) -> dict[str, object] | Response:
+    """Открытый ключ VAPID: браузер оформляет подписку на **наш** сервер.
+
+    Ключ не секрет, но требует входа: у него один потребитель — вошедший
+    клиент, и раздавать его анонимно незачем. Закрытого ключа у API нет вовсе.
+    """
+    runtime = request.app.state.runtime
+    async with runtime.connection() as conn:
+        auth = await _current(request, conn)
+    if not auth.ok:
+        return _problem_response(to_problem(Reason.UNAUTHENTICATED), response)
+    key = push_service.vapid_public_key()
+    if key is None or not push_service.enabled():
+        return _problem_response(to_problem(Reason.PUSH_UNAVAILABLE), response)
+    return {"public_key": key}
+
+
+@app.put("/me/push-subscription", status_code=204, response_model=None)
+async def put_push_subscription(
+    body: dict[str, object], request: Request, response: Response
+) -> Response:
+    """Подписка Web Push **этого** устройства (`NTF-001`).
+
+    Адрес подписки — это то, куда сервер отправит запрос по просьбе клиента,
+    поэтому принимаются только адреса известных служб push браузеров
+    (`domain/push.py`): иначе любой вошедший направил бы сервер на внутренние
+    адреса. Повтор безопасен — подписка заменяется (`NTF-007`).
+    """
+    runtime = request.app.state.runtime
+    async with runtime.connection() as conn:
+        auth = await _current(request, conn)
+        if not auth.ok or auth.user is None or auth.device is None:
+            return _problem_response(to_problem(Reason.UNAUTHENTICATED), response)
+        result = await push_service.subscribe(
+            conn, device_id=auth.device.device_id, user_id=auth.user.user_id, data=body
+        )
+    if result.ok:
+        return Response(status_code=204)
+    reason = {
+        "invalid": Reason.INVALID_SUBSCRIPTION,
+        "unavailable": Reason.PUSH_UNAVAILABLE,
+    }.get(result.reason or "", Reason.UNAUTHENTICATED)
+    return _problem_response(to_problem(reason), response)
+
+
+@app.delete("/me/push-subscription", status_code=204, response_model=None)
+async def delete_push_subscription(request: Request, response: Response) -> Response:
+    """Снимает подписку этого устройства. Повтор и «подписки не было» — тоже `204`."""
+    runtime = request.app.state.runtime
+    async with runtime.connection() as conn:
+        auth = await _current(request, conn)
+        if not auth.ok or auth.user is None or auth.device is None:
+            return _problem_response(to_problem(Reason.UNAUTHENTICATED), response)
+        await push_service.unsubscribe(
+            conn, device_id=auth.device.device_id, user_id=auth.user.user_id
+        )
+    return Response(status_code=204)
 
 
 @app.get("/users", response_model=dict[str, object])

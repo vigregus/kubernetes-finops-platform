@@ -41,6 +41,10 @@ import {
 import type { TelemetryClient } from "../telemetry/telemetryClient"
 import type { AttachmentClient } from "../attachments/attachmentUpload"
 import { useAttachmentDraft } from "../attachments/useAttachmentDraft"
+import { NotificationPrompt } from "../notifications/NotificationPrompt"
+import { conversationFromUrl, listenForOpenConversation } from "../notifications/openConversation"
+import { browserEnv, type PushSubscriptionApi } from "../notifications/pushClient"
+import { usePushNotifications } from "../notifications/usePushNotifications"
 import { createTypingSender } from "../realtime/typingSender"
 import { useTypingConversations } from "../realtime/useTypingConversations"
 import { TypingIndicator } from "../messages/components/TypingIndicator"
@@ -167,6 +171,8 @@ interface ChatPageProps {
   telemetry: Pick<TelemetryClient, "record">
   /** G4: вложения. Без него композер остаётся прежним, только текст. */
   attachments?: AttachmentClient
+  /** G4: подписка Web Push. Без неё баннера уведомлений нет. */
+  pushSubscriptions?: PushSubscriptionApi
 }
 
 /**
@@ -237,10 +243,26 @@ export function ChatPage({
   createCentrifuge,
   telemetry,
   attachments,
+  pushSubscriptions,
 }: ChatPageProps) {
   // Ленивая инициализация, а не `?? conversations[0]` в рендере: запасного
   // значения у настоящих данных нет, а пустой список — законный ответ сервера.
-  const [activeId, setActiveId] = useState<string | null>(() => conversations[0]?.id ?? null)
+  //
+  // Беседа из адреса (`?conversation=`) — нажатие на уведомление открыло новую
+  // вкладку (`NTF-008`); берётся, только если такая беседа есть в списке.
+  const [activeId, setActiveId] = useState<string | null>(() => {
+    const wanted = conversationFromUrl(window.location.search)
+    return conversations.find((item) => item.id === wanted)?.id ?? conversations[0]?.id ?? null
+  })
+
+  // Нажатие на уведомление при уже открытой вкладке: Service Worker шлёт
+  // сообщение, и открывается нужная беседа.
+  useEffect(() => listenForOpenConversation(setActiveId), [])
+
+  // Web Push (G4): баннер «включить уведомления». Среда браузера — одна на
+  // страницу; без подписки на сервере (`pushSubscriptions`) баннера нет.
+  const pushEnv = useMemo(() => browserEnv(), [])
+  const push = usePushNotifications(pushEnv, pushSubscriptions)
   /**
    * Диалог создания беседы — состояние **списка**, а не панели.
    *
@@ -499,9 +521,12 @@ export function ChatPage({
         // то, чего `/me` не говорил. Адрес тоже проверяется: без него банеру
         // нечего вставить в «Confirm ‹email›».
         banner={
-          currentUser.emailVerified === false && currentUser.email !== undefined ? (
-            <EmailVerificationBanner email={currentUser.email} resend={resendVerificationEmail} />
-          ) : undefined
+          <>
+            {currentUser.emailVerified === false && currentUser.email !== undefined ? (
+              <EmailVerificationBanner email={currentUser.email} resend={resendVerificationEmail} />
+            ) : null}
+            <NotificationPrompt state={push.state} onTurnOn={push.turnOn} />
+          </>
         }
         sidebar={
           <ConversationSidebar

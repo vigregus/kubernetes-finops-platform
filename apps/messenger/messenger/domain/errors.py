@@ -33,6 +33,8 @@ class Reason(str, Enum):
     ATTACHMENT_UPLOAD_MISSING = "attachment_upload_missing"
     ATTACHMENTS_UNAVAILABLE = "attachments_unavailable"
     INVALID_VOICE = "invalid_voice"
+    INVALID_SUBSCRIPTION = "invalid_subscription"
+    PUSH_UNAVAILABLE = "push_unavailable"
     RATE_LIMITED = "rate_limited"
     UNAUTHENTICATED = "unauthenticated"
     UPSTREAM_UNAVAILABLE = "upstream_unavailable"
@@ -82,6 +84,8 @@ _PUBLIC: dict[Reason, Problem] = {
     Reason.ATTACHMENTS_UNAVAILABLE: Problem(
         503, "attachments_unavailable", "Вложения временно недоступны"
     ),
+    Reason.INVALID_SUBSCRIPTION: Problem(400, "invalid_subscription", "Подписка не принята"),
+    Reason.PUSH_UNAVAILABLE: Problem(503, "push_unavailable", "Уведомления недоступны"),
     Reason.INVALID_VOICE: Problem(400, "invalid_voice", "Недопустимая длительность голосового"),
     Reason.BLOCKED: Problem(403, "forbidden", "Действие недоступно"),
     Reason.EMAIL_UNVERIFIED: Problem(403, "forbidden", "Действие недоступно"),

@@ -60,6 +60,21 @@ def main() -> int:
     if "messenger.content.v1" in readable_topics:
         fail("consumer-unread получил доступ к содержимому")
 
+    # Тот же довод для уведомлений: сигнал Web Push — без текста сообщения,
+    # и права на содержимое у потребителя уведомлений быть не должно.
+    notifications = users.get("messenger-notifications")
+    if notifications is None:
+        fail("нет отдельной учётной записи consumer-notifications")
+    notify_topics = {
+        acl["resource"].get("name")
+        for acl in notifications["spec"]["authorization"]["acls"]
+        if acl["resource"]["type"] == "topic" and "Read" in acl["operations"]
+    }
+    if "messenger.events.v1" not in notify_topics:
+        fail("consumer-notifications не читает поток фактов")
+    if "messenger.content.v1" in notify_topics:
+        fail("consumer-notifications получил доступ к содержимому")
+
     outbox = users.get("messenger-outbox")
     if outbox is None:
         fail("нет отдельной учётной записи outbox")
@@ -71,7 +86,7 @@ def main() -> int:
     if writable_topics != {"messenger.events.v1", "messenger.content.v1"}:
         fail("outbox должен писать ровно в fact и content топики")
 
-    print("  SEC-010: схема и ACL не дают consumer-unread читать содержимое")
+    print("  SEC-010: схема и ACL не дают consumer-unread и consumer-notifications читать содержимое")
     return 0
 
 

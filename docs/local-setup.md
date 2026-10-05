@@ -88,6 +88,14 @@ This project assumes a local `minikube` cluster (Docker driver) for Local v1.
    ```
    then restart the browser. (The browser acceptance in `tests/e2e`
    runs with `ignoreHTTPSErrors`, so it does not show this problem.)
+
+   Web Push needs the same trust, and not only for pictures: a Service
+   Worker is **not registered at all** on a page whose certificate the
+   browser does not trust (`SecurityError: An SSL certificate error occurred
+   when fetching the script`), even after "proceed anyway". Without it the
+   "Turn on" notifications banner simply never appears. Delivering a real
+   push also needs internet access from the browser (Chrome goes through
+   Google's push service).
 8. Create any required local secrets outside Git (see "Local secret
    handling" below).
 9. Run `k6` scenarios from `tests/k6` (see that directory's own README)

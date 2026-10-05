@@ -5,6 +5,7 @@ import App from "./App.tsx";
 import { createApiClient, withUnwrappedErrors } from "./api/client";
 import {
   AttachmentsApi,
+  PushApi,
   AuthApi,
   ConversationsApi,
   MessagesApi,
@@ -16,6 +17,7 @@ import { createRealtimeTicketIssuer } from "./api/realtimeToken";
 import { bootStateOf, completeLogin } from "./features/auth/callback";
 import { createTelemetryClient } from "./features/telemetry/telemetryClient";
 import type { AttachmentClient } from "./features/attachments/attachmentUpload";
+import type { PushSubscriptionApi } from "./features/notifications/pushClient";
 import { ensureDeviceId, loadDeviceId, saveDeviceId } from "./features/auth/deviceId";
 import { CALLBACK_PATH } from "./features/auth/session";
 import { createSessionState } from "./features/auth/sessionState";
@@ -54,6 +56,7 @@ const conversationsApi = withUnwrappedErrors(new ConversationsApi(client.configu
 const messagesApi = withUnwrappedErrors(new MessagesApi(client.configuration));
 const usersApi = withUnwrappedErrors(new UsersApi(client.configuration));
 const attachmentsApi = withUnwrappedErrors(new AttachmentsApi(client.configuration));
+const pushApi = withUnwrappedErrors(new PushApi(client.configuration));
 
 /**
  * G3-008, одна константа на приложение — тем же доводом, что у
@@ -171,6 +174,28 @@ const sendMessage: SendMessage = (request) =>
  * `PUT` идёт на другой origin (`s3.finops.local`), и приложенная cookie была
  * бы утечкой, а не помощью.
  */
+/**
+ * Подписка Web Push: три операции контракта в той форме, что нужна клиенту
+ * уведомлений. Ключ VAPID приходит с сервера, а не из сборки: пара создаётся
+ * в кластере, и в git её нет.
+ */
+const pushSubscriptionApi: PushSubscriptionApi = {
+  publicKey: async () => (await pushApi.getPushPublicKey()).publicKey,
+  save: async (subscription) => {
+    const keys = subscription.keys
+    if (subscription.endpoint === undefined || keys === undefined) {
+      throw new Error("подписка браузера без адреса или ключей");
+    }
+    await pushApi.putPushSubscription({
+      pushSubscription: {
+        endpoint: subscription.endpoint,
+        keys: { p256dh: keys["p256dh"] ?? "", auth: keys["auth"] ?? "" },
+      },
+    });
+  },
+  remove: () => pushApi.deletePushSubscription(),
+};
+
 const attachmentClient: AttachmentClient = {
   ops: {
     create: (request) =>
@@ -336,6 +361,7 @@ createRoot(document.getElementById("root")!).render(
       issueTicket={issueTicket}
       telemetry={telemetryClient}
       attachments={attachmentClient}
+      pushSubscriptions={pushSubscriptionApi}
     />
   </StrictMode>,
 );

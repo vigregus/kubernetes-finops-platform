@@ -95,7 +95,7 @@ export default defineConfig({
 			// своя спека, свой бюджет (загрузка, обработка воркером, доставка), а
 			// состояние прогона пишет та же подготовка `fixture`.
 			name: "g4",
-			testMatch: /g4-(attachments|typing)\.spec\.ts$/,
+			testMatch: /g4-(attachments|typing|push)\.spec\.ts$/,
 			dependencies: ["fixture"],
 			timeout: 300_000,
 			// Голосовое (`ATT-004`): настоящий `MediaRecorder` читает фейковый
@@ -103,7 +103,16 @@ export default defineConfig({
 			// Без этого запись в приёмке упёрлась бы в окно, которое некому нажать.
 			use: {
 				launchOptions: {
-					args: ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"],
+					// `--ignore-certificate-errors` нужен Service Worker'у: на странице с
+					// сертификатом, которому браузер не доверяет, worker не регистрируется
+					// (`SecurityError`), даже при `ignoreHTTPSErrors` контекста. Это же
+					// относится к настоящему браузеру: локальный CA стенда нужно доверить
+					// (`docs/local-setup.md`).
+					args: [
+						"--use-fake-device-for-media-stream",
+						"--use-fake-ui-for-media-stream",
+						"--ignore-certificate-errors",
+					],
 				},
 			},
 		},
