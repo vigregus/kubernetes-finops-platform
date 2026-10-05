@@ -2,7 +2,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite"
 import { ConversationListItem } from "./ConversationListItem"
 
 const meta: Meta<typeof ConversationListItem> = {
-  title: "Conversations/ConversationListItem",
+  title: "Molecules/ConversationListItem",
   component: ConversationListItem,
   decorators: [(Story) => <div className="w-80 bg-surface-container-low p-2"><Story /></div>],
 }

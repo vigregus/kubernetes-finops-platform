@@ -3,7 +3,7 @@ import { MessageTimeline } from "./MessageTimeline"
 import { messagesByConversation } from "../../../shared/lib/mock-data"
 
 const meta: Meta<typeof MessageTimeline> = {
-  title: "Messages/MessageTimeline",
+  title: "Organisms/MessageTimeline",
   component: MessageTimeline,
   args: { dayLabel: "Today", conversationName: "Anna Petrova" },
   decorators: [(Story) => <div className="flex h-[640px] bg-surface"><Story /></div>],

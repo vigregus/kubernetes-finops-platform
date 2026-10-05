@@ -10,15 +10,26 @@ interface MessengerLayoutProps {
    * line's worth of height even at zero content.
    */
   banner?: ReactNode
+  /**
+   * Что показано на узком экране: список бесед или сама беседа — по очереди, а не
+   * рядом. `both` — широкий экран (и умолчание): обе колонки, как раньше.
+   */
+  screen?: "both" | "list" | "chat"
 }
 
-export function MessengerLayout({ sidebar, children, banner }: MessengerLayoutProps) {
+export function MessengerLayout({ sidebar, children, banner, screen = "both" }: MessengerLayoutProps) {
   return (
-    <div className="flex h-dvh w-full flex-col overflow-hidden bg-surface text-on-surface">
+    <div
+      data-screen={screen}
+      className="p-safe flex h-dvh w-full flex-col overflow-hidden bg-surface text-on-surface"
+    >
       {banner}
       <div className="flex min-h-0 flex-1 overflow-hidden">
-        {sidebar}
-        <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden bg-surface">{children}</main>
+        {/* Не скрывается стилем, а не рисуется: у скрытой панели беседы живо соединение. */}
+        {screen !== "chat" && sidebar}
+        {screen !== "list" && (
+          <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden bg-surface">{children}</main>
+        )}
       </div>
     </div>
   )

@@ -2,7 +2,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite"
 import { MessageComposer } from "./MessageComposer"
 
 const meta: Meta<typeof MessageComposer> = {
-  title: "Messages/MessageComposer",
+  title: "Molecules/MessageComposer",
   component: MessageComposer,
   args: { recipientName: "Anna Petrova", onSend: () => {} },
   decorators: [(Story) => <div className="max-w-2xl bg-surface p-4"><Story /></div>],
@@ -14,4 +14,10 @@ export const Default: Story = {}
 export const Disabled: Story = {
   name: "Disabled — blocked (08-authorization.md symmetric block)",
   args: { disabled: true, disabledReason: "You can no longer message this person." },
+}
+
+/** Телефон: плотные отступы, без подсказки про Enter; поле растёт, кнопка не сжимается. */
+export const Mobile: Story = {
+  globals: { viewport: { value: "phone", isRotated: false } },
+  decorators: [(Story) => <div className="flex h-dvh flex-col justify-end bg-surface"><Story /></div>],
 }

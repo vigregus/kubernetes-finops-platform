@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite"
+import { expect, userEvent, waitFor, within } from "storybook/test"
 import { ChatPage } from "./ChatPage"
 import { conversations, currentUser, messagesByConversation } from "../../shared/lib/mock-data"
 import type { ChatMessage, Conversation } from "../../shared/lib/types"
@@ -69,7 +70,7 @@ const pendingHistory: HistorySource = {
 }
 
 const meta: Meta<typeof ChatPage> = {
-  title: "Conversations/ChatPage",
+  title: "Pages/ChatPage",
   component: ChatPage,
   parameters: { layout: "fullscreen" },
 }
@@ -108,4 +109,27 @@ export const HistoryPending: Story = {
 /** Выбранная беседа с историей из нескольких сообщений. */
 export const WithMessages: Story = {
   args: { ...base, conversations: [conversations[0]], history: historyOf(messagesByConversation[conversations[0].id] ?? []) },
+}
+
+/**
+ * Телефон: список бесед → беседа → «назад». Панель беседы **не монтируется**, пока её
+ * не открыли: первая беседа не поднимает соединение и не отмечает прочитанным то,
+ * что человек не открывал.
+ */
+export const Mobile: Story = {
+  args: { ...base, history: historyOf(messagesByConversation["anna-petrova"] ?? []) },
+  globals: { viewport: { value: "phone", isRotated: false } },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    // Экран «список»: карточки есть, панели беседы и композера нет.
+    await expect(canvasElement.querySelectorAll("[data-conversation-id]").length).toBeGreaterThan(0)
+    await expect(canvasElement.querySelector("[data-composer-input]")).toBeNull()
+    // Открыть беседу: список уходит, появляется шапка со стрелкой.
+    await userEvent.click(canvasElement.querySelector("[data-conversation-id]") as HTMLElement)
+    await waitFor(() => expect(canvas.getByRole("button", { name: "Back to chats" })).toBeVisible())
+    await expect(canvasElement.querySelector("[data-composer-input]")).not.toBeNull()
+    // Назад: снова список.
+    await userEvent.click(canvas.getByRole("button", { name: "Back to chats" }))
+    await waitFor(() => expect(canvasElement.querySelector("[data-composer-input]")).toBeNull())
+  },
 }

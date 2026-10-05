@@ -2,7 +2,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite"
 import { IconButton } from "./IconButton"
 
 const meta: Meta<typeof IconButton> = {
-  title: "Shared UI/IconButton",
+  title: "Atoms/IconButton",
   component: IconButton,
   args: { icon: "search", label: "Search" },
 }

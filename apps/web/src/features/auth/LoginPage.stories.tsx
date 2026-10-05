@@ -2,7 +2,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite"
 import { LoginPage } from "./LoginPage"
 
 const meta: Meta<typeof LoginPage> = {
-  title: "Auth/LoginPage",
+  title: "Pages/LoginPage",
   component: LoginPage,
   parameters: { layout: "fullscreen" },
 }

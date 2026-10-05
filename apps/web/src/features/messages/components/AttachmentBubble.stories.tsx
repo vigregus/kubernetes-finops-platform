@@ -2,7 +2,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite"
 import { AttachmentBubble } from "./AttachmentBubble"
 
 const meta: Meta<typeof AttachmentBubble> = {
-  title: "Messages/AttachmentBubble",
+  title: "Molecules/AttachmentBubble",
   component: AttachmentBubble,
   parameters: { docs: { description: { component: "03-v1-scope.md \"Вложения\": uploading -> processing -> ready, or rejected/failed (ATT-002..008)." } } },
   decorators: [(Story) => <div className="max-w-sm p-6"><Story /></div>],

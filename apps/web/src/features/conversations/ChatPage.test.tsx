@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Автомок: `playIncomingMessageSound` бьёт по `AudioContext`, которого в
 // jsdom нет, — сам модуль на это рассчитан (см. его докстринг, «молчание
@@ -701,6 +701,60 @@ describe("число непрочитанного: событие личного
 
     await waitFor(() => expect(unread("c1")).toBe("7"));
     expect(calls.refreshes).toBe(1);
+  });
+
+  it("событие, пришедшее посреди круга сверки, не откатывается устаревшим снимком", async () => {
+    // Круг начался и завис; `unread.changed = 4` пришло новее; потом пришёл снимок со старым
+    // числом (3). Применить его вслепую — откатить число назад, а «максимум» не годится:
+    // непрочитанное и уменьшается. Круг с событием посередине перечитывается.
+    const stale = deferred<ConversationListPage>();
+    let reads = 0;
+    const { fake, unread, calls } = setup({
+      conversations: [conversationOf({ id: "c1", unreadCount: 1 })],
+      refresh: () => {
+        reads += 1;
+        return reads === 1 ? stale.promise : Promise.resolve(pageWith("c1", 4));
+      },
+    });
+
+    await returnToVisible();
+    await waitFor(() => expect(calls.refreshes).toBe(1));
+
+    await publishUnread(fake, "c1", 4);
+    expect(unread("c1")).toBe("4");
+
+    await act(async () => {
+      stale.resolve(pageWith("c1", 3));
+    });
+
+    // Не «3»: устаревший снимок отброшен, круг перечитан и принёс 4.
+    await waitFor(() => expect(calls.refreshes).toBe(2));
+    await waitFor(() => expect(unread("c1")).toBe("4"));
+  });
+
+  it("перечитанный снимок без новых событий авторитетен: он новее события и заменяет его", async () => {
+    const stale = deferred<ConversationListPage>();
+    let reads = 0;
+    const { fake, unread, calls } = setup({
+      conversations: [conversationOf({ id: "c1", unreadCount: 1 })],
+      // Сервер отдаёт 3 и при повторном чтении.
+      refresh: () => {
+        reads += 1;
+        return reads === 1 ? stale.promise : Promise.resolve(pageWith("c1", 3));
+      },
+    });
+
+    await returnToVisible();
+    await waitFor(() => expect(calls.refreshes).toBe(1));
+    await publishUnread(fake, "c1", 4);
+    await act(async () => {
+      stale.resolve(pageWith("c1", 3));
+    });
+    await waitFor(() => expect(calls.refreshes).toBe(2));
+
+    // Второй круг прошёл без новых событий: он авторитетен, и число — его (3). Событие было
+    // раньше этого снимка, и снимок честно новее.
+    await waitFor(() => expect(unread("c1")).toBe("3"));
   });
 
   it("сверка берёт число из ответа, а не из пропса, оставшегося прежним", async () => {
@@ -1706,5 +1760,268 @@ describe("звук нового сообщения", () => {
     } finally {
       restoreIntersectionObserver();
     }
+  });
+});
+
+
+describe("узкий экран: список и беседа по очереди", () => {
+  const originalMatchMedia = window.matchMedia;
+
+  /** Телефон: `matchMedia` отвечает «узкий экран». Среда по умолчанию — не телефон. */
+  function givenPhone() {
+    window.matchMedia = ((query: string) => ({
+      matches: true,
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+      onchange: null,
+    })) as unknown as typeof window.matchMedia;
+  }
+
+  afterEach(() => {
+    window.matchMedia = originalMatchMedia;
+    window.history.replaceState(null, "", "/");
+  });
+
+  it("сначала список: панель беседы не смонтирована, соединение и история не подняты", async () => {
+    givenPhone();
+    const { container, calls } = setup({
+      conversations: [ANNA],
+      tail: () => Promise.resolve(tailOf([messageOf(1)])),
+    });
+
+    expect(container.querySelector("[data-screen]")?.getAttribute("data-screen")).toBe("list");
+    expect(container.querySelector("[data-conversation-id]")).toBeTruthy();
+    expect(container.querySelector("[data-composer-input]")).toBeNull();
+    // Первая беседа списка не открыта человеком: её история не грузится и не читается.
+    await Promise.resolve();
+    expect(calls.tails).toEqual([]);
+    expect(calls.receipts).toEqual([]);
+  });
+
+  it("на экране списка живо личное соединение: число меняется событием, а беседа по-прежнему не читается", async () => {
+    givenPhone();
+    const { container, fake, unread, calls } = setup({
+      conversations: [conversationOf({ id: "c1", unreadCount: 1 })],
+      tail: () => Promise.resolve(tailOf([messageOf(1)])),
+    });
+    expect(screenOf(container)).toBe("list");
+    expect(fake.calls.connect).toBe(1);
+
+    // Сообщение пришло, пока человек смотрит на список: число и карточка обновляются.
+    await publishUnread(fake, "c1", 4);
+    expect(unread("c1")).toBe("4");
+
+    // История не грузится и квитанций нет — свойство мобильного списка сохранено.
+    expect(calls.tails).toEqual([]);
+    expect(calls.receipts).toEqual([]);
+  });
+
+  it("соединение списка после (пере)подключения перечитывает список: пропущенное не теряется", async () => {
+    givenPhone();
+    const { fake, calls } = setup({
+      conversations: [conversationOf({ id: "c1" })],
+      refresh: () => Promise.resolve(emptyPage()),
+    });
+    expect(calls.refreshes).toBe(0);
+
+    await act(async () => {
+      fake.clientHandlers["connected"]?.();
+    });
+    await waitFor(() => expect(calls.refreshes).toBe(1));
+  });
+
+  it("беседа открыта — соединение списка закрыто, у панели своё: одно соединение, а не два", async () => {
+    givenPhone();
+    const { container, fake } = setup({
+      conversations: [ANNA],
+      tail: () => Promise.resolve(tailOf([messageOf(1)])),
+    });
+    expect(fake.calls.connect).toBe(1);
+    expect(fake.calls.disconnect).toBe(0);
+
+    fireEvent.click(container.querySelector("[data-conversation-id]")!);
+    await waitFor(() => expect(screen.getByText("message 1")).toBeTruthy());
+
+    expect(fake.calls.disconnect).toBe(1);
+    expect(fake.calls.connect).toBe(2);
+  });
+
+  it("нажатие открывает беседу, «назад» возвращает к списку", async () => {
+    givenPhone();
+    const { container } = setup({
+      conversations: [ANNA],
+      tail: () => Promise.resolve(tailOf([messageOf(1)])),
+    });
+
+    fireEvent.click(container.querySelector("[data-conversation-id]")!);
+    await waitFor(() => expect(screen.getByText("message 1")).toBeTruthy());
+    expect(container.querySelector("[data-screen]")?.getAttribute("data-screen")).toBe("chat");
+    expect(container.querySelector("[data-conversation-id]")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Back to chats" }));
+    await waitFor(() =>
+      expect(container.querySelector("[data-screen]")?.getAttribute("data-screen")).toBe("list"),
+    );
+    expect(container.querySelector("[data-composer-input]")).toBeNull();
+  });
+
+  it("системная кнопка «назад» (popstate) тоже возвращает к списку", async () => {
+    givenPhone();
+    const { container } = setup({
+      conversations: [ANNA],
+      tail: () => Promise.resolve(tailOf([messageOf(1)])),
+    });
+
+    fireEvent.click(container.querySelector("[data-conversation-id]")!);
+    await waitFor(() => expect(screen.getByText("message 1")).toBeTruthy());
+
+    act(() => {
+      window.history.replaceState(null, "", "/");
+      window.dispatchEvent(new PopStateEvent("popstate", { state: null }));
+    });
+    await waitFor(() =>
+      expect(container.querySelector("[data-screen]")?.getAttribute("data-screen")).toBe("list"),
+    );
+  });
+
+  const screenOf = (container: HTMLElement) =>
+    container.querySelector("[data-screen]")?.getAttribute("data-screen");
+
+  /** jsdom обходит историю асинхронно: ждём `popstate`. */
+  async function traverse(move: () => void) {
+    await act(async () => {
+      move();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+  }
+
+  it("открытие — шаг истории с беседой и адресом; «назад» → список и `/`; «вперёд» → та же беседа", async () => {
+    givenPhone();
+    const { container } = setup({
+      conversations: [ANNA],
+      tail: () => Promise.resolve(tailOf([messageOf(1)])),
+    });
+
+    fireEvent.click(container.querySelector("[data-conversation-id]")!);
+    await waitFor(() => expect(screen.getByText("message 1")).toBeTruthy());
+    expect(window.history.state).toEqual({ mobileChat: true, conversationId: ANNA.id });
+    expect(window.location.search).toBe(`?conversation=${ANNA.id}`);
+
+    await traverse(() => window.history.back());
+    expect(screenOf(container)).toBe("list");
+    expect(window.location.search).toBe("");
+
+    // «Вперёд»: история говорит «беседа», и экран обязан сказать то же.
+    await traverse(() => window.history.forward());
+    expect(screenOf(container)).toBe("chat");
+    await waitFor(() => expect(screen.getByText("message 1")).toBeTruthy());
+    expect(window.location.search).toBe(`?conversation=${ANNA.id}`);
+  });
+
+  it("нажатие на уведомление идёт тем же путём: шаг истории, и системное «назад» возвращает к списку", async () => {
+    givenPhone();
+    const worker = new EventTarget();
+    Object.defineProperty(navigator, "serviceWorker", { configurable: true, value: worker });
+    const view = setup({
+      conversations: [ANNA],
+      tail: () => Promise.resolve(tailOf([messageOf(1)])),
+    });
+    const { container } = view;
+    try {
+      expect(screenOf(container)).toBe("list");
+
+      await act(async () => {
+        worker.dispatchEvent(
+          new MessageEvent("message", { data: { type: "open-conversation", conversationId: ANNA.id } }),
+        );
+      });
+      await waitFor(() => expect(screenOf(container)).toBe("chat"));
+      expect(window.history.state).toEqual({ mobileChat: true, conversationId: ANNA.id });
+
+      await traverse(() => window.history.back());
+      expect(screenOf(container)).toBe("list");
+    } finally {
+      // Сначала размонтировать (снимает подписку на worker), потом убрать сам worker.
+      view.unmount();
+      Reflect.deleteProperty(navigator, "serviceWorker");
+    }
+  });
+
+  it("открытие по адресу: под беседой лежит список, «назад» ведёт к списку и чистому адресу", async () => {
+    givenPhone();
+    window.history.replaceState(null, "", `/?conversation=${ANNA.id}`);
+    const { container } = setup({
+      conversations: [ANNA],
+      tail: () => Promise.resolve(tailOf([messageOf(1)])),
+    });
+    expect(screenOf(container)).toBe("chat");
+    expect(window.history.state).toEqual({ mobileChat: true, conversationId: ANNA.id });
+
+    // Стрелка в шапке — тот же шаг назад: адрес и экран не расходятся.
+    fireEvent.click(screen.getByRole("button", { name: "Back to chats" }));
+    await traverse(() => {});
+    await waitFor(() => expect(screenOf(container)).toBe("list"));
+    expect(window.location.search).toBe("");
+  });
+
+  it("широкий экран не меняется: обе колонки, стрелки «назад» нет", async () => {
+    const { container } = setup({
+      conversations: [ANNA],
+      tail: () => Promise.resolve(tailOf([messageOf(1)])),
+    });
+
+    await waitFor(() => expect(screen.getByText("message 1")).toBeTruthy());
+    expect(container.querySelector("[data-screen]")?.getAttribute("data-screen")).toBe("both");
+    expect(container.querySelector("[data-conversation-id]")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Back to chats" })).toBeNull();
+  });
+});
+
+
+describe("левая колонка сворачивается (широкий экран)", () => {
+  const original = Object.getOwnPropertyDescriptor(window, "localStorage");
+
+  // Хранилище в памяти: у `localStorage` jsdom под этим Node бывает недоступен, а
+  // проверяется здесь запоминание выбора, а не браузерное хранилище.
+  beforeEach(() => {
+    const data = new Map<string, string>();
+    Object.defineProperty(window, "localStorage", {
+      configurable: true,
+      value: {
+        getItem: (key: string) => data.get(key) ?? null,
+        setItem: (key: string, value: string) => void data.set(key, value),
+        removeItem: (key: string) => void data.delete(key),
+      },
+    });
+  });
+
+  afterEach(() => {
+    if (original) Object.defineProperty(window, "localStorage", original);
+  });
+
+  it("свернуть → остаются аватары с тем же адресом беседы; развернуть → строки; выбор помнится", async () => {
+    const first = setup({ conversations: [ANNA], tail: () => Promise.resolve(tailOf([messageOf(1)])) });
+    await waitFor(() => expect(screen.getByText("message 1")).toBeTruthy());
+    expect(first.container.querySelector("[data-sidebar='collapsed']")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Collapse chats panel" }));
+    expect(first.container.querySelector("[data-sidebar='collapsed']")).toBeTruthy();
+    // Беседа по-прежнему находима одним адресом и выбирается кликом.
+    expect(first.container.querySelector(`[data-conversation-id="${ANNA.id}"]`)).toBeTruthy();
+    expect(screen.queryByText("Messages & People")).toBeNull();
+    expect(window.localStorage.getItem("messenger.sidebar.collapsed")).toBe("1");
+
+    // Новая страница читает запомненное.
+    first.unmount?.();
+    const second = setup({ conversations: [ANNA], tail: () => Promise.resolve(tailOf([messageOf(1)])) });
+    await waitFor(() => expect(second.container.querySelector("[data-sidebar='collapsed']")).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand chats panel" }));
+    expect(second.container.querySelector("[data-sidebar='collapsed']")).toBeNull();
+    expect(window.localStorage.getItem("messenger.sidebar.collapsed")).toBe("0");
   });
 });

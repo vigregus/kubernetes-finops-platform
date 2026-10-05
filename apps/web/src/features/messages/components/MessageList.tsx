@@ -239,7 +239,7 @@ export function MessageList({
   return (
     <div
       ref={scroller}
-      className="flex min-h-0 flex-1 flex-col overflow-y-auto px-6 py-4"
+      className="flex min-h-0 flex-1 flex-col overflow-y-auto px-3 py-4 md:px-6"
       data-applied-through-seq={appliedThroughSeq ?? undefined}
     >
       {messages.length > 0 || pending.length > 0 ? (

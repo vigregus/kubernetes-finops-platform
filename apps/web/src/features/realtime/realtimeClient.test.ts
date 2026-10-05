@@ -122,6 +122,49 @@ describe("«печатает»: канал набора", () => {
   });
 });
 
+describe("соединение списка бесед: без канала беседы (телефон, экран списка)", () => {
+  function givenListClient() {
+    const events: ConnectionEvent[] = [];
+    const publications: unknown[] = [];
+    const userPublications: unknown[] = [];
+    const typing: Array<[string, unknown]> = [];
+    const fake = givenFakeCentrifuge();
+    const tickets = givenTicketIssuer();
+    createRealtimeClient({
+      centrifugoUrl: CENTRIFUGO,
+      userChannel: OTHER_CHANNEL,
+      issueTicket: tickets.issueTicket,
+      onEvent: (event) => events.push(event),
+      onPublication: (payload) => publications.push(payload),
+      onUserPublication: (payload) => userPublications.push(payload),
+      onTypingPublication: (channel, payload) => typing.push([channel, payload]),
+      createCentrifuge: fake.factory,
+    });
+    return { fake, events, publications, userPublications, typing };
+  }
+
+  it("личный канал и наборы доходят, публикации беседы — нет", () => {
+    const { fake, publications, userPublications, typing } = givenListClient();
+
+    fake.clientHandlers["publication"]?.({ channel: OTHER_CHANNEL, data: { n: 1 } });
+    fake.clientHandlers["publication"]?.({ channel: TYPING_CHANNEL, data: { n: 2 } });
+    fake.clientHandlers["publication"]?.({ channel: CHANNEL, data: { n: 3 } });
+
+    expect(userPublications).toEqual([{ n: 1 }]);
+    expect(typing).toEqual([[TYPING_CHANNEL, { n: 2 }]]);
+    // Беседа не открыта: её публикация не уходит никуда, а не «первому попавшемуся».
+    expect(publications).toEqual([]);
+  });
+
+  it("подписка на канал беседы автомату не передаётся: беседы нет", () => {
+    const { fake, events } = givenListClient();
+
+    fake.clientHandlers["subscribed"]?.({ channel: CHANNEL, wasRecovering: false, recovered: false });
+
+    expect(events).toEqual([]);
+  });
+});
+
 describe("свежий тикет на каждую попытку соединения", () => {
   // Детектор B5/B15. Тикет живёт 120 секунд, а переподключение после окна
   // офлайна случается позже. Статическое `data` прошло бы все прочие

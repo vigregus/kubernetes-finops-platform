@@ -121,7 +121,7 @@ export function MessageBubble({ message, onRetry }: MessageBubbleProps) {
   if (isOwn) {
     return (
       <div className="flex items-end justify-end gap-2">
-        <div className="flex max-w-[70%] flex-col items-end">
+        <div className="flex max-w-[86%] md:max-w-[70%] flex-col items-end">
           {body}
           <DeliveryStatus message={message} onRetry={onRetry} />
         </div>
@@ -132,7 +132,7 @@ export function MessageBubble({ message, onRetry }: MessageBubbleProps) {
   return (
     <div className="flex items-end gap-2.5">
       <Avatar name={message.authorName ?? "Contact"} src={message.avatarUrl} size="sm" />
-      <div className="flex max-w-[70%] flex-col items-start">
+      <div className="flex max-w-[86%] md:max-w-[70%] flex-col items-start">
         <span className="mb-1 ml-1 text-xs text-text-warm-muted">{message.authorName}</span>
         {body}
         <span className="ml-1 mt-1 text-xs text-text-warm-muted">{message.timestamp}</span>

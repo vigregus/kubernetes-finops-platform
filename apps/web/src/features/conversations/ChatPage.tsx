@@ -33,6 +33,7 @@ import type { ResendVerificationEmail } from "../auth/components/EmailVerificati
 import { ConnectionStatusLine } from "../realtime/components/ConnectionStatusLine"
 import type { CentrifugeFactory } from "../realtime/realtimeClient"
 import { useRealtimeConnection } from "../realtime/useRealtimeConnection"
+import { useListRealtime } from "../realtime/useListRealtime"
 import type { ConnectionEvent, ConnectionMachineState } from "../realtime/connectionMachine"
 import {
   INITIAL_CONNECTION_TELEMETRY_CONTEXT,
@@ -51,6 +52,7 @@ import { TypingIndicator } from "../messages/components/TypingIndicator"
 import { useVoiceRecorder } from "../attachments/useVoiceRecorder"
 import { browserVoiceDeps } from "../attachments/voiceRecorder"
 import { MessengerLayout } from "../../shared/ui/MessengerLayout"
+import { useIsMobile } from "../../shared/lib/useIsMobile"
 import { useCalls } from "../calls/CallsProvider"
 import type {
   ChatMessage,
@@ -256,9 +258,96 @@ export function ChatPage({
     return conversations.find((item) => item.id === wanted)?.id ?? conversations[0]?.id ?? null
   })
 
-  // Нажатие на уведомление при уже открытой вкладке: Service Worker шлёт
-  // сообщение, и открывается нужная беседа.
-  useEffect(() => listenForOpenConversation(setActiveId), [])
+  /**
+   * Узкий экран: список бесед и беседа занимают его по очереди. Панель беседы там
+   * **не монтируется**, пока её не открыли (`useIsMobile`): первая беседа списка
+   * иначе подняла бы соединение и отметила прочитанным то, что человек не открывал.
+   *
+   * ## Навигация — одна модель на три места
+   *
+   * Состояние живёт в трёх местах: React (`chatOpen`, `activeId`), адрес и `history.state`.
+   * Они согласованы так: список — `/`, беседа — `/?conversation=<id>` со
+   * `history.state = { mobileChat: true, conversationId }`. `popstate` в **обе стороны**
+   * (назад и вперёд) восстанавливает полное состояние из `history.state`, поэтому
+   * перезагрузка, «назад» и «вперёд» дают одно и то же. Любое открытие беседы на телефоне
+   * (нажатие в списке, уведомление, адрес) идёт через `navigateToChat`.
+   */
+  const isMobile = useIsMobile()
+  const [chatOpen, setChatOpen] = useState(() => {
+    const wanted = conversationFromUrl(window.location.search)
+    return wanted !== null && conversations.some((item) => item.id === wanted)
+  })
+  // Свёрнутая левая колонка (широкий экран): выбор помнится между визитами. Хранилище
+  // может быть недоступно (приватное окно) — тогда колонка просто развёрнута.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(readSidebarCollapsed)
+  const toggleSidebar = useCallback(() => {
+    setSidebarCollapsed((current) => {
+      writeSidebarCollapsed(!current)
+      return !current
+    })
+  }, [])
+  const isMobileRef = useRef(isMobile)
+  useEffect(() => {
+    isMobileRef.current = isMobile
+  }, [isMobile])
+  const conversationsRef = useRef(conversations)
+  useEffect(() => {
+    conversationsRef.current = conversations
+  }, [conversations])
+
+  /** Открыть беседу. На телефоне — ещё и шаг истории с адресом `/?conversation=<id>`. */
+  const navigateToChat = useCallback((id: string) => {
+    setActiveId(id)
+    setChatOpen(true)
+    if (!isMobileRef.current) return
+    const state: MobileChatState = { mobileChat: true, conversationId: id }
+    const url = chatUrl(id)
+    // Уже в беседе (другая беседа по уведомлению, повтор нажатия): шаг не добавляется, а
+    // заменяется — иначе «назад» пришлось бы нажимать по числу открытых бесед.
+    if (isMobileChatState(window.history.state)) window.history.replaceState(state, "", url)
+    else window.history.pushState(state, "", url)
+  }, [])
+
+  /** «Назад к списку»: шаг истории назад; без шага (адрес, замена) — прямо и с чистым адресом. */
+  const closeChat = useCallback(() => {
+    if (isMobileChatState(window.history.state)) {
+      window.history.back()
+    } else {
+      window.history.replaceState(null, "", LIST_URL)
+      setChatOpen(false)
+    }
+  }, [])
+
+  // Открыли по адресу (`?conversation=`, нажатие на уведомление открыло вкладку) на телефоне:
+  // под беседой должен лежать список, иначе «назад» уйдёт из приложения, а адрес и экран
+  // разойдутся. Один раз, при монтировании.
+  useEffect(() => {
+    const wanted = conversationFromUrl(window.location.search)
+    if (!isMobileRef.current || wanted === null || isMobileChatState(window.history.state)) return
+    if (!conversationsRef.current.some((item) => item.id === wanted)) return
+    window.history.replaceState(null, "", LIST_URL)
+    window.history.pushState({ mobileChat: true, conversationId: wanted } satisfies MobileChatState, "", chatUrl(wanted))
+  }, [])
+
+  useEffect(() => {
+    const onPopState = (event: PopStateEvent) => {
+      if (isMobileChatState(event.state)) {
+        // «Вперёд» (и «назад» на другую беседу): восстановить беседу целиком.
+        if (conversationsRef.current.some((item) => item.id === event.state.conversationId)) {
+          setActiveId(event.state.conversationId)
+          setChatOpen(true)
+          return
+        }
+      }
+      setChatOpen(false)
+    }
+    window.addEventListener("popstate", onPopState)
+    return () => window.removeEventListener("popstate", onPopState)
+  }, [])
+
+  // Нажатие на уведомление при уже открытой вкладке: Service Worker шлёт сообщение, и
+  // беседа открывается **тем же путём**, что и нажатием в списке (шаг истории, адрес).
+  useEffect(() => listenForOpenConversation(navigateToChat), [navigateToChat])
 
   // Web Push (G4): баннер «включить уведомления». Среда браузера — одна на
   // страницу; без подписки на сервере (`pushSubscriptions`) баннера нет.
@@ -307,10 +396,26 @@ export function ChatPage({
    * второй раз. Сложение на повторе сдвинуло бы счётчик вверх ровно там, где
    * исправить его нечем.
    */
+  /**
+   * Событие и сверка не должны затирать друг друга. Пока идёт круг REST, событие личного канала
+   * может прийти **новее** снимка, который сервер уже начал собирать: ответ с прежним числом
+   * откатил бы число назад (а «максимум» не годится — непрочитанное и уменьшается). Поэтому
+   * событие, пришедшее посреди круга, помечает его «грязным», и его снимок не применяется
+   * вслепую: круг повторяется (читаем заново), а события, пришедшие за последний круг,
+   * остаются поверх снимка.
+   */
+  const refreshing = useRef(false)
+  const dirtyDuringRefresh = useRef(false)
+  const eventsDuringRefresh = useRef(new Map<string, number>())
+
   const onUnreadPublication = useCallback((payload: unknown) => {
     const change = adaptUnreadChanged(payload)
     if (change === null) return
 
+    if (refreshing.current) {
+      dirtyDuringRefresh.current = true
+      eventsDuringRefresh.current.set(change.conversationId, change.unreadCount)
+    }
     setOverlay((current) => {
       const next = new Map(current)
       next.set(change.conversationId, change.unreadCount)
@@ -319,7 +424,6 @@ export function ChatPage({
   }, [])
 
   /** Сверка: круг REST за истиной. Общий на оба повода — ответ один и тот же. */
-  const refreshing = useRef(false)
   const refresh = useCallback(async () => {
     // Два повода могут совпасть (возврат видимости сразу за выходом из
     // разрыва). Второй круг при этом не отменяется, а **не начинается**:
@@ -327,12 +431,21 @@ export function ChatPage({
     if (refreshing.current) return
     refreshing.current = true
     try {
-      const page = await refreshConversations()
-      // Момент времени — свой, а не тот, что был на загрузке: список
-      // перечитывается сейчас, и display-время обязано считаться от этого
-      // момента, иначе «14:22» уехало бы в прошлое от самой сверки.
-      setBase(adaptConversations(page, currentUserId, new Date()))
-      setOverlay(EMPTY_OVERLAY)
+      for (let pass = 1; pass <= MAX_REFRESH_PASSES; pass += 1) {
+        dirtyDuringRefresh.current = false
+        eventsDuringRefresh.current = new Map()
+        const page = await refreshConversations()
+        // Событие пришло, пока шёл запрос: снимок мог начаться раньше него. Читаем заново.
+        if (dirtyDuringRefresh.current && pass < MAX_REFRESH_PASSES) continue
+
+        // Момент времени — свой, а не тот, что был на загрузке: список
+        // перечитывается сейчас, и display-время обязано считаться от этого
+        // момента, иначе «14:22» уехало бы в прошлое от самой сверки.
+        setBase(adaptConversations(page, currentUserId, new Date()))
+        // Последний круг тоже мог пересечься с событием: оно остаётся поверх снимка.
+        setOverlay(dirtyDuringRefresh.current ? new Map(eventsDuringRefresh.current) : EMPTY_OVERLAY)
+        return
+      }
     } catch {
       // Отказ сверки оставлен без строки на экране, и это не «проглочено»:
       // сверка не обещает ничего нового — она заменяет уже показанное более
@@ -400,10 +513,10 @@ export function ChatPage({
       setBase((current) =>
         current.some((item) => item.id === conversation.id) ? current : [conversation, ...current],
       )
-      setActiveId(conversation.id)
+      navigateToChat(conversation.id)
       setCreatingConversation(false)
     },
-    [currentUserId],
+    [currentUserId, navigateToChat],
   )
 
   // Слияние — на каждом рендере списка, а не при приходе события: иначе
@@ -512,9 +625,29 @@ export function ChatPage({
 
   const activeConversation = merged.find((c) => c.id === activeId) ?? null
 
+  /**
+   * Телефон, экран списка: панели беседы нет, а соединение, которое слушает личный
+   * канал и наборы, живёт в ней. Без своего соединения список был бы снимком на момент
+   * загрузки: новое сообщение не меняло бы ни число, ни превью. Пока беседа открыта,
+   * соединение у панели; здесь оно выключено, чтобы не держать два.
+   */
+  const listScreen = isMobile && !(chatOpen && activeConversation !== null)
+  useListRealtime({
+    enabled: listScreen,
+    centrifugoUrl,
+    userChannel: `user:${currentUserId}`,
+    issueTicket,
+    onUserPublication: onUnreadPublication,
+    onTypingPublication: typing.onPublication,
+    // Пока соединения не было, события могли пройти мимо: список перечитывается.
+    onConnected: refresh,
+    ...(createCentrifuge === undefined ? {} : { createCentrifuge }),
+  })
+
   return (
     <>
       <MessengerLayout
+        screen={!isMobile ? "both" : chatOpen && activeConversation !== null ? "chat" : "list"}
         // `=== false`, а не `!currentUser.emailVerified`: `undefined` —
         // «сервер об этом не сообщал», а не «не подтверждён» (тот же довод,
         // что у `peerReadState`/`lastSeenAt` в `shared/lib/types.ts`), и
@@ -532,9 +665,12 @@ export function ChatPage({
         sidebar={
           <ConversationSidebar
             conversations={withTyping}
-            activeConversationId={activeConversation?.id ?? null}
+            // Узкий экран: беседа открывается на весь экран, подсвечивать в списке нечего.
+            activeConversationId={isMobile ? null : (activeConversation?.id ?? null)}
             currentUser={currentUser}
-            onSelectConversation={setActiveId}
+            onSelectConversation={navigateToChat}
+            collapsed={!isMobile && sidebarCollapsed}
+            {...(isMobile ? {} : { onToggleCollapsed: toggleSidebar })}
             // Проп передан — кнопка новой беседы **есть** (D10). До этого среза
             // он оставался непереданным, и кнопки не существовало вовсе: не
             // «спрятана», а не нарисована.
@@ -563,6 +699,7 @@ export function ChatPage({
            */
           <ConversationPane
             key={activeConversation.id}
+            onBack={isMobile ? closeChat : undefined}
             conversation={activeConversation}
             currentUserId={currentUserId}
             history={history}
@@ -615,7 +752,50 @@ export function ChatPage({
   )
 }
 
+interface MobileChatState {
+  mobileChat: true
+  conversationId: string
+}
+
+function isMobileChatState(value: unknown): value is MobileChatState {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as Record<string, unknown>)["mobileChat"] === true &&
+    typeof (value as Record<string, unknown>)["conversationId"] === "string"
+  )
+}
+
+const LIST_URL = "/"
+
+function chatUrl(conversationId: string): string {
+  return `/?conversation=${encodeURIComponent(conversationId)}`
+}
+
+/** Сколько раз круг сверки перечитывается, если посреди него пришло событие личного канала. */
+const MAX_REFRESH_PASSES = 3
+
+const SIDEBAR_COLLAPSED_KEY = "messenger.sidebar.collapsed"
+
+function readSidebarCollapsed(): boolean {
+  try {
+    return window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1"
+  } catch {
+    return false
+  }
+}
+
+function writeSidebarCollapsed(collapsed: boolean): void {
+  try {
+    window.localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? "1" : "0")
+  } catch {
+    // Выбор не запомнится, интерфейс работает.
+  }
+}
+
 interface ConversationPaneProps {
+  /** Узкий экран: вернуться к списку бесед. На широком не передаётся. */
+  onBack?: () => void
   conversation: Conversation
   currentUserId: string
   history: HistorySource
@@ -668,6 +848,7 @@ interface ConversationPaneProps {
  * сообщения по номерам собеседника.
  */
 function ConversationPane({
+  onBack,
   conversation,
   currentUserId,
   history,
@@ -693,17 +874,29 @@ function ConversationPane({
    * ведёт в отказ, хуже отсутствующей.
    */
   const calls = useCalls()
-  const callHandlers =
+  const callsReady =
     calls !== null &&
     calls.supported &&
     calls.signalingUp &&
     conversation.peerUserId !== undefined &&
     (calls.view.phase === "idle" || calls.view.phase === "ended")
-      ? {
-          onVoiceCall: () => calls.startCall(conversation.id, "audio", conversation.name),
-          onVideoCall: () => calls.startCall(conversation.id, "video", conversation.name),
-        }
-      : {}
+  const callHandlers = callsReady
+    ? {
+        onVoiceCall: () => calls.startCall(conversation.id, "audio", conversation.name),
+        onVideoCall: () => calls.startCall(conversation.id, "video", conversation.name),
+      }
+    : {}
+  // Звонки на этом окружении есть, а кнопки сейчас не работают: причина — в подсказке
+  // выключенных кнопок, а не молчаливое отсутствие. Без собеседника (не беседа
+  // один-на-один) и во время другого звонка кнопок нет вовсе.
+  const callUnavailableReason =
+    calls === null || callsReady || conversation.peerUserId === undefined
+      ? undefined
+      : !calls.supported
+        ? "Calls need a trusted HTTPS connection and a browser with camera and microphone access."
+        : !calls.signalingUp
+          ? "Connecting to the call service…"
+          : undefined
 
   /**
    * Лента этого окна — в ссылке, потому что публикации достаются обработчику,
@@ -1114,7 +1307,9 @@ function ConversationPane({
     >
       <ChatHeader
         conversation={typingNames.length > 0 ? { ...conversation, typingNames: [...typingNames] } : conversation}
+        {...(onBack === undefined ? {} : { onBack })}
         {...callHandlers}
+        {...(callUnavailableReason === undefined ? {} : { callUnavailableReason })}
       />
 
       {conversationHistory.phase === "error" ? (

@@ -1,0 +1,29 @@
+import { ColorItem, ColorPalette, Meta, Typeset } from "@storybook/addon-docs/blocks"
+
+<Meta title="Foundations/Tokens" />
+
+# Токены
+
+Источник — `@theme` в `src/index.css`. Значения здесь — те же, что в коде; меняются только там.
+
+<ColorPalette>
+  <ColorItem title="Поверхности" subtitle="surface, surface-cream, surface-container*" colors={{ surface: "#fff8f6", "surface-cream": "#fdfcf7", "surface-container": "#f5ecea", "surface-container-low": "#fbf2f0", "surface-container-high": "#efe6e4", "surface-warm-subtle": "#efece4" }} />
+  <ColorItem title="Текст" subtitle="on-surface, text-*" colors={{ "on-surface": "#1e1b1a", "on-surface-variant": "#5a4138", "text-charcoal": "#1c1917", "text-warm-secondary": "#57534e", "text-warm-muted": "#78716c" }} />
+  <ColorItem title="Акцент и статусы" subtitle="accent-*, status-*" colors={{ "accent-terracotta": "#ea580c", "accent-amber": "#d97706", "status-success": "#15803d", "status-warning": "#b45309", "status-error": "#c2410c" }} />
+  <ColorItem title="Границы и ошибки" subtitle="outline-variant, error-container" colors={{ "outline-variant": "#e2bfb2", "error-container": "#ffdad6" }} />
+</ColorPalette>
+
+## Шрифты
+
+<Typeset
+  fontFamily="Plus Jakarta Sans, ui-sans-serif, system-ui, sans-serif"
+  fontSizes={[11, 12, 13, 14, 15, 18, 20, 24]}
+  fontWeight={600}
+  sampleText="Vector — сообщения и люди"
+/>
+
+Моноширинный — `JetBrains Mono` (`font-mono`), иконки — Material Symbols Outlined (атом `Icon`).
+
+## Безопасные зоны
+
+`.p-safe` добавляет отступы под вырез, скругления и жестовую полосу со всех четырёх сторон (`env(safe-area-inset-*)`) и ставится **один раз на самом внешнем элементе** (`MessengerLayout`, оверлей звонка): баннер над шапкой тоже ниже выреза, а собственные отступы компонентов складываются с вырезом. Работает вместе с `viewport-fit=cover` в `index.html`.

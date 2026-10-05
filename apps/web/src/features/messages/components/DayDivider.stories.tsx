@@ -2,7 +2,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite"
 import { DayDivider } from "./DayDivider"
 
 const meta: Meta<typeof DayDivider> = {
-  title: "Messages/DayDivider",
+  title: "Atoms/DayDivider",
   component: DayDivider,
   args: { label: "Today" },
   decorators: [(Story) => <div className="max-w-md p-6"><Story /></div>],

@@ -36,7 +36,7 @@ export function MessageTimeline({
   }
 
   return (
-    <div ref={containerRef} className="mx-auto flex w-full max-w-4xl flex-1 flex-col space-y-4 overflow-y-auto px-6 py-4">
+    <div ref={containerRef} className="mx-auto flex w-full max-w-4xl flex-1 flex-col space-y-4 overflow-y-auto px-3 py-4 md:px-6">
       <DayDivider label={dayLabel} />
       {messages.map((message) => (
         <Fragment key={message.id}>

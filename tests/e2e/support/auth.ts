@@ -1,5 +1,5 @@
 import { expect } from "@playwright/test"
-import type { Browser, BrowserContext, Page, Response } from "@playwright/test"
+import type { Browser, BrowserContext, BrowserContextOptions, Page, Response } from "@playwright/test"
 // Единый источник имени ключа — модуль клиента. Копия строки разошлась бы с ним
 // молча: вход завёл бы второе устройство, и `devices` выросли бы на пустом месте.
 import { DEVICE_ID_KEY } from "../../../apps/web/src/features/auth/deviceId"
@@ -137,10 +137,14 @@ class CallbackFailedError extends Error {
 const SIGN_IN_ATTEMPTS = 3
 
 /** Вход настоящим authorization-code: `directAccessGrantsEnabled: false`, парольным грантом токен не взять. */
-export async function signIn(browser: Browser, fixture: Fixture): Promise<SignedIn> {
+export async function signIn(
+	browser: Browser,
+	fixture: Fixture,
+	contextOptions: BrowserContextOptions = {},
+): Promise<SignedIn> {
 	for (let attempt = 1; attempt <= SIGN_IN_ATTEMPTS; attempt += 1) {
 		try {
-			return await signInOnce(browser, fixture)
+			return await signInOnce(browser, fixture, contextOptions)
 		} catch (error) {
 			if (attempt === SIGN_IN_ATTEMPTS || !(error instanceof CallbackFailedError)) {
 				throw error
@@ -152,12 +156,18 @@ export async function signIn(browser: Browser, fixture: Fixture): Promise<Signed
 	throw new Error("unreachable: цикл signIn обязан вернуть или бросить на последней попытке")
 }
 
-async function signInOnce(browser: Browser, fixture: Fixture): Promise<SignedIn> {
+async function signInOnce(
+	browser: Browser,
+	fixture: Fixture,
+	contextOptions: BrowserContextOptions,
+): Promise<SignedIn> {
 	const context = await browser.newContext({
 		baseURL: BASE_URL,
 		// Локальный удостоверяющий центр стенда; `browser.newContext()` не
 		// наследует `use` проекта, поэтому задаётся здесь явно.
 		ignoreHTTPSErrors: true,
+		// Устройство приёмки (телефон): вьюпорт, касания, `isMobile`.
+		...contextOptions,
 	})
 
 	try {
