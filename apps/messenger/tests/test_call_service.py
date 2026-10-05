@@ -477,42 +477,69 @@ def ice(call_id, by, turn, limiter=None, now=None):
         Conn(), turn=turn, limiter=limiter or Limiter(), user_id=by, call_id=call_id, now=now))
 
 
-def test_turn_выдаётся_участнику_до_конца_допустимого_звонка(store):
-    from messenger.adapters.turn import IceServer
+def accepted_call(store):
     call_id = start().call.call_id
+    run(service.accept(Conn(), realtime=None, user_id=B, call_id=call_id))
+    return call_id
+
+
+def test_turn_выдаётся_участнику_принятого_звонка_на_минуты(store):
+    from messenger.adapters.turn import IceServer
+    call_id = accepted_call(store)
     turn = Turn([IceServer(urls=("turn:x",), username="u", credential="c")])
     result = ice(call_id, B, turn, now=NOW)
     assert result.servers == [{"urls": ["turn:x"], "username": "u", "credential": "c"}]
-    # Срок — конец допустимой длины звонка, а не десять минут: движок не обновляет данные.
-    expected = int(NOW.timestamp()) + domain.TURN_MAX_CALL_SECONDS
-    assert turn.calls[0]["expires_at"] == expected
-    assert result.ttl_seconds == domain.TURN_MAX_CALL_SECONDS
-    # Субъект — пара «звонок, участник»: от неё зависит стабильность данных.
-    assert turn.calls[0]["subject"] == f"{call_id}:{B}"
+    # Срок — минуты: данные, выданные на часы, пережили бы звонок в двадцать секунд.
+    assert 300 <= result.ttl_seconds <= domain.TURN_TTL_SECONDS
+    assert turn.calls[0]["expires_at"] == int(NOW.timestamp()) + result.ttl_seconds
+    assert turn.calls[0]["expires_at"] % domain.TURN_WINDOW_SECONDS == 0
+    # Субъект — человек, а не звонок: квота coturn не сбрасывается новым звонком.
+    assert turn.calls[0]["subject"] == str(B)
 
 
-def test_данные_turn_стабильны_для_одной_пары_и_различны_для_разных(store):
+def test_пока_звонит_данные_turn_не_выдаются(store):
+    """Данные, выданные на стадии `ringing`, позволяли бы копить их, бросая звонки."""
     call_id = start().call.call_id
+    turn = Turn([])
+    result = ice(call_id, A, turn)
+    assert result.rejection is Reason.CALL_NOT_READY
+    assert turn.calls == []
+
+
+def test_данные_turn_стабильны_для_человека_внутри_окна_и_различны_у_людей(store):
+    call_id = accepted_call(store)
     from messenger.adapters.turn import CoturnProvider
     provider = CoturnProvider(secret="s", urls=("turn:x",), now=lambda: 1.0)
 
-    def username(by):
-        result = ice(call_id, by, provider, now=NOW)
-        return result.servers[0]["username"]
+    def username(by, when):
+        return ice(call_id, by, provider, now=when).servers[0]["username"]
 
-    assert username(A) == username(A)
-    assert username(A) != username(B)
+    inside = NOW + timedelta(seconds=30)
+    assert username(A, NOW) == username(A, NOW) == username(A, inside)
+    assert username(A, NOW) != username(B, NOW)
+    # следующее окно — новое имя: старые данные не живут вечно
+    assert username(A, NOW) != username(A, NOW + timedelta(seconds=domain.TURN_WINDOW_SECONDS + 1))
+
+
+def test_новый_звонок_того_же_человека_даёт_то_же_имя_а_не_свежую_квоту(store):
+    from messenger.adapters.turn import CoturnProvider
+    provider = CoturnProvider(secret="s", urls=("turn:x",), now=lambda: 1.0)
+    first = accepted_call(store)
+    name = ice(first, A, provider, now=NOW).servers[0]["username"]
+    run(service.hangup(Conn(), realtime=None, user_id=A, call_id=first))
+    second = accepted_call(store)
+    assert ice(second, A, provider, now=NOW).servers[0]["username"] == name
 
 
 def test_частые_запросы_данных_turn_ограничены(store):
-    call_id = start().call.call_id
+    call_id = accepted_call(store)
     result = ice(call_id, A, Turn([]), limiter=Limiter(allowed=False))
     assert result.rejection is Reason.RATE_LIMITED
     assert result.retry_after_seconds == 7
 
 
 def test_turn_не_выдаётся_постороннему_и_после_завершения(store):
-    call_id = start().call.call_id
+    call_id = accepted_call(store)
     turn = Turn([])
     assert ice(call_id, C, turn).rejection is Reason.CALL_NOT_FOUND
     run(service.hangup(Conn(), realtime=None, user_id=A, call_id=call_id))
@@ -521,7 +548,7 @@ def test_turn_не_выдаётся_постороннему_и_после_за�
 
 
 def test_недоступный_turn_не_роняет_звонок(store):
-    call_id = start().call.call_id
+    call_id = accepted_call(store)
     assert ice(call_id, A, Turn(None)).servers == []
 
 

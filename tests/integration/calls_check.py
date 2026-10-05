@@ -150,6 +150,10 @@ async def run() -> None:
                       f"{reply.status_code}")
             reply = await call("GET", f"/calls/{call_id}/ice-servers", c)
             check("CALL-008: TURN постороннему: 404", reply.status_code == 404, f"{reply.status_code}")
+            reply = await call("GET", f"/calls/{call_id}/ice-servers", a)
+            check("CALL-008: пока звонит, данные TURN не выдаются: 409 call_not_ready",
+                  reply.status_code == 409 and reply.json().get("code") == "call_not_ready",
+                  f"{reply.status_code} {reply.text[:100]}")
             reply = await call("POST", f"/calls/{call_id}/accept", a)
             check("звонящий не может принять свой звонок: 404", reply.status_code == 404, f"{reply.status_code}")
             reply = await call("POST", f"/calls/{call_id}/signals", c, {"type": "offer", "sdp": "v=0"})
@@ -215,8 +219,8 @@ async def run() -> None:
                   bool(servers) and ":" in str(servers[0].get("username", ""))
                   and bool(servers[0].get("credential")), str(servers)[:160])
             ttl = ice.json().get("ttl_seconds", 0) if ice.status_code == 200 else 0
-            check("срок данных — до конца допустимого звонка, а не десять минут", ttl > 3600,
-                  f"ttl_seconds={ttl}")
+            check("срок данных — минуты (300–600 с), а не часы: они не должны пережить звонок",
+                  300 <= ttl <= 600, f"ttl_seconds={ttl}")
             again = await call("GET", f"/calls/{call_id}/ice-servers", a)
             same = again.status_code == 200 and again.json().get("ice_servers") == servers
             check("данные стабильны: повторный запрос возвращает то же имя (квота coturn действует)",

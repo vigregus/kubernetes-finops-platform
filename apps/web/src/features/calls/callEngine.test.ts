@@ -43,8 +43,17 @@ class FakePeer {
   onicecandidate: ((e: { candidate: unknown }) => void) | null = null
   onconnectionstatechange: (() => void) | null = null
   senders: Array<{ track: FakeTrack }> = []
+  configuration: RTCConfiguration = {}
+  configurations: RTCConfiguration[] = []
   stats = new Map<string, Record<string, unknown>>()
 
+  getConfiguration() {
+    return this.configuration
+  }
+  setConfiguration(configuration: RTCConfiguration) {
+    this.configuration = configuration
+    this.configurations.push(configuration)
+  }
   addTrack(track: FakeTrack) {
     this.senders.push({ track })
   }
@@ -119,7 +128,7 @@ function rig(overrides: Partial<EngineOptions> & { mediaFails?: Array<boolean> }
     sendSignal: async (signal) => {
       sent.push(signal)
     },
-    iceServers: async () => [{ urls: "stun:x" }],
+    iceServers: async () => ({ servers: [{ urls: "stun:x" }], ttlSeconds: 600 }),
     onLocalStream: () => events.push("local"),
     onRemoteStream: () => events.push("remote"),
     onConnected: (type) => events.push(`connected:${type}`),
@@ -320,5 +329,73 @@ describe("соединение и обрыв (CALL-011)", () => {
     }
     await r.engine.handleSignal({ type: "answer", sdp: "x" })
     expect(r.events).toContain("failed:failed")
+  })
+})
+
+
+describe("обновление данных TURN (долгий релейный звонок)", () => {
+  /** Движок, у которого `iceServers` выдаёт пронумерованные данные и срок. */
+  function refreshRig(ttlSeconds = 600) {
+    const issued: string[] = []
+    const r = rig({
+      iceServers: async () => {
+        issued.push(`n${issued.length + 1}`)
+        return {
+          servers: [{ urls: "turn:x", username: `u${issued.length}`, credential: "c" }],
+          ttlSeconds,
+        }
+      },
+    })
+    return { ...r, issued }
+  }
+
+  it("новые данные берутся за минуту до конца срока и ставятся в соединение", async () => {
+    const r = refreshRig(600)
+    await r.engine.start()
+    expect(r.issued).toHaveLength(1)
+    // таймер обновления: срок минус минута
+    expect(r.timers.some((t) => t.ms === 540_000 && !t.cleared)).toBe(true)
+
+    fire(r, 540_000)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(r.issued).toHaveLength(2)
+    const applied = r.peer.configurations.at(-1)?.iceServers?.[0] as { username: string } | undefined
+    expect(applied?.username).toBe("u2")
+    // и следующее обновление уже назначено
+    expect(r.timers.some((t) => t.ms === 540_000 && !t.cleared)).toBe(true)
+  })
+
+  it("короткий срок не даёт частить: не чаще чем раз в 30 секунд", async () => {
+    const r = refreshRig(70)
+    await r.engine.start()
+    expect(r.timers.some((t) => t.ms === 30_000)).toBe(true)
+  })
+
+  it("неудачное обновление повторяется через 20 секунд, звонок не рвётся", async () => {
+    let calls = 0
+    const r = rig({
+      iceServers: async () => {
+        calls += 1
+        if (calls === 2) throw new Error("API недоступно")
+        return { servers: [{ urls: "turn:x" }], ttlSeconds: 600 }
+      },
+    })
+    await r.engine.start()
+    fire(r, 540_000)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(r.events).not.toContain("failed:failed")
+    expect(r.timers.some((t) => t.ms === 20_000 && !t.cleared)).toBe(true)
+    fire(r, 20_000)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(calls).toBe(3)
+  })
+
+  it("после закрытия обновление не идёт", async () => {
+    const r = refreshRig(600)
+    await r.engine.start()
+    r.engine.close()
+    expect(r.timers.filter((t) => t.ms === 540_000).every((t) => t.cleared)).toBe(true)
+    fire(r, 540_000)
+    expect(r.issued).toHaveLength(1)
   })
 })

@@ -227,12 +227,15 @@ const callsOperations: CallsOperations = {
     toCallView(await callsApi.reportCallConnected({ callId, callConnected: { connectionType } })),
   signal: (callId, signal) => callsApi.sendCallSignal({ callId, callSignal: toCallSignal(signal) }),
   iceServers: async (callId) => {
-    const { iceServers } = await callsApi.getCallIceServers({ callId });
-    return iceServers.map((server) => ({
-      urls: server.urls,
-      ...(server.username === undefined ? {} : { username: server.username }),
-      ...(server.credential === undefined ? {} : { credential: server.credential }),
-    }));
+    const { iceServers, ttlSeconds } = await callsApi.getCallIceServers({ callId });
+    return {
+      ttlSeconds,
+      servers: iceServers.map((server) => ({
+        urls: server.urls,
+        ...(server.username === undefined ? {} : { username: server.username }),
+        ...(server.credential === undefined ? {} : { credential: server.credential }),
+      })),
+    };
   },
 };
 

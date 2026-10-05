@@ -235,7 +235,7 @@ export function CallsProvider({
   )
 
   /** Поднимает движок, когда звонок принят, — один раз за звонок. */
-  const ensureEngine = useCallback(() => {
+  const ensureEngine = useCallback((after?: Promise<unknown>) => {
     const current = viewRef.current
     if (engineRef.current !== null || env === null || current.callId === null || current.role === null) return
     const callId = current.callId
@@ -248,7 +248,14 @@ export function CallsProvider({
       // выдаётся по порядку прихода — и `offer` получал бы номер больше, чем
       // кандидаты, пришедшие раньше.
       sendSignal: createSerialQueue<WireSignal>((signal) => ops.signal(callId, signal)),
-      iceServers: () => ops.iceServers(callId),
+      // Данные TURN выдаются только **принятому** звонку. Вызываемый поднимает
+      // движок в момент нажатия, до ответа сервера на «принять», поэтому его
+      // запрос данных ждёт этого ответа (`after`) — иначе он получал бы
+      // `call_not_ready`.
+      iceServers: async () => {
+        if (after !== undefined) await after
+        return ops.iceServers(callId)
+      },
       onLocalStream: setLocalStream,
       onRemoteStream: setRemoteStream,
       onConnected: (type) => {
@@ -455,12 +462,12 @@ export function CallsProvider({
     if (current.phase !== "incoming" || current.callId === null) return
     const callId = current.callId
     apply({ type: "local-accepting" })
+    const accepting = ops.accept(callId, tabIdRef.current)
     // Движок поднимается **сразу**, а не после ответа сервера: `offer` звонящего
     // придёт, как только сервер примет «принять», и ему нужно, чтобы движок уже
-    // был, иначе сигнал уйдёт в никуда.
-    ensureEngine()
-    void ops
-      .accept(callId, tabIdRef.current)
+    // был, иначе сигнал уйдёт в никуда. Данные TURN он берёт после этого ответа.
+    ensureEngine(accepting)
+    void accepting
       .then((call) => apply({ type: "api-call", call, peerName: null }))
       .catch((error: unknown) => {
         // Проиграли гонку «принять»: звонок принят другой вкладкой, и **он идёт**.

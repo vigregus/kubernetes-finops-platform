@@ -3,7 +3,7 @@
  * — в `main.tsx` (там живёт клиент API), здесь — только форма и перевод модели.
  */
 import type { Call, CallSignal } from "../../api/generated"
-import type { WireSignal } from "./callEngine"
+import type { IceConfig, WireSignal } from "./callEngine"
 import type { ApiCallView } from "./callState"
 
 export interface CallsOperations {
@@ -20,7 +20,8 @@ export interface CallsOperations {
   keepalive(callId: string): Promise<ApiCallView>
   connected(callId: string, connectionType: "direct" | "relay"): Promise<ApiCallView>
   signal(callId: string, signal: WireSignal): Promise<void>
-  iceServers(callId: string): Promise<RTCIceServer[]>
+  /** Данные STUN/TURN и срок их действия (минуты): клиент обновляет их до конца срока. */
+  iceServers(callId: string): Promise<IceConfig>
 }
 
 /** Модель API → то, что знает автомат клиента. */

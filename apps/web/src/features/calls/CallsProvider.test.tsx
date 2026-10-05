@@ -61,7 +61,7 @@ function fakeOps(overrides: Partial<CallsOperations> = {}) {
     keepalive: vi.fn(async () => api()),
     connected: vi.fn(async () => api()),
     signal: vi.fn(async (_id: string, _signal: WireSignal) => undefined),
-    iceServers: vi.fn(async () => []),
+    iceServers: vi.fn(async () => ({ servers: [], ttlSeconds: 600 })),
     ...overrides,
   }
   return { ops, log }
@@ -181,6 +181,25 @@ describe("принять в двух вкладках", () => {
     await publish(incoming)
     await act(async () => ctx.current?.accept())
     expect(ctx.current?.view).toMatchObject({ phase: "ended", endReason: "failed" })
+  })
+})
+
+describe("данные TURN", () => {
+  it("вызываемый просит их только после ответа сервера на «принять» (иначе call_not_ready)", async () => {
+    let release: (call: ApiCallView) => void = () => undefined
+    const accept = vi.fn(() => new Promise<ApiCallView>((resolve) => (release = resolve)))
+    const { ops } = fakeOps({ accept })
+    const { ctx, publish } = givenProvider(ops)
+    await publish(incoming)
+    await act(async () => ctx.current?.accept())
+    // ответа ещё нет: движок поднят, а данные TURN не запрошены
+    expect(ops.iceServers).not.toHaveBeenCalled()
+    await act(async () => {
+      release(api({ state: "accepted", version: 2 }))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    await vi.waitFor(() => expect(ops.iceServers).toHaveBeenCalledTimes(1))
   })
 })
 

@@ -30,12 +30,23 @@ export interface EngineEnv {
   createPeer(config: RTCConfiguration): RTCPeerConnection
 }
 
+export interface IceConfig {
+  readonly servers: RTCIceServer[]
+  readonly ttlSeconds: number
+}
+
+/** За сколько до конца срока берутся новые данные TURN. */
+export const ICE_REFRESH_LEAD_SECONDS = 60
+/** Через сколько повторять неудавшееся обновление. */
+export const ICE_REFRESH_RETRY_MS = 20_000
+
 export interface EngineOptions {
   readonly env: EngineEnv
   readonly role: "caller" | "callee"
   readonly kind: "audio" | "video"
   readonly sendSignal: (signal: WireSignal) => Promise<void>
-  readonly iceServers: () => Promise<RTCIceServer[]>
+  /** Данные STUN/TURN и сколько они действуют: по истечении их нужно взять заново. */
+  readonly iceServers: () => Promise<IceConfig>
   readonly onLocalStream: (stream: MediaStream) => void
   readonly onRemoteStream: (stream: MediaStream) => void
   /** Медиа пошло; путь соединения — по `getStats()`. Один раз за звонок. */
@@ -81,6 +92,7 @@ export class CallEngine {
   private chain: Promise<void> = Promise.resolve()
   private closed = false
   private reported = false
+  private refreshTimer: unknown = null
 
   constructor(options: EngineOptions) {
     this.opts = options
@@ -129,9 +141,10 @@ export class CallEngine {
       this.local = stream
       this.opts.onLocalStream(stream)
 
-      const servers = await this.opts.iceServers()
-      const pc = this.opts.env.createPeer({ iceServers: servers })
+      const ice = await this.opts.iceServers()
+      const pc = this.opts.env.createPeer({ iceServers: ice.servers })
       this.pc = pc
+      this.scheduleRefresh(ice.ttlSeconds)
       stream.getTracks().forEach((track) => pc.addTrack(track, stream))
 
       pc.ontrack = (event) => {
@@ -190,6 +203,36 @@ export class CallEngine {
     const description = await pc.createOffer(iceRestart ? { iceRestart: true } : undefined)
     await pc.setLocalDescription(description)
     await this.opts.sendSignal({ type: "offer", sdp: description.sdp ?? "" })
+  }
+
+  // --- обновление данных TURN ----------------------------------------------------
+
+  /**
+   * Данные TURN короткие (минуты), а звонок может быть долгим: за минуту до конца
+   * срока берутся новые и ставятся в соединение (`setConfiguration`) — следующий
+   * ICE restart и продление выделений идут уже по свежим. Раньше `iceServers`
+   * задавались один раз при создании, и релейный звонок терял релей по истечении.
+   * Неудача не фатальна: повтор через 20 с, пока звонок жив.
+   */
+  private scheduleRefresh(ttlSeconds: number, delayMs?: number): void {
+    if (this.closed) return
+    if (this.refreshTimer !== null) this.timers.clearTimeout(this.refreshTimer)
+    const wait = delayMs ?? Math.max(ttlSeconds - ICE_REFRESH_LEAD_SECONDS, 30) * 1000
+    this.refreshTimer = this.timers.setTimeout(() => void this.refreshIce(), wait)
+  }
+
+  private async refreshIce(): Promise<void> {
+    this.refreshTimer = null
+    const pc = this.pc
+    if (pc === null || this.closed) return
+    try {
+      const ice = await this.opts.iceServers()
+      if (this.closed) return
+      pc.setConfiguration({ ...pc.getConfiguration(), iceServers: ice.servers })
+      this.scheduleRefresh(ice.ttlSeconds)
+    } catch {
+      this.scheduleRefresh(0, ICE_REFRESH_RETRY_MS)
+    }
   }
 
   // --- кандидаты пачками ------------------------------------------------------
@@ -316,6 +359,7 @@ export class CallEngine {
     this.closed = true
     this.clearReconnect()
     if (this.flushTimer !== null) this.timers.clearTimeout(this.flushTimer)
+    if (this.refreshTimer !== null) this.timers.clearTimeout(this.refreshTimer)
     this.local?.getTracks().forEach((track) => track.stop())
     if (this.pc !== null) {
       this.pc.ontrack = null
