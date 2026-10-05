@@ -166,7 +166,7 @@ export function NewConversationDialog({
       aria-label="New conversation"
       data-dialog-state={state.kind}
       onKeyDown={handleKeyDown}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-on-surface/30 p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-on-surface/30 px-[max(1rem,env(safe-area-inset-left,0px))] pb-[calc(1rem+env(safe-area-inset-bottom,0px))] pt-[calc(1rem+env(safe-area-inset-top,0px))]"
     >
       <div className="w-full max-w-md rounded-2xl bg-surface p-6 shadow-[0_12px_40px_rgba(41,37,36,0.18)]">
         <div className="mb-4 flex items-center justify-between">

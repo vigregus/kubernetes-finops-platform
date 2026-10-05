@@ -137,7 +137,7 @@ export function CallOverlay() {
     <div
       role="status"
       data-call-notice
-      className="fixed left-1/2 top-4 z-[60] -translate-x-1/2 rounded-xl bg-on-surface px-4 py-2 text-sm text-surface shadow-lg"
+      className="fixed left-1/2 top-[calc(1rem+env(safe-area-inset-top,0px))] z-[60] -translate-x-1/2 rounded-xl bg-on-surface px-4 py-2 text-sm text-surface shadow-lg"
     >
       {notice}
     </div>
@@ -159,7 +159,7 @@ export function CallOverlay() {
           aria-label="Incoming call"
           data-call-phase="incoming"
           data-call-kind={view.kind}
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-[max(1rem,env(safe-area-inset-left,0px))] pb-[calc(1rem+env(safe-area-inset-bottom,0px))] pt-[calc(1rem+env(safe-area-inset-top,0px))] backdrop-blur-sm"
         >
           <div className="flex w-full max-w-sm flex-col items-center gap-5 rounded-3xl bg-surface p-8 shadow-2xl">
             <Avatar name={name} size="lg" />

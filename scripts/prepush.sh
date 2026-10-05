@@ -12,7 +12,9 @@ python3 packages/contracts/test_validate.py >/dev/null
 python3 packages/contracts/validate.py "$(git merge-base origin/main HEAD)" >/dev/null
 echo "· сервер: ruff + pytest"
 # В отдельном worktree своего .venv может не быть: берётся из основной копии.
-PY="${MESSENGER_PYTHON:-apps/messenger/.venv/bin/python}"
+# Путь **абсолютный**: подоболочка ниже делает `cd apps/messenger`, и относительный путь после
+# этого указывал бы в никуда (`apps/messenger/apps/messenger/.venv/...`).
+PY="${MESSENGER_PYTHON:-$PWD/apps/messenger/.venv/bin/python}"
 [ -x "$PY" ] || PY="$(git worktree list --porcelain | awk 'NR==1{print $2}')/apps/messenger/.venv/bin/python"
 (cd apps/messenger && "$PY" -m ruff check messenger tests && "$PY" -m pytest tests -q)
 echo "· веб: типы, тесты, сборка"
