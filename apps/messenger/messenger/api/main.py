@@ -25,6 +25,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, ge
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.requests import Request
 
+from messenger.domain.call import Call, CallKind
 from messenger.domain.conversation_list import (
     ActivityCursor,
     validate_activity_cursors,
@@ -58,6 +59,7 @@ from messenger.domain.user import capabilities_of, normalize_email
 from messenger.services import attachments as attachment_service
 from messenger.services import backchannel as backchannel_service
 from messenger.services import browser_telemetry as browser_telemetry_service
+from messenger.services import calls as calls_service
 from messenger.services import conversations as conversation_service
 from messenger.services import history as history_service
 from messenger.services import identity as identity_service
@@ -588,7 +590,7 @@ async def centrifugo_publish_proxy(
 
 @app.post("/realtime/token", response_model=dict[str, object])
 async def issue_realtime_token(
-    request: Request, response: Response
+    request: Request, response: Response, scope: Literal["calls"] | None = None
 ) -> dict[str, object] | Response:
     """Короткий ticket для подключения через connect-proxy.
 
@@ -610,6 +612,7 @@ async def issue_realtime_token(
             realtime=runtime.centrifugo,
             device_id=_device_from(None, request),
             user_agent=request.headers.get("user-agent"),
+            scope=scope,
         )
     if not result.ok:
         return _auth_failure(result.rejection, response)
@@ -1036,7 +1039,12 @@ async def me(request: Request, response: Response) -> dict[str, object] | Respon
         "display_name": user.display_name,
         "email": user.email,
         "email_verified": user.email_verified,
-        "capabilities": sorted(c.value for c in capabilities_of(user)),
+        # `calls` — не право пользователя, а включённость возможности на этом
+        # окружении: интерфейс не должен показывать кнопку, которая ответит `503`.
+        "capabilities": sorted(
+            [c.value for c in capabilities_of(user)]
+            + (["calls"] if calls_service.enabled() else [])
+        ),
     }
 
 
@@ -1098,6 +1106,259 @@ async def delete_push_subscription(request: Request, response: Response) -> Resp
             conn, device_id=auth.device.device_id, user_id=auth.user.user_id
         )
     return Response(status_code=204)
+
+
+# --- звонки (G4, ADR 0007) ---------------------------------------------------------
+
+
+class StartCall(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    conversation_id: uuid.UUID
+    kind: Literal["audio", "video"]
+
+
+class CallConnected(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Путь, которым пошло медиа, — по `getStats()` клиента. Из него считается
+    # доля релея; клиенту верим, потому что вреда от неверного значения нет:
+    # оно только пополняет метрику.
+    connection_type: Literal["direct", "relay"]
+
+
+class AcceptCall(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Метка вкладки, нажавшей «принять»: две вкладки вызываемого, нажавшие
+    # одновременно, не должны обе считать себя принявшими. Необязательна —
+    # клиент без неё получает прежнее поведение.
+    tab_id: str | None = Field(default=None, min_length=1, max_length=64)
+
+
+def _call_body(call: Call, user_id: UserId) -> dict[str, object]:
+    return {
+        "call_id": str(call.call_id),
+        "conversation_id": str(call.conversation_id),
+        "kind": call.kind.value,
+        "state": call.state.value,
+        "end_reason": call.end_reason.value if call.end_reason else None,
+        "version": call.version,
+        "role": "caller" if call.caller_id == user_id else "callee",
+        "peer_user_id": str(call.peer_of(user_id)),
+    }
+
+
+def _call_failure(result: calls_service.CallResult, response: Response) -> Response:
+    if result.retry_after_seconds is not None:
+        response.headers["Retry-After"] = str(result.retry_after_seconds)
+    return _problem_response(to_problem(result.rejection or Reason.INTERNAL), response)
+
+
+async def _call_user(request: Request, response: Response):
+    """Кто звонит; `None` и готовый ответ, если входа нет."""
+    runtime = request.app.state.runtime
+    async with runtime.connection() as conn:
+        auth = await _current(request, conn)
+    if not auth.ok or auth.user is None:
+        return None, _problem_response(to_problem(Reason.UNAUTHENTICATED), response)
+    return auth.user, None
+
+
+@app.post("/calls", status_code=201, response_model=dict[str, object])
+async def start_call(
+    body: StartCall, request: Request, response: Response
+) -> dict[str, object] | Response:
+    """Начинает звонок в беседе один-на-один (`CALL-001`).
+
+    Звонящий — тот, кто вошёл; вызываемого сервер находит сам по беседе. Звонок,
+    закончившийся, не начавшись («занято», «не в сети»), тоже `201`: он записан,
+    итог в ленте, и причина — в теле.
+    """
+    user, failure = await _call_user(request, response)
+    if failure is not None:
+        return failure
+    runtime = request.app.state.runtime
+    async with runtime.connection() as conn:
+        result = await calls_service.start_call(
+            conn,
+            realtime=runtime.centrifugo,
+            caller_id=user.user_id,
+            conversation_id=ConversationId(body.conversation_id),
+            kind=CallKind(body.kind),
+        )
+    if not result.ok:
+        return _call_failure(result, response)
+    return _call_body(result.call, user.user_id)
+
+
+@app.get("/calls/current", response_model=dict[str, object])
+async def current_call(request: Request, response: Response) -> dict[str, object] | Response:
+    """Мой живой звонок — после перезагрузки вкладки или из другой вкладки."""
+    user, failure = await _call_user(request, response)
+    if failure is not None:
+        return failure
+    runtime = request.app.state.runtime
+    async with runtime.connection() as conn:
+        call = await calls_service.current(conn, user_id=user.user_id)
+    return {"call": _call_body(call, user.user_id) if call else None}
+
+
+def _call_action(name: str):
+    """Одинаковые по форме действия над звонком: принять, отклонить, повесить, пульс."""
+
+    async def handler(
+        call_id: uuid.UUID, request: Request, response: Response
+    ) -> dict[str, object] | Response:
+        user, failure = await _call_user(request, response)
+        if failure is not None:
+            return failure
+        runtime = request.app.state.runtime
+        action = getattr(calls_service, name)
+        kwargs = {"user_id": user.user_id, "call_id": call_id, "realtime": runtime.centrifugo}
+        async with runtime.connection() as conn:
+            result = await action(conn, **kwargs)
+        if not result.ok:
+            return _call_failure(result, response)
+        return _call_body(result.call, user.user_id)
+
+    handler.__name__ = f"call_{name}"
+    return handler
+
+
+@app.post("/calls/{call_id}/accept", response_model=dict[str, object], name="call_accept")
+async def call_accept(
+    call_id: uuid.UUID,
+    request: Request,
+    response: Response,
+    body: AcceptCall | None = None,
+) -> dict[str, object] | Response:
+    """Принять входящий звонок. Побеждает первый; проигравшая вкладка получает `409 call_taken`."""
+    user, failure = await _call_user(request, response)
+    if failure is not None:
+        return failure
+    runtime = request.app.state.runtime
+    async with runtime.connection() as conn:
+        result = await calls_service.accept(
+            conn,
+            realtime=runtime.centrifugo,
+            user_id=user.user_id,
+            call_id=call_id,
+            tab=body.tab_id if body is not None else None,
+        )
+    if not result.ok:
+        return _call_failure(result, response)
+    return _call_body(result.call, user.user_id)
+
+
+for _action, _summary in (
+    ("decline", "Отклонить входящий звонок"),
+    ("hangup", "Повесить трубку (или отменить исходящий)"),
+    ("fail", "Сообщить, что соединение не состоялось или оборвалось"),
+    ("keepalive", "Подтвердить, что звонок жив"),
+):
+    app.post(
+        f"/calls/{{call_id}}/{_action}",
+        response_model=dict[str, object],
+        summary=_summary,
+        name=f"call_{_action}",
+    )(_call_action(_action))
+
+
+@app.post("/calls/{call_id}/connected", response_model=dict[str, object])
+async def call_connected(
+    call_id: uuid.UUID, body: CallConnected, request: Request, response: Response
+) -> dict[str, object] | Response:
+    """«Медиа пошло»: звонок становится активным, путь соединения — в метрику."""
+    user, failure = await _call_user(request, response)
+    if failure is not None:
+        return failure
+    runtime = request.app.state.runtime
+    async with runtime.connection() as conn:
+        result = await calls_service.report_connected(
+            conn,
+            realtime=runtime.centrifugo,
+            user_id=user.user_id,
+            call_id=call_id,
+            connection_type=body.connection_type,
+        )
+    if not result.ok:
+        return _call_failure(result, response)
+    return _call_body(result.call, user.user_id)
+
+
+@app.post("/calls/{call_id}/signals", status_code=204, response_model=None)
+async def call_signal(
+    call_id: uuid.UUID, body: dict[str, object], request: Request, response: Response
+) -> Response:
+    """Сигнал собеседнику: `offer`, `answer` или пачка кандидатов ICE.
+
+    Клиент не публикует в Centrifugo сам (`CALL-006`): сервер проверяет участие,
+    ставит номер и передаёт собеседнику только понятое. Тело разбирается в домене,
+    поэтому здесь оно просто объект.
+    """
+    user, failure = await _call_user(request, response)
+    if failure is not None:
+        return failure
+    runtime = request.app.state.runtime
+    async with runtime.connection() as conn:
+        result = await calls_service.send_signal(
+            conn,
+            realtime=runtime.centrifugo,
+            limiter=runtime.limiter,
+            user_id=user.user_id,
+            call_id=call_id,
+            data=body,
+        )
+    if not result.ok:
+        return _call_failure(result, response)
+    return Response(status_code=204)
+
+
+@app.get("/calls/{call_id}/signals", response_model=dict[str, object])
+async def call_signals_missed(
+    call_id: uuid.UUID, request: Request, response: Response, after: int = 0
+) -> dict[str, object] | Response:
+    """Пропущенные сигналы собеседника: после переподключения и при разрыве нумерации."""
+    user, failure = await _call_user(request, response)
+    if failure is not None:
+        return failure
+    runtime = request.app.state.runtime
+    async with runtime.connection() as conn:
+        result = await calls_service.list_signals(
+            conn, user_id=user.user_id, call_id=call_id, after=after
+        )
+    if result.rejection is not None:
+        return _problem_response(to_problem(result.rejection), response)
+    return {"signals": result.events}
+
+
+@app.get("/calls/{call_id}/ice-servers", response_model=dict[str, object])
+async def call_ice_servers(
+    call_id: uuid.UUID, request: Request, response: Response
+) -> dict[str, object] | Response:
+    """Краткоживущий доступ к STUN/TURN — участнику живого звонка (`CALL-008`)."""
+    user, failure = await _call_user(request, response)
+    if failure is not None:
+        return failure
+    runtime = request.app.state.runtime
+    async with runtime.connection() as conn:
+        result = await calls_service.ice_servers(
+            conn,
+            turn=runtime.turn,
+            limiter=runtime.limiter,
+            user_id=user.user_id,
+            call_id=call_id,
+        )
+    if result.rejection is not None:
+        if result.retry_after_seconds is not None:
+            response.headers["Retry-After"] = str(result.retry_after_seconds)
+        return _problem_response(to_problem(result.rejection), response)
+    # Учётные данные не кэшируются ни браузером, ни посредником.
+    return JSONResponse(
+        {"ice_servers": result.servers or [], "ttl_seconds": result.ttl_seconds},
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/users", response_model=dict[str, object])

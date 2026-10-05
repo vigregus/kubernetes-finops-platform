@@ -1,0 +1,827 @@
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: messenger-calls
+  namespace: observability
+spec:
+  instanceSelector:
+    matchLabels:
+      dashboards: "grafana-local"
+  json: |
+    {
+      "uid": "messenger-calls",
+      "title": "09 · Calls — звонки",
+      "description": "Звонки один-на-один (ADR 0007, CALL-008): исходы, путь соединения (доля релея — допущение стоимости), время установки, сигнализация и свой coturn. Метрики messenger_call_* — из API и call-sweeper; turn_*/stun_* — coturn (messenger-turn).",
+      "tags": [
+        "messenger",
+        "calls",
+        "webrtc",
+        "turn"
+      ],
+      "schemaVersion": 39,
+      "version": 2,
+      "editable": true,
+      "time": {
+        "from": "now-6h",
+        "to": "now"
+      },
+      "links": [
+        {
+          "title": "01 · SLO Overview",
+          "type": "link",
+          "url": "/d/messenger-slo-overview",
+          "icon": "dashboard"
+        },
+        {
+          "title": "03 · API — RED",
+          "type": "link",
+          "url": "/d/messenger-api-red",
+          "icon": "dashboard"
+        },
+        {
+          "title": "04 · Realtime — Centrifugo",
+          "type": "link",
+          "url": "/d/messenger-realtime",
+          "icon": "dashboard"
+        },
+        {
+          "title": "05 · Capacity — USE",
+          "type": "link",
+          "url": "/d/messenger-capacity",
+          "icon": "dashboard"
+        }
+      ],
+      "templating": {
+        "list": [
+          {
+            "name": "namespace",
+            "type": "query",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "victoriametrics"
+            },
+            "query": "label_values(messenger_call_started_total, namespace)",
+            "current": {
+              "text": "messenger",
+              "value": "messenger"
+            },
+            "refresh": 2
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1,
+          "type": "row",
+          "title": "Итоги",
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 0
+          }
+        },
+        {
+          "id": 2,
+          "type": "stat",
+          "title": "Звонков за период",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "options": {
+            "graphMode": "area",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short"
+            }
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 4,
+            "x": 0,
+            "y": 1
+          },
+          "targets": [
+            {
+              "expr": "sum(increase(messenger_call_started_total{namespace=~\"$namespace\"}[$__range]))"
+            }
+          ],
+          "description": "Начатые звонки, включая сразу завершившиеся («занято», «не в сети»)."
+        },
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "Живые сейчас",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "options": {
+            "graphMode": "area",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short"
+            }
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 4,
+            "x": 4,
+            "y": 1
+          },
+          "targets": [
+            {
+              "expr": "sum(messenger_calls_live{namespace=~\"$namespace\"})"
+            }
+          ],
+          "description": "По последнему такту подметальщика звонков. Число «не меньше»: пачка 100, звонки, которые в этот миг принимают, пропускаются."
+        },
+        {
+          "id": 4,
+          "type": "stat",
+          "title": "Установились из принятых",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "options": {
+            "graphMode": "area",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red",
+                    "value": null
+                  },
+                  {
+                    "color": "orange",
+                    "value": 0.8
+                  },
+                  {
+                    "color": "green",
+                    "value": 0.95
+                  }
+                ]
+              }
+            }
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 4,
+            "x": 8,
+            "y": 1
+          },
+          "targets": [
+            {
+              "expr": "sum(increase(messenger_call_connection_total{namespace=~\"$namespace\"}[$__range])) / (sum(increase(messenger_call_connection_total{namespace=~\"$namespace\"}[$__range])) + sum(increase(messenger_call_ended_total{reason=\"failed\",namespace=~\"$namespace\"}[$__range])))"
+            }
+          ],
+          "description": "Принятые звонки, у которых пошло медиа, против принятых, закончившихся неудачей (`failed`). Отклонённые, пропущенные и отменённые сюда не входят — это не отказ системы."
+        },
+        {
+          "id": 5,
+          "type": "stat",
+          "title": "Доля релея",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "options": {
+            "graphMode": "area",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "orange",
+                    "value": 0.15
+                  },
+                  {
+                    "color": "red",
+                    "value": 0.4
+                  }
+                ]
+              }
+            }
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 4,
+            "x": 12,
+            "y": 1
+          },
+          "targets": [
+            {
+              "expr": "sum(increase(messenger_call_connection_total{type=\"relay\",namespace=~\"$namespace\"}[$__range])) / sum(increase(messenger_call_connection_total{namespace=~\"$namespace\"}[$__range]))"
+            }
+          ],
+          "description": "Допущение оценки стоимости — 15% (docs/messenger/16-calls-estimate.md). Выше — релей TURN дороже расчёта, и это первое, что проверяют."
+        },
+        {
+          "id": 6,
+          "type": "stat",
+          "title": "Время установки p95",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "options": {
+            "graphMode": "area",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "orange",
+                    "value": 5
+                  },
+                  {
+                    "color": "red",
+                    "value": 10
+                  }
+                ]
+              }
+            }
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 4,
+            "x": 16,
+            "y": 1
+          },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(messenger_call_setup_seconds_bucket{namespace=~\"$namespace\"}[$__rate_interval])))"
+            }
+          ],
+          "description": "От «принял» до «медиа пошло»."
+        },
+        {
+          "id": 7,
+          "type": "stat",
+          "title": "Подметальщик",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "options": {
+            "graphMode": "area",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red",
+                    "value": null
+                  },
+                  {
+                    "color": "green",
+                    "value": 1
+                  }
+                ]
+              }
+            }
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 4,
+            "x": 20,
+            "y": 1
+          },
+          "targets": [
+            {
+              "expr": "min(messenger_dependency_up{service=\"call-sweeper\",dependency=\"postgres\",namespace=~\"$namespace\"})"
+            }
+          ],
+          "description": "1 — такт идёт и база отвечает. Корректность звонка от подметальщика не зависит (просроченный звонок завершается при любом действии над ним), но без него «звонит» дольше и итог в ленте запаздывает."
+        },
+        {
+          "id": 8,
+          "type": "row",
+          "title": "Исходы и путь",
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 6
+          }
+        },
+        {
+          "id": 9,
+          "type": "timeseries",
+          "title": "Завершения по причине, в минуту",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "fillOpacity": 40,
+                "lineWidth": 1,
+                "stacking": {
+                  "mode": "normal"
+                }
+              }
+            }
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 7
+          },
+          "targets": [
+            {
+              "expr": "sum by (reason) (rate(messenger_call_ended_total{namespace=~\"$namespace\"}[5m])) * 60",
+              "legendFormat": "{{reason}}"
+            }
+          ],
+          "description": "`completed` — состоявшийся разговор; `failed` — соединение не установилось или оборвалось насовсем; `missed`/`declined`/`cancelled`/`busy`/`unavailable` — до разговора."
+        },
+        {
+          "id": 10,
+          "type": "timeseries",
+          "title": "Начато по виду, в минуту",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "fillOpacity": 40,
+                "lineWidth": 1,
+                "stacking": {
+                  "mode": "normal"
+                }
+              }
+            }
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 7
+          },
+          "targets": [
+            {
+              "expr": "sum by (kind) (rate(messenger_call_started_total{namespace=~\"$namespace\"}[5m])) * 60",
+              "legendFormat": "{{kind}}"
+            }
+          ]
+        },
+        {
+          "id": 11,
+          "type": "timeseries",
+          "title": "Путь соединения и релей, в минуту",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "fillOpacity": 15,
+                "lineWidth": 1
+              }
+            }
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 15
+          },
+          "targets": [
+            {
+              "expr": "sum by (type) (rate(messenger_call_connection_total{namespace=~\"$namespace\"}[5m])) * 60",
+              "legendFormat": "{{type}}"
+            },
+            {
+              "expr": "sum(rate(messenger_call_relay_used_total{namespace=~\"$namespace\"}[5m])) * 60",
+              "legendFormat": "релей хоть раз"
+            },
+            {
+              "expr": "sum(rate(messenger_call_relay_switch_total{namespace=~\"$namespace\"}[5m])) * 60",
+              "legendFormat": "переход direct → relay"
+            }
+          ],
+          "description": "`direct`/`relay` — начальный путь соединения. «Релей хоть раз» — звонки, где релей использовался в любой момент (в том числе после смены сети с прямого пути), ближе всего к оплаченному трафику TURN. «Переход на релей» — звонки, начатые напрямую и перешедшие на релей посреди разговора."
+        },
+        {
+          "id": 12,
+          "type": "timeseries",
+          "title": "Время установки",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": {
+                "fillOpacity": 15,
+                "lineWidth": 1
+              }
+            }
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 15
+          },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.5, sum by (le) (rate(messenger_call_setup_seconds_bucket{namespace=~\"$namespace\"}[5m])))",
+              "legendFormat": "p50"
+            },
+            {
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(messenger_call_setup_seconds_bucket{namespace=~\"$namespace\"}[5m])))",
+              "legendFormat": "p95"
+            }
+          ]
+        },
+        {
+          "id": 13,
+          "type": "row",
+          "title": "Сигнализация",
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 23
+          }
+        },
+        {
+          "id": 14,
+          "type": "timeseries",
+          "title": "Сигналы по исходу, в секунду",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "fillOpacity": 15,
+                "lineWidth": 1
+              }
+            }
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 24
+          },
+          "targets": [
+            {
+              "expr": "sum by (result) (rate(messenger_call_signal_total{namespace=~\"$namespace\"}[5m]))",
+              "legendFormat": "{{result}}"
+            }
+          ],
+          "description": "`sent` — передан; `invalid` — негодное тело; `rate_limited` — частота; `forbidden` — не участник звонка (подделка)."
+        },
+        {
+          "id": 15,
+          "type": "timeseries",
+          "title": "Запросы /calls по статусу, в секунду",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "fillOpacity": 15,
+                "lineWidth": 1
+              }
+            }
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 24
+          },
+          "targets": [
+            {
+              "expr": "sum by (status) (rate(http_requests_total{route=~\"/calls.*\",namespace=~\"$namespace\"}[5m]))",
+              "legendFormat": "{{status}}"
+            }
+          ]
+        },
+        {
+          "id": 16,
+          "type": "timeseries",
+          "title": "Длительность запросов /calls, p95",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": {
+                "fillOpacity": 15,
+                "lineWidth": 1
+              }
+            }
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 32
+          },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.95, sum by (le, route) (rate(http_request_duration_seconds_bucket{route=~\"/calls.*\",namespace=~\"$namespace\"}[5m])))",
+              "legendFormat": "{{route}}"
+            }
+          ]
+        },
+        {
+          "id": 17,
+          "type": "timeseries",
+          "title": "Живые звонки",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "fillOpacity": 15,
+                "lineWidth": 1
+              }
+            }
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 32
+          },
+          "targets": [
+            {
+              "expr": "sum(messenger_calls_live{namespace=~\"$namespace\"})",
+              "legendFormat": "живых"
+            }
+          ]
+        },
+        {
+          "id": 18,
+          "type": "row",
+          "title": "TURN — coturn",
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 40
+          }
+        },
+        {
+          "id": 19,
+          "type": "stat",
+          "title": "Выделений релея",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "options": {
+            "graphMode": "area",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "orange",
+                    "value": 60
+                  },
+                  {
+                    "color": "red",
+                    "value": 90
+                  }
+                ]
+              }
+            }
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 4,
+            "x": 0,
+            "y": 41
+          },
+          "targets": [
+            {
+              "expr": "sum(turn_total_allocations)"
+            }
+          ],
+          "description": "Одновременные выделения. Квота сервера — 100 (`--total-quota`), портов в диапазоне — 20."
+        },
+        {
+          "id": 20,
+          "type": "timeseries",
+          "title": "Трафик релея, бит/с",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bps",
+              "custom": {
+                "fillOpacity": 15,
+                "lineWidth": 1
+              }
+            }
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 10,
+            "x": 4,
+            "y": 41
+          },
+          "targets": [
+            {
+              "expr": "sum(rate(turn_total_traffic_sentb[5m])) * 8",
+              "legendFormat": "к клиентам"
+            },
+            {
+              "expr": "sum(rate(turn_total_traffic_rcvb[5m])) * 8",
+              "legendFormat": "от клиентов"
+            }
+          ],
+          "description": "Релей — главная статья расходов на звонки (оценка, часть 5). Лимит сеанса — 600 000 Б/с (≈ 4,8 Мбит/с, под Full HD), на сервер — 6 МБ/с."
+        },
+        {
+          "id": 21,
+          "type": "timeseries",
+          "title": "STUN-запросы, в секунду",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "fillOpacity": 15,
+                "lineWidth": 1
+              }
+            }
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 10,
+            "x": 14,
+            "y": 41
+          },
+          "targets": [
+            {
+              "expr": "sum(rate(stun_binding_request[5m]))",
+              "legendFormat": "запросы"
+            },
+            {
+              "expr": "sum(rate(stun_binding_error[5m]))",
+              "legendFormat": "ошибки"
+            }
+          ]
+        }
+      ]
+    }

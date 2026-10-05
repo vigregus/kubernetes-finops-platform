@@ -42,6 +42,95 @@ class SendMessageResult:
         return self.message is not None and self.rejection is None
 
 
+async def _enqueue_events(
+    conn: asyncpg.Connection,
+    *,
+    message: Message,
+    sender_id: UserId,
+    client_message_id: ClientMessageId,
+    attachment_count: int,
+    origin: dict[str, str],
+) -> None:
+    """Две записи outbox (факт и содержимое) для уже вставленного сообщения.
+
+    Общая для пользовательского и серверного (`system`) сообщения: итог звонка
+    обязан дойти до realtime, счётчика непрочитанного и уведомлений тем же путём,
+    что обычное сообщение, а не придуманным рядом.
+    """
+    members = await conversations.list_active_members(
+        conn, conversation_id=message.conversation_id
+    )
+    recipients = [
+        str(member.user_id)
+        for member in members
+        if member.user_id != sender_id
+    ]
+    common = {
+        "event_version": 1,
+        "occurred_at": message.created_at.isoformat(),
+        "message_id": str(message.message_id),
+        "conversation_id": str(message.conversation_id),
+        "type": message.kind.value,
+    }
+    fact_event_id = new_event_id()
+    content_event_id = new_event_id()
+    # Один спан на обе записи: в контракте узел один, и две
+    # записи — одна логическая операция. Число уходит атрибутом,
+    # чтобы разница была видна, если она однажды появится.
+    with tracing.span("outbox.insert") as insert_span:
+        insert_span.set_attribute("messenger.outbox.records", 2)
+        await outbox.insert_event(
+            conn,
+            aggregate_id=message.message_id,
+            event_id=fact_event_id,
+            event_type="message.created",
+            partition_key=str(message.conversation_id),
+            payload={
+                **common,
+                "event_id": str(fact_event_id),
+                "event_type": "message.created",
+                "conversation_seq": message.conversation_seq,
+                "sender_id": str(sender_id),
+                # Не в `common`, и это не расстановка ключей:
+                # общий блок разворачивается в обе записи, а
+                # содержимому это поле не принадлежит — схема
+                # `message.content.v1.json` объявлена
+                # `additionalProperties: false` и его не знает,
+                # то есть запись с ним нарушила бы собственный
+                # контракт. Нужно оно ровно половине факта:
+                # свести оптимистичную запись с доехавшим
+                # событием, когда ответ на отправку потерялся.
+                "client_message_id": str(client_message_id),
+                "recipient_ids": recipients,
+                "has_attachments": attachment_count > 0,
+                "content_ref": str(message.message_id),
+                **origin,
+            },
+        )
+        await outbox.insert_event(
+            conn,
+            aggregate_id=message.message_id,
+            event_id=content_event_id,
+            event_type="message.content",
+            partition_key=str(message.conversation_id),
+            payload={
+                **common,
+                "event_id": str(content_event_id),
+                "event_type": "message.content",
+                "payload": {
+                    key: value
+                    for key, value in {
+                        "text": message.payload.text,
+                        "duration_ms": message.payload.duration_ms,
+                        "attachment_count": attachment_count,
+                    }.items()
+                    if value is not None
+                },
+                **origin,
+            },
+        )
+
+
 async def send_message(
     conn: asyncpg.Connection,
     *,
@@ -155,78 +244,14 @@ async def send_message(
                         conn, ids=attachment_ids, message_id=message.message_id
                     )
 
-                members = await conversations.list_active_members(
-                    conn, conversation_id=conversation_id
+                await _enqueue_events(
+                    conn,
+                    message=message,
+                    sender_id=sender_id,
+                    client_message_id=client_message_id,
+                    attachment_count=len(attachment_ids),
+                    origin=origin,
                 )
-                recipients = [
-                    str(member.user_id)
-                    for member in members
-                    if member.user_id != sender_id
-                ]
-                common = {
-                    "event_version": 1,
-                    "occurred_at": message.created_at.isoformat(),
-                    "message_id": str(message.message_id),
-                    "conversation_id": str(message.conversation_id),
-                    "type": message.kind.value,
-                }
-                fact_event_id = new_event_id()
-                content_event_id = new_event_id()
-                # Один спан на обе записи: в контракте узел один, и две
-                # записи — одна логическая операция. Число уходит атрибутом,
-                # чтобы разница была видна, если она однажды появится.
-                with tracing.span("outbox.insert") as insert_span:
-                    insert_span.set_attribute("messenger.outbox.records", 2)
-                    await outbox.insert_event(
-                        conn,
-                        aggregate_id=message.message_id,
-                        event_id=fact_event_id,
-                        event_type="message.created",
-                        partition_key=str(conversation_id),
-                        payload={
-                            **common,
-                            "event_id": str(fact_event_id),
-                            "event_type": "message.created",
-                            "conversation_seq": message.conversation_seq,
-                            "sender_id": str(sender_id),
-                            # Не в `common`, и это не расстановка ключей:
-                            # общий блок разворачивается в обе записи, а
-                            # содержимому это поле не принадлежит — схема
-                            # `message.content.v1.json` объявлена
-                            # `additionalProperties: false` и его не знает,
-                            # то есть запись с ним нарушила бы собственный
-                            # контракт. Нужно оно ровно половине факта:
-                            # свести оптимистичную запись с доехавшим
-                            # событием, когда ответ на отправку потерялся.
-                            "client_message_id": str(client_message_id),
-                            "recipient_ids": recipients,
-                            "has_attachments": bool(attachment_ids),
-                            "content_ref": str(message.message_id),
-                            **origin,
-                        },
-                    )
-                    await outbox.insert_event(
-                        conn,
-                        aggregate_id=message.message_id,
-                        event_id=content_event_id,
-                        event_type="message.content",
-                        partition_key=str(conversation_id),
-                        payload={
-                            **common,
-                            "event_id": str(content_event_id),
-                            "event_type": "message.content",
-                            "payload": {
-                                key: value
-                                for key, value in {
-                                    "text": message.payload.text,
-                                    "duration_ms": message.payload.duration_ms,
-                                    "attachment_count": len(attachment_ids),
-                                }.items()
-                                if value is not None
-                            },
-                            **origin,
-                        },
-                    )
                 # `created_message` присваивается и используется только после
                 # выхода из `async with`: асинхронный контекстный менеджер
                 # `conn.transaction()` шлёт COMMIT на проводе ровно в момент
@@ -266,3 +291,41 @@ async def send_message(
                        "client_message_id": str(client_message_id)},
             )
             raise
+
+
+async def post_system_message(
+    conn: asyncpg.Connection,
+    *,
+    conversation_id: ConversationId,
+    sender_id: UserId,
+    client_message_id: ClientMessageId,
+    payload: MessagePayload,
+) -> Message:
+    """Служебное сообщение от сервера (итог звонка) — **в транзакции вызывающего**.
+
+    Отдельно от `send_message`, а не его ветка: пользовательская отправка
+    проверяет членство и блокировки и отвергает `system`, а здесь автор — сервер,
+    и сообщение обязано лечь **в ту же транзакцию**, что меняет состояние
+    звонка: «звонок завершён, сообщения нет» — состояние, из которого нет выхода.
+    Номер беседы выдаёт тот же `UPDATE`, поэтому порядок сообщений остаётся общим.
+    """
+    sequence = await messages.allocate_sequence(conn, conversation_id=conversation_id)
+    message = await messages.insert_message(
+        conn,
+        message_id=new_message_id(),
+        conversation_id=conversation_id,
+        conversation_seq=sequence,
+        sender_id=sender_id,
+        client_message_id=client_message_id,
+        kind=MessageKind.SYSTEM,
+        payload=payload,
+    )
+    await _enqueue_events(
+        conn,
+        message=message,
+        sender_id=sender_id,
+        client_message_id=client_message_id,
+        attachment_count=0,
+        origin={},
+    )
+    return message

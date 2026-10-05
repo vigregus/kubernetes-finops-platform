@@ -9,11 +9,13 @@ import asyncpg
 
 from messenger.adapters import oidc
 from messenger.adapters.centrifugo import CentrifugoClient
+from messenger.domain import call as call_domain
 from messenger.domain import typing_indicator as typing_domain
 from messenger.domain.identity import TokenRejection
 from messenger.domain.ids import DeviceId, SessionId, UserId
 from messenger.repositories import conversations as conversation_repo
 from messenger.repositories import sessions, users
+from messenger.services import calls as calls_service
 from messenger.services import identity
 from messenger.services import typing as typing_service
 
@@ -57,8 +59,16 @@ async def issue_token_for_user(
     realtime: CentrifugoClient | None,
     device_id: DeviceId | None = None,
     user_agent: str | None = None,
+    scope: str | None = None,
 ) -> RealtimeTokenResult:
-    """Выдаёт короткий ticket, который проверит connect-proxy."""
+    """Выдаёт короткий ticket, который проверит connect-proxy.
+
+    `scope="calls"` — билет **только** на личный канал звонков (`call:{id}`): у
+    звонка свое соединение, потому что оно живёт дольше открытой беседы и не
+    должно переподключаться при её смене (потерянный на переподключении сигнал
+    ломает установку звонка, а истории у канала нет). Такое соединение не
+    получает сообщений бесед и набора — ему они не нужны.
+    """
     auth = await identity.authenticate(
         conn,
         token=token,
@@ -75,6 +85,13 @@ async def issue_token_for_user(
         return RealtimeTokenResult(rejection=TokenRejection.KEYS_UNAVAILABLE)
 
     user_id = str(auth.user.user_id)
+    if scope == "calls":
+        issued, expires_at = realtime.issue_token(
+            user_id,
+            str(auth.session.session_id),
+            channels=[call_domain.call_channel(user_id)] if calls_service.enabled() else [],
+        )
+        return RealtimeTokenResult(token=issued, expires_at=expires_at)
     # Каналы бесед перечисляются явно и на момент выдачи. Токен короткий
     # именно поэтому: исключённый из беседы теряет подписку при следующем
     # соединении, а не когда-нибудь. Долгоживущий токен со списком каналов
@@ -129,6 +146,8 @@ async def connect_from_ticket(
             session_id=session_id,
             user_id=user_id,
             client_id=client_id,
+            # Соединение звонков — то, у которого в билете есть канал звонков.
+            calls=any(channel.startswith("call:") for channel in channels),
         )
         if not accepted:
             return ProxyConnectResult()

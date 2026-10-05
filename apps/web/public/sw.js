@@ -51,7 +51,30 @@ self.addEventListener("push", (event) => {
 
 self.addEventListener("notificationclick", (event) => {
   event.notification.close()
-  const conversationId = event.notification.data ? event.notification.data.conversationId : null
+  const data = event.notification.data || {}
+
+  // Уведомление о звонке: нажатие и кнопки «Принять»/«Отклонить» ведут в приложение
+  // и несут действие. Открытая вкладка получает его сообщением, новая — в адресе.
+  if (typeof data.callId === "string") {
+    const action = event.action === "accept" || event.action === "decline" ? event.action : "open"
+    event.waitUntil(
+      (async () => {
+        const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true })
+        const existing = windows[0]
+        if (existing) {
+          await existing.focus()
+          existing.postMessage({ type: "call-action", action, callId: data.callId })
+          return
+        }
+        await self.clients.openWindow(
+          `/?call=${encodeURIComponent(data.callId)}&action=${action}`,
+        )
+      })(),
+    )
+    return
+  }
+
+  const conversationId = data.conversationId || null
   event.waitUntil(
     (async () => {
       const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true })

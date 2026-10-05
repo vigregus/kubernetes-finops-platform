@@ -35,6 +35,14 @@ class Reason(str, Enum):
     INVALID_VOICE = "invalid_voice"
     INVALID_SUBSCRIPTION = "invalid_subscription"
     PUSH_UNAVAILABLE = "push_unavailable"
+    CALLS_UNAVAILABLE = "calls_unavailable"
+    CALL_NOT_FOUND = "call_not_found"
+    CALL_ENDED = "call_ended"
+    CALL_NOT_READY = "call_not_ready"
+    CALL_TAKEN = "call_taken"
+    REALTIME_UNAVAILABLE = "realtime_unavailable"
+    ALREADY_IN_CALL = "already_in_call"
+    INVALID_SIGNAL = "invalid_signal"
     RATE_LIMITED = "rate_limited"
     UNAUTHENTICATED = "unauthenticated"
     UPSTREAM_UNAVAILABLE = "upstream_unavailable"
@@ -75,6 +83,20 @@ _PUBLIC: dict[Reason, Problem] = {
     Reason.CONVERSATION_NOT_FOUND: _HIDDEN_NOT_FOUND,
     Reason.USER_NOT_FOUND: _HIDDEN_NOT_FOUND,
     Reason.MESSAGE_NOT_FOUND: _HIDDEN_NOT_FOUND,
+    # Чужой и несуществующий звонок неразличимы: по идентификатору звонка нельзя
+    # выяснять, кто с кем разговаривает.
+    Reason.CALL_NOT_FOUND: _HIDDEN_NOT_FOUND,
+    Reason.CALLS_UNAVAILABLE: Problem(503, "calls_unavailable", "Звонки временно недоступны"),
+    Reason.CALL_ENDED: Problem(409, "call_ended", "Звонок уже завершён"),
+    Reason.CALL_NOT_READY: Problem(409, "call_not_ready", "Звонок ещё не принят"),
+    Reason.CALL_TAKEN: Problem(409, "call_taken", "Звонок принят в другой вкладке"),
+    # Сигнал не удалось **передать** собеседнику: канал звонков без истории, и
+    # молчаливый успех оставил бы звонящего уверенным, что `offer` доставлен.
+    Reason.REALTIME_UNAVAILABLE: Problem(
+        503, "realtime_unavailable", "Сигнал не доставлен, повторите"
+    ),
+    Reason.ALREADY_IN_CALL: Problem(409, "already_in_call", "У вас уже идёт звонок"),
+    Reason.INVALID_SIGNAL: Problem(400, "invalid_signal", "Сигнал не принят"),
     # Чужое и несуществующее вложение неразличимы — по тому же доводу, что и
     # чужая беседа: UUID не должен позволять перечислять чужие файлы.
     Reason.ATTACHMENT_NOT_FOUND: _HIDDEN_NOT_FOUND,

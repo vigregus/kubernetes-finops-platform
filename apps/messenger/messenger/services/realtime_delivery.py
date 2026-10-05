@@ -89,6 +89,12 @@ def _client_event(fact: dict[str, Any], content: dict[str, Any]) -> dict[str, An
     }
     if fact.get("client_message_id") is not None:
         event["client_message_id"] = fact["client_message_id"]
+    # Вид сообщения (`text`, `system`, …). `type` события — это тип **события**
+    # (`message.created`), и по нему служебное сообщение (итог звонка) неотличимо
+    # от текста, который человек напечатал точно такими же словами: без вида
+    # клиент рисовал бы код `call.missed.audio` репликой до перезагрузки.
+    if fact.get("type") is not None:
+        event["message_type"] = fact["type"]
     # G3-008: t1 для настоящего T_delivery. Это то же `occurred_at`, что уже
     # используется чуть ниже для серверного приближения
     # (`metrics.message_delivery_duration`) — не новое поле времени, а то же

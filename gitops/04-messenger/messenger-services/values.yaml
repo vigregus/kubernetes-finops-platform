@@ -134,6 +134,25 @@ services:
     objectStorage: true
     # Открытый ключ VAPID для оформления подписки Web Push (G4).
     vapidPublic: true
+    # Звонки (ADR 0007): флаг включён на стенде. Для людей — только после
+    # защиты от нежелательных звонков (`CALL-017`).
+    env:
+      - name: CALLS_ENABLED
+        value: "true"
+      # Релей — свой coturn (`messenger-turn`), без платного сервиса. Секрет
+      # необязателен: без него провайдер откатывается на STUN, а звонок идёт
+      # напрямую (`adapters/turn.py`). Адрес — имя из `/etc/hosts`/DNS, которое
+      # видит браузер, а не внутреннее имя службы.
+      - name: TURN_PROVIDER
+        value: coturn
+      - name: TURN_COTURN_URLS
+        value: "turn:turn.finops.local:3478?transport=udp,turn:turn.finops.local:3478?transport=tcp"
+      - name: TURN_COTURN_SECRET
+        valueFrom:
+          secretKeyRef:
+            name: messenger-turn
+            key: secret
+            optional: true
     # Метрики снимаются со службы: у нагрузки есть входящие запросы.
     # Умолчание у признака — истина, поэтому true здесь нужен не для
     # работы, а чтобы снятие ключа у соседа не выглядело нормой.
@@ -396,6 +415,39 @@ services:
     image:
       # Заполняется тегом образа, в котором этот модуль уже есть.
       spec: ghcr.io/vigregus/messenger-api:1db72f5a35250b7fe63d66da4631dc7ffe073dd6
+    resources:
+      requests: {cpu: 25m, memory: 128Mi}
+      limits: {cpu: 500m, memory: 256Mi}
+
+  call-sweeper:
+    # Звонки (G4, ADR 0007): завершает звонки, у которых вышел срок —
+    # «пропущенный», «не соединился», «тишина», — пишет итог в ленту и
+    # освобождает линию. Включается вместе с образом, где есть модуль
+    # `messenger.workers.call_sweeper`: прежний образ упал бы на импорте.
+    enabled: true
+    component: worker
+    # Kafka не нужна: уборщик смотрит на собственные таблицы. Но итог звонка
+    # ложится в outbox тем же путём, что сообщение, — а читает его relay.
+    backendEnv: true
+    metrics: true
+    metricsPort: 9100
+    command: ["python", "-m", "messenger.workers.call_sweeper"]
+    env:
+      - name: CALLS_ENABLED
+        value: "true"
+    replicas: 1
+    minAvailable: 0
+    # Как у уборщика присутствия: корректность звонка от него не зависит
+    # (просроченный `ringing` отвергается и без него), а при нехватке места
+    # на узле он уходит первым.
+    priorityClass: messenger-background
+    preStopSeconds: 0
+    terminationGracePeriodSeconds: 30
+    image:
+      # Образ, в котором модуль call_sweeper уже есть: прежний тег (9a1f3ff…)
+      # его не содержит, и при пересоздании приложения до того, как Image Updater
+      # подставит свежий образ, нагрузка падала бы на импорте (замечание ревью).
+      spec: ghcr.io/vigregus/messenger-api:1a6a5eb8bcbcc12b6a8fbcf9d1b045c21a65a307
     resources:
       requests: {cpu: 25m, memory: 128Mi}
       limits: {cpu: 500m, memory: 256Mi}

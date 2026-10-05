@@ -77,6 +77,15 @@ config:
         # каждая публикация идёт через API (`publish_proxy_enabled`).
         allow_publish_for_subscriber: true
         publish_proxy_enabled: true
+      # Личный канал звонков: входящий, смена состояния, сигналы WebRTC.
+      # История выключена целиком, а не уменьшена: после обрыва соединения
+      # Centrifugo отдал бы устаревший `offer` как новый (`CALL-007`).
+      # Публикует только сервер (клиенту права нет).
+      - name: call
+        presence: false
+        join_leave: false
+        history_size: 0
+        history_ttl: 0s
       # Личный канал пользователя: уведомления о новых беседах, счётчики
       # непрочитанного, отзыв сессии при выходе на всех устройствах.
       - name: user

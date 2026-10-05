@@ -25,6 +25,7 @@ tags:
   - name: sessions
   - name: telemetry
   - name: push
+  - name: calls
 
 paths:
   /auth/callback:
@@ -180,6 +181,296 @@ paths:
       responses:
         '204': { description: Подписки на устройстве нет }
         '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /calls:
+    post:
+      tags: [calls]
+      summary: Начать звонок в беседе один-на-один
+      description: |
+        Звонящий — вошедший; вызываемого сервер находит по беседе. Звонок,
+        закончившийся, не начавшись (`busy` — у собеседника уже идёт звонок,
+        `unavailable` — собеседник не в сети), тоже `201`: он записан, итог
+        в ленте, причина — в `end_reason`.
+
+        **Встречный звонок** (собеседник уже звонит мне) не создаёт второго:
+        принимается существующий, состояние — `accepted`.
+
+        Блокировок и лимита частоты в этой версии нет (`CALL-017`): включать
+        звонки для людей — после них.
+      operationId: startCall
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StartCall' }
+      responses:
+        '201':
+          description: Звонок создан (или принят встречный)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Call' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: Действие недоступно
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          description: Беседа не найдена или вы не её участник
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: У вас уже идёт звонок (`already_in_call`)
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          description: Звонки выключены (`calls_unavailable`)
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /calls/current:
+    get:
+      tags: [calls]
+      summary: Мой живой звонок
+      description: Нужен после перезагрузки вкладки и вкладке, открытой посреди звонка.
+      operationId: getCurrentCall
+      responses:
+        '200':
+          description: Звонок или `null`
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CurrentCall' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /calls/{call_id}/accept:
+    post:
+      tags: [calls]
+      summary: Принять входящий звонок
+      description: |
+        Побеждает первый запрос; повтор **той же вкладки** — тот же ответ. Остальные
+        вкладки вызываемого получают `call.state` с `reason: accepted_elsewhere`, а
+        вкладка, нажавшая позже первой, — `409 call_taken`: иначе обе подняли бы медиа
+        и обе ответили бы на `offer`.
+      operationId: acceptCall
+      parameters:
+        - { $ref: '#/components/parameters/CallId' }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AcceptCall' }
+      responses:
+        '200': { $ref: '#/components/responses/CallState' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/CallNotFound' }
+        '409':
+          description: Звонок завершён (`call_ended`) или принят другой вкладкой (`call_taken`)
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /calls/{call_id}/decline:
+    post:
+      tags: [calls]
+      summary: Отклонить входящий звонок
+      operationId: declineCall
+      parameters:
+        - { $ref: '#/components/parameters/CallId' }
+      responses:
+        '200': { $ref: '#/components/responses/CallState' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/CallNotFound' }
+        '409': { $ref: '#/components/responses/CallEnded' }
+
+  /calls/{call_id}/hangup:
+    post:
+      tags: [calls]
+      summary: Повесить трубку (или отменить исходящий)
+      description: Повтор безопасен — итог в ленте записывается один раз.
+      operationId: hangupCall
+      parameters:
+        - { $ref: '#/components/parameters/CallId' }
+      responses:
+        '200': { $ref: '#/components/responses/CallState' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/CallNotFound' }
+
+  /calls/{call_id}/fail:
+    post:
+      tags: [calls]
+      summary: Соединение не состоялось или оборвалось насовсем
+      description: |
+        Итог `failed`, а не `completed`: «трубка» в активном звонке — это
+        состоявшийся разговор, и обрыв сети записывался бы им. Допустимо, когда
+        звонок принят; повтор безопасен.
+      operationId: failCall
+      parameters:
+        - { $ref: '#/components/parameters/CallId' }
+      responses:
+        '200': { $ref: '#/components/responses/CallState' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/CallNotFound' }
+        '409': { $ref: '#/components/responses/CallEnded' }
+
+  /calls/{call_id}/connected:
+    post:
+      tags: [calls]
+      summary: Медиа пошло
+      description: |
+        Звонок становится `active`. Путь соединения (`direct` или `relay`) идёт в
+        метрику доли релея — на ней держится допущение о стоимости.
+      operationId: reportCallConnected
+      parameters:
+        - { $ref: '#/components/parameters/CallId' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CallConnected' }
+      responses:
+        '200': { $ref: '#/components/responses/CallState' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/CallNotFound' }
+        '409': { $ref: '#/components/responses/CallEnded' }
+
+  /calls/{call_id}/keepalive:
+    post:
+      tags: [calls]
+      summary: Звонок жив
+      description: |
+        Клиент шлёт раз в 30 с. Тишина дольше 90 с — звонок завершает сервер
+        (`failed`). Ответ несёт состояние: так клиент узнаёт, что звонок уже
+        завершён, даже если событие потерялось.
+      operationId: keepAliveCall
+      parameters:
+        - { $ref: '#/components/parameters/CallId' }
+      responses:
+        '200': { $ref: '#/components/responses/CallState' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/CallNotFound' }
+
+  /calls/{call_id}/signals:
+    post:
+      tags: [calls]
+      summary: Сигнал собеседнику (offer, answer, кандидаты ICE)
+      description: |
+        Клиент **не публикует в Centrifugo сам**: сервер проверяет участие,
+        ставит номер (`seq`) и передаёт собеседнику то, что **понял**, а не то, что
+        прислали. Сигналы начинаются после принятия. Размер — до 16 КБ, кандидатов
+        в пачке — до 40, частота — до 120 в минуту на звонок.
+      operationId: sendCallSignal
+      parameters:
+        - { $ref: '#/components/parameters/CallId' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CallSignal' }
+      responses:
+        '204':
+          description: |
+            Сигнал **записан** и принят Centrifugo. Повтор с тем же `signal_id` не создаёт
+            второй сигнал: сервер находит записанный и публикует его заново.
+        '400':
+          description: Сигнал не принят (`invalid_signal`)
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/CallNotFound' }
+        '409':
+          description: Звонок завершён (`call_ended`) или ещё не принят (`call_not_ready`)
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '429':
+          description: Слишком часто
+          headers:
+            Retry-After: { schema: { type: integer } }
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          description: |
+            Сигнал записан, но Centrifugo его **не принял** (`realtime_unavailable`). Не
+            `204` — клиент обязан знать, что передача не состоялась, и повторить с тем же
+            `signal_id`: номер не расходуется повторно. Собеседник может забрать записанный
+            сигнал и сам (`GET`).
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+    get:
+      tags: [calls]
+      summary: Пропущенные сигналы собеседника
+      description: |
+        `publish() == true` значит «принято Centrifugo», а не «получил браузер»: у канала
+        звонков нет истории, и сигнал, отправленный в момент короткого обрыва соединения,
+        иначе пропал бы. Сервер хранит сигналы **60 секунд**; после переподключения и при
+        разрыве нумерации клиент забирает пропущенное и применяет **по номеру**. Только
+        сигналы собеседника, до 200 за раз.
+      operationId: listCallSignals
+      parameters:
+        - { $ref: '#/components/parameters/CallId' }
+        - name: after
+          in: query
+          required: false
+          description: Последний применённый номер (`seq`); по умолчанию 0
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        '200':
+          description: Сигналы с номером больше `after`, по возрастанию
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CallSignalList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/CallNotFound' }
+
+  /calls/{call_id}/ice-servers:
+    get:
+      tags: [calls]
+      summary: Краткоживущий доступ к STUN/TURN
+      description: |
+        Только участнику **принятого** звонка (`accepted`, `active`): пока звонок
+        звонит, релей не нужен, а данные, выданные на этой стадии, позволяли бы
+        копить их, начиная и бросая звонки (`409 call_not_ready`). Данные живут
+        **минуты** (`ttl_seconds`, 300–600): coturn ничего не знает о таблице
+        звонков, и данные на часы пережили бы звонок. Долгий звонок обновляет их
+        сам — клиент берёт новые за минуту до конца срока и ставит в соединение
+        (`RTCPeerConnection.setConfiguration`).
+
+        Имя пользователя стабильно для **человека** внутри окна срока: повторные
+        запросы возвращают то же имя, и квота TURN на пользователя ограничивает
+        человека, а не сбрасывается новым запросом или звонком. Запросы
+        ограничены по частоте (`429`). Недоступный TURN — пустой список, а не
+        ошибка: прямое соединение работает и без него.
+      operationId: getCallIceServers
+      parameters:
+        - { $ref: '#/components/parameters/CallId' }
+      responses:
+        '200':
+          description: Список для `RTCConfiguration.iceServers`
+          headers:
+            Cache-Control: { schema: { type: string, enum: [no-store] } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IceServers' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/CallNotFound' }
+        '409':
+          description: Звонок завершён (`call_ended`) или ещё не принят (`call_not_ready`)
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '429':
+          description: Слишком часто
+          headers:
+            Retry-After: { schema: { type: integer } }
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
 
   /users:
     get:
@@ -719,7 +1010,17 @@ paths:
         `data.ticket` команды connect; connect-proxy проверяет живую сессию
         и сам возвращает Centrifugo настоящий user и разрешённые каналы.
         Отозванный ticket нельзя повторно использовать для подключения.
+
+        `scope=calls` — билет **только** на личный канал звонков (`call:{user_id}`).
+        У звонка своё соединение: оно живёт дольше открытой беседы и не должно
+        переподключаться при её смене, потому что потерянный при этом сигнал ломает
+        установку звонка, а истории у канала нет.
       operationId: issueRealtimeToken
+      parameters:
+        - name: scope
+          in: query
+          required: false
+          schema: { type: string, enum: [calls] }
       responses:
         '200':
           description: Токен и его срок
@@ -849,12 +1150,32 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    CallId:
+      name: call_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
     Limit:
       name: limit
       in: query
       schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
 
   responses:
+    CallState:
+      description: Состояние звонка после действия
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Call' }
+    CallNotFound:
+      description: Звонка нет или вы в нём не участвуете — это неотличимо
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    CallEnded:
+      description: Звонок уже завершён (`call_ended`)
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
     Unauthorized:
       description: Токен отсутствует, просрочен или отозван
       content:
@@ -913,6 +1234,123 @@ components:
           schema: { $ref: '#/components/schemas/Problem' }
 
   schemas:
+    StartCall:
+      type: object
+      required: [conversation_id, kind]
+      additionalProperties: false
+      properties:
+        conversation_id: { type: string, format: uuid }
+        kind: { type: string, enum: [audio, video] }
+
+    AcceptCall:
+      type: object
+      additionalProperties: false
+      properties:
+        tab_id:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: Метка вкладки, нажавшей «принять».
+
+    CallConnected:
+      type: object
+      required: [connection_type]
+      additionalProperties: false
+      properties:
+        connection_type:
+          type: string
+          enum: [direct, relay]
+          description: Путь медиа по `getStats()`; из него считается доля релея.
+
+    Call:
+      type: object
+      required: [call_id, conversation_id, kind, state, end_reason, version, role, peer_user_id]
+      properties:
+        call_id: { type: string, format: uuid }
+        conversation_id: { type: string, format: uuid }
+        kind: { type: string, enum: [audio, video] }
+        state: { type: string, enum: [ringing, accepted, active, ended] }
+        end_reason:
+          type: string
+          nullable: true
+          enum: [completed, declined, missed, cancelled, busy, unavailable, failed, null]
+        version:
+          type: integer
+          description: Монотонный номер состояния; событие с номером не больше виденного отбрасывается.
+        role: { type: string, enum: [caller, callee] }
+        peer_user_id: { type: string, format: uuid }
+
+    CurrentCall:
+      type: object
+      required: [call]
+      properties:
+        call:
+          nullable: true
+          allOf:
+            - { $ref: '#/components/schemas/Call' }
+
+    IceServers:
+      type: object
+      required: [ice_servers, ttl_seconds]
+      properties:
+        ice_servers:
+          type: array
+          items:
+            type: object
+            required: [urls]
+            properties:
+              urls: { type: array, items: { type: string } }
+              username: { type: string }
+              credential: { type: string }
+        ttl_seconds: { type: integer }
+
+    CallSignal:
+      type: object
+      description: |
+        `offer`/`answer` несут `sdp`, `ice` — пачку `candidates`. Лишние поля не
+        передаются собеседнику.
+      required: [type]
+      properties:
+        type: { type: string, enum: [offer, answer, ice] }
+        signal_id:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: |
+            Идентификатор логического сигнала: повтор после потерянного ответа идёт с
+            тем же значением, и получатель отбрасывает дубль. Передаётся собеседнику как есть.
+        sdp: { type: string, maxLength: 16384 }
+        candidates:
+          type: array
+          minItems: 1
+          maxItems: 40
+          items:
+            type: object
+            required: [candidate]
+            properties:
+              candidate: { type: string, maxLength: 1024 }
+              sdpMid: { type: string, nullable: true }
+              sdpMLineIndex: { type: integer, nullable: true }
+
+    CallSignalList:
+      type: object
+      required: [signals]
+      properties:
+        signals:
+          type: array
+          items: { $ref: '#/components/schemas/CallSignalEvent' }
+
+    CallSignalEvent:
+      type: object
+      description: Сигнал так, как он приходит собеседнику в канале `call:{id}`.
+      required: [type, call_id, seq, signal]
+      properties:
+        type: { type: string, enum: [call.signal] }
+        call_id: { type: string, format: uuid }
+        seq: { type: integer, minimum: 1 }
+        signal_id: { type: string, minLength: 1, maxLength: 64 }
+        signal: { $ref: '#/components/schemas/CallSignal' }
+
     BrowserTelemetryEvent:
       type: object
       additionalProperties: false
@@ -1007,9 +1445,13 @@ components:
             беседы: учётная запись с выдуманным адресом заводится
             за секунду, и без ограничения она сразу пишет посторонним.
             Чтение и ответ в существующей беседе остаются.
+
+            `calls` — не право, а **включённость** звонков на этом окружении
+            (`calls_enabled`): интерфейс не показывает кнопку, которая ответит
+            `503`.
           items:
             type: string
-            enum: [read, send_message, start_conversation]
+            enum: [read, send_message, start_conversation, calls]
 
     AuthorizationCode:
       type: object

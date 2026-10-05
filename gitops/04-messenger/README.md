@@ -9,12 +9,13 @@ realtime, почта и настоящий API. Веб, outbox-relay и потр
 | `messenger-postgres` | `Cluster messenger-db` + `Database` + `Pooler` PgBouncer | CNPG |
 | `messenger-redis` | `Redis messenger-redis`, БД 0/1/2 под три роли | ot-container-kit |
 | `messenger-kafka-topics` | четыре `KafkaTopic` и отдельные KafkaUser с ACL | Strimzi |
-| `messenger-secrets` | учётные данные MinIO и Centrifugo | джоб-хук |
+| `messenger-secrets` | учётные данные MinIO, Centrifugo и TURN | джоб-хук |
 | `messenger-minio` | `Tenant messenger-objects`, два бакета | MinIO |
 | `messenger-keycloak` | `Cluster keycloak-db` + `Keycloak messenger-idp` | CNPG, Keycloak |
 | `messenger-centrifugo` | Centrifugo на Redis | чарт (оператора нет) |
 | `messenger-mailpit` | сток писем для подтверждения адреса | чарт |
 | `messenger-services` | API, веб и потребители — один шаблон | чарт `charts/messenger` |
+| `messenger-turn` | coturn для звонков: релей, когда прямой путь между браузерами невозможен | манифесты (оператора нет) |
 | `messenger-routes` | `HTTPRoute` на `rt`, `s3`, `mail` | — |
 
 Кроме Centrifugo, у которого оператора не существует, ни один `StatefulSet`

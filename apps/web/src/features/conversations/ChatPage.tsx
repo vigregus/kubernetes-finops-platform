@@ -51,6 +51,7 @@ import { TypingIndicator } from "../messages/components/TypingIndicator"
 import { useVoiceRecorder } from "../attachments/useVoiceRecorder"
 import { browserVoiceDeps } from "../attachments/voiceRecorder"
 import { MessengerLayout } from "../../shared/ui/MessengerLayout"
+import { useCalls } from "../calls/CallsProvider"
 import type {
   ChatMessage,
   Conversation,
@@ -686,6 +687,25 @@ function ConversationPane({
   attachments,
 }: ConversationPaneProps) {
   /**
+   * Кнопки звонка в шапке. Звонков нет (выключены на окружении) — `null`, и
+   * кнопок тоже нет. Звонить можно только в беседу один-на-один (у неё есть
+   * собеседник), пока нет другого звонка и поднята сигнализация: кнопка, которая
+   * ведёт в отказ, хуже отсутствующей.
+   */
+  const calls = useCalls()
+  const callHandlers =
+    calls !== null &&
+    calls.supported &&
+    calls.signalingUp &&
+    conversation.peerUserId !== undefined &&
+    (calls.view.phase === "idle" || calls.view.phase === "ended")
+      ? {
+          onVoiceCall: () => calls.startCall(conversation.id, "audio", conversation.name),
+          onVideoCall: () => calls.startCall(conversation.id, "video", conversation.name),
+        }
+      : {}
+
+  /**
    * Лента этого окна — в ссылке, потому что публикации достаются обработчику,
    * который объявлен **раньше** самого хука.
    *
@@ -1094,6 +1114,7 @@ function ConversationPane({
     >
       <ChatHeader
         conversation={typingNames.length > 0 ? { ...conversation, typingNames: [...typingNames] } : conversation}
+        {...callHandlers}
       />
 
       {conversationHistory.phase === "error" ? (

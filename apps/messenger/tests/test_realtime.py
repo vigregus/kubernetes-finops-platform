@@ -194,6 +194,56 @@ def test_выключенный_набор_не_выдаёт_канал(monkeypa
     assert channels == [f"user:{USER_ID}", f"conversation:{беседа}"]
 
 
+def test_билет_звонков_даёт_только_личный_канал_звонков(monkeypatch):
+    """У звонка своё соединение и свой единственный канал (CALL-006, CALL-007)."""
+    import uuid as _uuid
+
+    async def _authenticate(*args, **kwargs):
+        return _auth()
+
+    realtime = FakeRealtime()
+    monkeypatch.setattr(identity, "authenticate", _authenticate)
+    monkeypatch.setenv("CALLS_ENABLED", "true")
+    _беседы(monkeypatch, [_uuid.uuid4()])
+
+    asyncio.run(service.issue_token_for_user(
+        None, token="token", keys=None, settings=None, realtime=realtime, scope="calls",
+    ))
+    _, _, channels = realtime.issued[0]
+    assert channels == [f"call:{USER_ID}"]
+
+
+def test_обычный_билет_канала_звонков_не_содержит(monkeypatch):
+    """Соединение беседы не подписывается на сигналы: его пересоздание их потеряло бы."""
+    async def _authenticate(*args, **kwargs):
+        return _auth()
+
+    realtime = FakeRealtime()
+    monkeypatch.setattr(identity, "authenticate", _authenticate)
+    monkeypatch.setenv("CALLS_ENABLED", "true")
+    _беседы(monkeypatch, [])
+
+    asyncio.run(service.issue_token_for_user(
+        None, token="token", keys=None, settings=None, realtime=realtime,
+    ))
+    _, _, channels = realtime.issued[0]
+    assert not any(channel.startswith("call:") for channel in channels)
+
+
+def test_билет_звонков_при_выключенных_звонках_без_каналов(monkeypatch):
+    async def _authenticate(*args, **kwargs):
+        return _auth()
+
+    realtime = FakeRealtime()
+    monkeypatch.setattr(identity, "authenticate", _authenticate)
+    monkeypatch.setenv("CALLS_ENABLED", "false")
+
+    asyncio.run(service.issue_token_for_user(
+        None, token="token", keys=None, settings=None, realtime=realtime, scope="calls",
+    ))
+    assert realtime.issued[0][2] == []
+
+
 def test_выдача_токена_при_отказе_токена(monkeypatch):
     async def _authenticate(*args, **kwargs):
         return identity.AuthResult(rejection=TokenRejection.BAD_SIGNATURE)
@@ -304,6 +354,26 @@ def test_connect_proxy_регистрирует_client_до_допуска(monke
     # Отметка подтверждённой жизни — в том же такте, что и регистрация.
     assert marks == [USER_ID]
     assert conn.transactions == 1
+
+
+def test_соединение_звонков_помечается_в_реестре_а_соединение_беседы_нет(monkeypatch):
+    """Достижим для звонка только тот, у кого есть соединение звонков (CALL-014)."""
+    seen: list[dict] = []
+
+    async def _register(conn, **kwargs):
+        seen.append(kwargs)
+        return True
+
+    monkeypatch.setattr(service.sessions, "register_realtime_connection", _register)
+    _отметки(monkeypatch)
+
+    for channels in ([f"call:{USER_ID}"], [f"user:{USER_ID}", f"conversation:{USER_ID}"]):
+        realtime = FakeRealtime()
+        realtime.claims = {**realtime.claims, "channels": channels}
+        asyncio.run(service.connect_from_ticket(
+            Connection(), ticket="connect-token", client_id="c", realtime=realtime,
+        ))
+    assert [item["calls"] for item in seen] == [True, False]
 
 
 def test_connect_proxy_не_принимает_отозванную_сессию(monkeypatch):

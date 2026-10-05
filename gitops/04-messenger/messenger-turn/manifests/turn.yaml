@@ -1,0 +1,238 @@
+# TURN для звонков (ADR 0007, `CALL-011b`): свой coturn вместо платного сервиса.
+#
+# Руками, а не оператором или чартом, — по той же причине, что и Centrifugo:
+# оператора для coturn нет, а стороннего чарта, которому можно доверить сетевые
+# ограничения ниже, нет тоже. Исключение из «ни одного Deployment руками» названо.
+#
+# Что здесь решено и почему:
+#
+#  * **Учётные данные — HMAC, без базы.** `--use-auth-secret`: API выдаёт пару
+#    «срок:метка» и подпись общим секретом (`adapters/turn.py::CoturnProvider`),
+#    а coturn проверяет подпись и срок сам. Секрет — в `messenger-turn`
+#    (создаёт `messenger-secrets-bootstrap`), в git его нет.
+#  * **Релей не должен стать дверью во внутреннюю сеть.** TURN по построению
+#    пересылает пакеты на адрес, который назвал клиент, — без запрета частных
+#    диапазонов любой вошедший открывал бы себе доступ к подам кластера.
+#    `--denied-peer-ip` закрывает все частные, loopback, link-local и
+#    CGNAT-диапазоны; прямой путь между двумя устройствами в одной сети релея не
+#    требует, поэтому запрет его не ломает.
+#  * **Данные TURN живут минуты** (`domain/call.py::TURN_TTL_SECONDS`) и выдаются
+#    только участнику **принятого** звонка: coturn ничего не знает о таблице
+#    звонков, и данные на часы пережили бы звонок. Долгий звонок обновляет их сам —
+#    клиент берёт новые за минуту до конца срока (`setConfiguration`).
+#  * **Стоимость ограничена.** Релей — главная статья расходов на звонки
+#    (оценка, часть 5). `--max-bps` задан в **байтах** в секунду, а не в битах:
+#    600 000 Б/с ≈ 4,8 Мбит/с на сеанс в каждую сторону — с запасом над Full HD
+#    (4 Мбит/с, потолок клиента), звуком (64 кбит/с) и накладными.
+#    `--bps-capacity` — потолок на весь сервер (≈ 48 Мбит/с), `--user-quota` и `--total-quota` — число выделений. Учётные
+#    данные стабильны для человека внутри окна (`CoturnProvider`), поэтому квота на
+#    пользователя действительно ограничивает человека, а не сбрасывается новыми
+#    данными при каждом запросе или новом звонке.
+#  * **Диапазон релейных портов узкий** (20 портов): у Kubernetes нет «диапазона
+#    UDP» на Service, каждый порт перечислен. Для стенда этого хватает на ~10
+#    одновременных релейных звонков; облачный вариант — другой диапазон и NLB
+#    (`CALL-011`).
+#  * **Только UDP/TCP без TLS.** `turns:` на 443 для сетей без UDP требует
+#    сертификата и порта 443 — отдельным шагом, когда появится публичный адрес.
+#
+# Достижимость с хоста: на локальном стенде (minikube с драйвером Docker) UDP
+# наружу из кластера не пробрасывается, поэтому релей проверяется **внутри**
+# кластера (`tests/integration/turn_check.py`); для телефона в той же сети нужен
+# `LoadBalancer` с адресом из сети телефона и `TURN_EXTERNAL_IP`.
+apiVersion: v1
+kind: Service
+metadata:
+  name: messenger-turn
+  namespace: messenger
+  labels:
+    app.kubernetes.io/name: messenger-turn
+    finops.internal/product: messenger
+    finops.internal/team: platform-engineering
+    finops.internal/environment: local
+    finops.internal/component: turn
+spec:
+  # LoadBalancer: на стенде адрес выдаёт `minikube tunnel`, в облаке — NLB.
+  type: LoadBalancer
+  selector:
+    app.kubernetes.io/name: messenger-turn
+  ports:
+    - {name: turn-udp, protocol: UDP, port: 3478, targetPort: 3478}
+    - {name: turn-tcp, protocol: TCP, port: 3478, targetPort: 3478}
+    - {name: relay-30500, protocol: UDP, port: 30500, targetPort: 30500}
+    - {name: relay-30501, protocol: UDP, port: 30501, targetPort: 30501}
+    - {name: relay-30502, protocol: UDP, port: 30502, targetPort: 30502}
+    - {name: relay-30503, protocol: UDP, port: 30503, targetPort: 30503}
+    - {name: relay-30504, protocol: UDP, port: 30504, targetPort: 30504}
+    - {name: relay-30505, protocol: UDP, port: 30505, targetPort: 30505}
+    - {name: relay-30506, protocol: UDP, port: 30506, targetPort: 30506}
+    - {name: relay-30507, protocol: UDP, port: 30507, targetPort: 30507}
+    - {name: relay-30508, protocol: UDP, port: 30508, targetPort: 30508}
+    - {name: relay-30509, protocol: UDP, port: 30509, targetPort: 30509}
+    - {name: relay-30510, protocol: UDP, port: 30510, targetPort: 30510}
+    - {name: relay-30511, protocol: UDP, port: 30511, targetPort: 30511}
+    - {name: relay-30512, protocol: UDP, port: 30512, targetPort: 30512}
+    - {name: relay-30513, protocol: UDP, port: 30513, targetPort: 30513}
+    - {name: relay-30514, protocol: UDP, port: 30514, targetPort: 30514}
+    - {name: relay-30515, protocol: UDP, port: 30515, targetPort: 30515}
+    - {name: relay-30516, protocol: UDP, port: 30516, targetPort: 30516}
+    - {name: relay-30517, protocol: UDP, port: 30517, targetPort: 30517}
+    - {name: relay-30518, protocol: UDP, port: 30518, targetPort: 30518}
+    - {name: relay-30519, protocol: UDP, port: 30519, targetPort: 30519}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: messenger-turn
+  namespace: messenger
+  labels:
+    app.kubernetes.io/name: messenger-turn
+    finops.internal/product: messenger
+    finops.internal/team: platform-engineering
+    finops.internal/environment: local
+    finops.internal/component: turn
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: messenger-turn
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: messenger-turn
+        finops.internal/product: messenger
+        finops.internal/team: platform-engineering
+        finops.internal/environment: local
+        finops.internal/component: turn
+    spec:
+      # Звонок без релея у большинства людей работает, поэтому TURN — не критичная
+      # нагрузка: при нехватке места на узле он уходит раньше сообщений.
+      priorityClassName: messenger-standard
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: coturn
+          # По digest, а не по тегу: тег подвижен, и образ, на который смотрит
+          # нагрузка, не должен меняться без правки git (как у остальных образов).
+          # Тег — 4.7.0-alpine; digest — индекс манифестов (обе архитектуры).
+          image: coturn/coturn@sha256:2a0c41042b02c6daa33f35ce3781da20fe0d08da6cf2746c8ae62a890802cc36
+          # Оболочка, а не прямой запуск: два флага добавляются только когда заданы
+          # переменные (`${X:+...}`), а пустой `--external-ip=` coturn не принимает.
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              # Внешний адрес и исключение «свой под — допустимый пир» **исключают друг
+              # друга**. Есть внешний адрес — релей назван публичным адресом, частные
+              # диапазоны остаются закрытыми целиком. Нет — релей назван адресом пода
+              # (частным), и без исключения для **этого одного** адреса релей между
+              # двумя клиентами (проверка `turn_check.py`) невозможен.
+              EXTERNAL=""
+              SELF_PEER=""
+              if [ -n "${TURN_EXTERNAL_IP:-}" ]; then
+                EXTERNAL="--external-ip=$TURN_EXTERNAL_IP/$POD_IP"
+              else
+                SELF_PEER="--allowed-peer-ip=$POD_IP"
+              fi
+              exec turnserver -n --log-file=stdout --simple-log --no-cli \
+                --no-tls --no-dtls --fingerprint \
+                --realm=turn.finops.local --listening-port=3478 \
+                --min-port=30500 --max-port=30519 \
+                --use-auth-secret --static-auth-secret="$TURN_SECRET" \
+                --no-multicast-peers --no-tcp-relay \
+                --denied-peer-ip=0.0.0.0-0.255.255.255 \
+                --denied-peer-ip=10.0.0.0-10.255.255.255 \
+                --denied-peer-ip=100.64.0.0-100.127.255.255 \
+                --denied-peer-ip=127.0.0.0-127.255.255.255 \
+                --denied-peer-ip=169.254.0.0-169.254.255.255 \
+                --denied-peer-ip=172.16.0.0-172.31.255.255 \
+                --denied-peer-ip=192.168.0.0-192.168.255.255 \
+                --denied-peer-ip=224.0.0.0-255.255.255.255 \
+                --max-bps=600000 --bps-capacity=6000000 \
+                --user-quota=4 --total-quota=100 \
+                --prometheus --pidfile=/tmp/turnserver.pid \
+                $EXTERNAL $SELF_PEER
+          env:
+            - name: TURN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: messenger-turn
+                  key: secret
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            # Публичный адрес, который coturn называет клиентам в релейном адресе
+            # (`XOR-RELAYED-ADDRESS`). **Без него релей работает только внутри
+            # кластера**: за NAT/балансировщиком coturn назвал бы адрес пода, и
+            # браузер извне не отправил бы на него ни пакета. Берётся из ConfigMap
+            # `messenger-turn-config` (ключ `external-ip`), которого **в git нет
+            # намеренно**: адрес у каждого окружения свой (внешний IP балансировщика
+            # или Elastic IP), и его создаёт окружение — вручную на стенде
+            # (`docs/local-setup.md`), в облаке — оверлеем или External Secrets.
+            # Нет ConfigMap — флаг не добавляется (и включается исключение для пода,
+            # см. скрипт выше). Формат coturn: `публичный/частный`, частный — под.
+            - name: TURN_EXTERNAL_IP
+              valueFrom:
+                configMapKeyRef:
+                  name: messenger-turn-config
+                  key: external-ip
+                  optional: true
+          ports:
+            - {name: turn-udp, containerPort: 3478, protocol: UDP}
+            - {name: turn-tcp, containerPort: 3478, protocol: TCP}
+            - {name: metrics, containerPort: 9641, protocol: TCP}
+          resources:
+            requests: {cpu: 25m, memory: 32Mi}
+            limits: {cpu: 500m, memory: 128Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+              # Не ради привилегированных портов (они выше 1024), а ради запуска:
+              # бинарь `turnserver` в образе помечен файловой капабилити
+              # `cap_net_bind_service`, и без неё в наборе процесса `exec` падает с
+              # `Operation not permitted` (воспроизведено: `--cap-drop ALL`).
+              # Единственная добавленная; повышение прав по-прежнему запрещено.
+              add: ["NET_BIND_SERVICE"]
+          # Живость — по TCP-порту: UDP пробой не проверить, а процесс, не
+          # слушающий 3478/tcp, мёртв. Терпит замирание узла, как соседи.
+          readinessProbe:
+            tcpSocket: {port: 3478}
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket: {port: 3478}
+            periodSeconds: 10
+            failureThreshold: 12
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+# Метрики coturn: число выделений и трафик релея — то, на чём держится оценка
+# стоимости (доля релея, допущение 15%).
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMPodScrape
+metadata:
+  name: messenger-turn
+  namespace: messenger
+  labels:
+    app.kubernetes.io/name: messenger-turn
+    finops.internal/product: messenger
+    finops.internal/team: platform-engineering
+    finops.internal/environment: local
+    finops.internal/component: turn
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: messenger-turn
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s

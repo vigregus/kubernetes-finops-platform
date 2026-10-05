@@ -163,6 +163,7 @@ kubectl -n "$NS" run "$POD" --restart=Never \
         {"name":"S3_ACCESS_KEY","valueFrom":{"secretKeyRef":{"name":"messenger-minio-api","key":"access-key"}}},
         {"name":"S3_SECRET_KEY","valueFrom":{"secretKeyRef":{"name":"messenger-minio-api","key":"secret-key"}}},
         {"name":"INTEGRATION_ONLY","value":"${INTEGRATION_ONLY:-}"},
+        {"name":"TURN_COTURN_SECRET","valueFrom":{"secretKeyRef":{"name":"messenger-turn","key":"secret","optional":true}}},
         {"name":"KEEP_ACCOUNTS","value":"${KEEP_ACCOUNTS:-}"},
         {"name":"BACKCHANNEL_TEST_URL","value":"${BACKCHANNEL_TEST_URL:-}"},
         {"name":"INTEGRATION_OIDC_CLIENT_ID","value":"${INTEGRATION_OIDC_CLIENT_ID:-}"},

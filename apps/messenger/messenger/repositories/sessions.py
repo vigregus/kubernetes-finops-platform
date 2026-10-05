@@ -281,8 +281,12 @@ async def register_realtime_connection(
     session_id: SessionId,
     user_id: UserId,
     client_id: str,
+    calls: bool = False,
 ) -> bool:
     """Атомарно допускает соединение только для живой сессии.
+
+    `calls` — соединение звонков (у билета есть канал `call:{id}`): только такое
+    считается достижимым для входящего звонка (`repositories/calls.py`).
 
     Блокировка строки согласована с отзывом в сервисе: либо соединение
     попадёт в реестр раньше отзыва и будет разорвано, либо увидит уже
@@ -311,8 +315,8 @@ async def register_realtime_connection(
         return False
     await conn.execute(
         """
-        INSERT INTO realtime_connections (client_id, session_id, user_id)
-        VALUES ($1, $2, $3)
+        INSERT INTO realtime_connections (client_id, session_id, user_id, calls)
+        VALUES ($1, $2, $3, $4)
         ON CONFLICT (client_id) DO UPDATE
            SET refreshed_at = now()
          WHERE realtime_connections.session_id = EXCLUDED.session_id
@@ -321,6 +325,7 @@ async def register_realtime_connection(
         client_id,
         session_id,
         user_id,
+        calls,
     )
     return True
 

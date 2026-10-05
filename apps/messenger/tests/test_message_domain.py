@@ -90,3 +90,17 @@ def test_сообщение_и_payload_неизменяемы():
         message.conversation_seq = ConversationSeq(2)  # type: ignore[misc]
     with pytest.raises(FrozenInstanceError):
         message.payload.text = "другое"  # type: ignore[misc]
+
+
+def test_итог_звонка_несёт_длительность_а_текст_нет():
+    """Служебное сообщение с длительностью — итог звонка (CALL-005); живая проверка
+    нашла `500` на `hangup`, потому что правило пускало длительность только в голосовое."""
+    from messenger.domain.message import MessageKind, MessagePayload, validate_message_payload
+
+    done = MessagePayload(text="call.completed.audio", duration_ms=75_000)
+    validate_message_payload(MessageKind.SYSTEM, done)
+    validate_message_payload(MessageKind.SYSTEM, MessagePayload(text="call.missed.audio"))
+    import pytest
+
+    with pytest.raises(ValueError):
+        validate_message_payload(MessageKind.TEXT, MessagePayload(text="привет", duration_ms=1000))

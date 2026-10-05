@@ -31,6 +31,7 @@ import type {
   MessageAttachment,
   MessageKind,
 } from "../../shared/lib/types"
+import { parseCallSummary } from "../calls/callSummary"
 import { formatConversationTimestamp, type TimestampFormatOptions } from "../conversations/formatTimestamp"
 
 /**
@@ -235,7 +236,10 @@ export function adaptMessage(
   now: Date,
   timestampOptions: TimestampFormatOptions = {},
 ): ChatMessage {
-  const kind = KIND_OF_TYPE[dto.type] ?? UNSUPPORTED_KIND
+  // Итог звонка — единственное служебное сообщение, которое интерфейс умеет
+  // показать; любое другое `system` по-прежнему `unsupported`.
+  const call = dto.type === "system" ? parseCallSummary(dto.payload?.text) : null
+  const kind = call !== null ? "call" : (KIND_OF_TYPE[dto.type] ?? UNSUPPORTED_KIND)
   const first = dto.attachments?.[0]
 
   return {
@@ -269,6 +273,18 @@ export function adaptMessage(
     // вид), а в пузыре оно выдаёт себя за содержимое, которого сервер не
     // присылал.
     text: dto.payload?.text,
+
+    // Итог звонка: вид и длительность. Слова подставляет интерфейс.
+    ...(call === null
+      ? {}
+      : {
+          call: {
+            ...call,
+            ...(typeof dto.payload?.durationMs === "number"
+              ? { durationSeconds: Math.floor(dto.payload.durationMs / 1000) }
+              : {}),
+          },
+        }),
 
     // Вид берётся из типа сообщения — это утверждение сервера, — а не из
     // наличия массива: сообщение `image` без вложения остаётся вложением,
@@ -373,6 +389,17 @@ export function adaptPublication(event: unknown, currentUserId: string): ChatMes
   const payload = event.payload
   const clientMessageId = event.client_message_id
 
+  // Итог звонка приходит системным сообщением. Вид берётся из `message_type`, а
+  // не из текста: текст, совпавший с кодом, мог напечатать человек.
+  const call =
+    event.message_type === "system" && isRecord(payload) && typeof payload.text === "string"
+      ? parseCallSummary(payload.text)
+      : null
+  const duration =
+    call !== null && isRecord(payload) && typeof payload.duration_ms === "number"
+      ? Math.floor(payload.duration_ms / 1000)
+      : undefined
+
   return {
     id,
     seq,
@@ -387,7 +414,10 @@ export function adaptPublication(event: unknown, currentUserId: string): ChatMes
       ? { clientMessageId }
       : {}),
 
-    kind: "text",
+    kind: call === null ? "text" : "call",
+    ...(call === null
+      ? {}
+      : { call: { ...call, ...(duration === undefined ? {} : { durationSeconds: duration }) } }),
     // Тело берётся, когда оно строка: `payload` необязателен, а `payload.text`
     // может прийти числом или объектом. Выдуманного тела не появляется —
     // `undefined` рисуется пустотой.

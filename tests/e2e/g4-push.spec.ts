@@ -50,17 +50,6 @@ test.describe("G4: Web Push в браузере", () => {
 
 	test("Service Worker регистрируется, отдаётся без кэша и не как HTML (NTF-006)", async () => {
 		test.setTimeout(60_000)
-		const logs: string[] = []
-		a.page.on("console", (m) => logs.push(`${m.type()}: ${m.text()}`.slice(0, 200)))
-		const diag = await a.page.evaluate(async () => ({
-			secure: window.isSecureContext,
-			push: "PushManager" in window,
-			notification: "Notification" in window,
-			permission: Notification.permission,
-			registrations: (await navigator.serviceWorker.getRegistrations()).length,
-			banner: document.querySelectorAll("[data-notifications-state]").length,
-		}))
-		console.log("DIAG", JSON.stringify(diag), logs.slice(-3).join(" | "))
 		const response = await a.page.request.get("/sw.js")
 		expect(response.status()).toBe(200)
 		expect(response.headers()["content-type"]).toContain("javascript")

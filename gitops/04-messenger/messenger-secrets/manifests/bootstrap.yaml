@@ -163,6 +163,18 @@ spec:
                 echo "messenger-vapid: создан"
               fi
 
+              # Общий секрет TURN (`use-auth-secret` у coturn). Его знают двое: API
+              # подписывает им краткоживущие учётные данные звонка, coturn проверяет
+              # подпись. Пересоздание обнуляет только идущие релейные звонки — данные
+              # живут минуты, — но секрет, как и остальные, существующим не трогается.
+              if have messenger-turn; then
+                echo "messenger-turn: уже есть, не трогаю"
+              else
+                kubectl -n messenger create secret generic messenger-turn \
+                  --from-literal=secret="$(rand 32)"
+                echo "messenger-turn: создан"
+              fi
+
               if have messenger-centrifugo; then
                 echo "messenger-centrifugo: уже есть, не трогаю"
               else

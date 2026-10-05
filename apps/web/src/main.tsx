@@ -5,6 +5,7 @@ import App from "./App.tsx";
 import { createApiClient, withUnwrappedErrors } from "./api/client";
 import {
   AttachmentsApi,
+  CallsApi,
   PushApi,
   AuthApi,
   ConversationsApi,
@@ -18,6 +19,7 @@ import { bootStateOf, completeLogin } from "./features/auth/callback";
 import { createTelemetryClient } from "./features/telemetry/telemetryClient";
 import type { AttachmentClient } from "./features/attachments/attachmentUpload";
 import type { PushSubscriptionApi } from "./features/notifications/pushClient";
+import { toCallSignal, toCallView, toSignalPayload, type CallsOperations } from "./features/calls/callsApi";
 import { ensureDeviceId, loadDeviceId, saveDeviceId } from "./features/auth/deviceId";
 import { CALLBACK_PATH } from "./features/auth/session";
 import { createSessionState } from "./features/auth/sessionState";
@@ -57,6 +59,7 @@ const messagesApi = withUnwrappedErrors(new MessagesApi(client.configuration));
 const usersApi = withUnwrappedErrors(new UsersApi(client.configuration));
 const attachmentsApi = withUnwrappedErrors(new AttachmentsApi(client.configuration));
 const pushApi = withUnwrappedErrors(new PushApi(client.configuration));
+const callsApi = withUnwrappedErrors(new CallsApi(client.configuration));
 
 /**
  * G3-008, одна константа на приложение — тем же доводом, что у
@@ -194,6 +197,50 @@ const pushSubscriptionApi: PushSubscriptionApi = {
     });
   },
   remove: () => pushApi.deletePushSubscription(),
+};
+
+/**
+ * Звонки: операции контракта в форме, нужной клиенту. Билет подключения — на
+ * **канал звонков** (`scope=calls`): у звонка своё соединение, не зависящее от
+ * открытой беседы.
+ */
+const issueCallsTicket = createRealtimeTicketIssuer(client.configuration, "calls");
+
+const callsOperations: CallsOperations = {
+  start: async (conversationId, kind) =>
+    toCallView(await callsApi.startCall({ startCall: { conversationId, kind } })),
+  current: async () => {
+    const { call } = await callsApi.getCurrentCall();
+    return call === null || call === undefined ? null : toCallView(call);
+  },
+  accept: async (callId, tabId) =>
+    toCallView(await callsApi.acceptCall({ callId, acceptCall: { tabId } })),
+  decline: async (callId) => toCallView(await callsApi.declineCall({ callId })),
+  // `keepalive` — запрос на закрытии страницы должен дойти до сервера.
+  hangup: async (callId, options) =>
+    toCallView(
+      await callsApi.hangupCall({ callId }, options?.unload === true ? { keepalive: true } : undefined),
+    ),
+  fail: async (callId) => toCallView(await callsApi.failCall({ callId })),
+  keepalive: async (callId) => toCallView(await callsApi.keepAliveCall({ callId })),
+  connected: async (callId, connectionType) =>
+    toCallView(await callsApi.reportCallConnected({ callId, callConnected: { connectionType } })),
+  signal: (callId, signal) => callsApi.sendCallSignal({ callId, callSignal: toCallSignal(signal) }),
+  signals: async (callId, after) => {
+    const { signals } = await callsApi.listCallSignals({ callId, after });
+    return signals.map(toSignalPayload);
+  },
+  iceServers: async (callId) => {
+    const { iceServers, ttlSeconds } = await callsApi.getCallIceServers({ callId });
+    return {
+      ttlSeconds,
+      servers: iceServers.map((server) => ({
+        urls: server.urls,
+        ...(server.username === undefined ? {} : { username: server.username }),
+        ...(server.credential === undefined ? {} : { credential: server.credential }),
+      })),
+    };
+  },
 };
 
 const attachmentClient: AttachmentClient = {
@@ -362,6 +409,8 @@ createRoot(document.getElementById("root")!).render(
       telemetry={telemetryClient}
       attachments={attachmentClient}
       pushSubscriptions={pushSubscriptionApi}
+      calls={callsOperations}
+      issueCallsTicket={issueCallsTicket}
     />
   </StrictMode>,
 );

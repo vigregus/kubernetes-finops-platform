@@ -72,6 +72,13 @@ ROOT = Path(__file__).resolve().parent.parent
 EXTERNAL_METRICS: dict[str, str] = {
     # Отдаёт Centrifugo на внутреннем порту 9000, объявлена не в `apps/**`,
     # а в самом чарте. Снимается скрейпом из этого же репозитория.
+    # coturn отдаёт свои метрики сам (`--prometheus`, порт 9641); снимает их
+    # `VMPodScrape` в том же манифесте, что и сам сервер. Используются на 09 · Calls.
+    "turn_total_allocations": "gitops/04-messenger/messenger-turn/manifests/turn.yaml",
+    "turn_total_traffic_sentb": "gitops/04-messenger/messenger-turn/manifests/turn.yaml",
+    "turn_total_traffic_rcvb": "gitops/04-messenger/messenger-turn/manifests/turn.yaml",
+    "stun_binding_request": "gitops/04-messenger/messenger-turn/manifests/turn.yaml",
+    "stun_binding_error": "gitops/04-messenger/messenger-turn/manifests/turn.yaml",
     "centrifugo_node_num_clients": (
         "gitops/04-messenger/messenger-centrifugo/manifests/service-scrape.yaml"
     ),

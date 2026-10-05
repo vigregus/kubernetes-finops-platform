@@ -1,0 +1,26 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: messenger-turn
+  namespace: argocd
+  annotations:
+    # Волна 4, как у соседей: секрет `messenger-turn` создаётся на волне 3
+    # (`messenger-secrets`), раньше сервера, который его читает.
+    argocd.argoproj.io/sync-wave: "4"
+spec:
+  project: finops-platform
+  source:
+    repoURL: https://github.com/vigregus/kubernetes-finops-platform.git
+    targetRevision: HEAD
+    path: gitops/04-messenger/messenger-turn/manifests
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: messenger
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true
