@@ -396,10 +396,26 @@ export function ChatPage({
    * второй раз. Сложение на повторе сдвинуло бы счётчик вверх ровно там, где
    * исправить его нечем.
    */
+  /**
+   * Событие и сверка не должны затирать друг друга. Пока идёт круг REST, событие личного канала
+   * может прийти **новее** снимка, который сервер уже начал собирать: ответ с прежним числом
+   * откатил бы число назад (а «максимум» не годится — непрочитанное и уменьшается). Поэтому
+   * событие, пришедшее посреди круга, помечает его «грязным», и его снимок не применяется
+   * вслепую: круг повторяется (читаем заново), а события, пришедшие за последний круг,
+   * остаются поверх снимка.
+   */
+  const refreshing = useRef(false)
+  const dirtyDuringRefresh = useRef(false)
+  const eventsDuringRefresh = useRef(new Map<string, number>())
+
   const onUnreadPublication = useCallback((payload: unknown) => {
     const change = adaptUnreadChanged(payload)
     if (change === null) return
 
+    if (refreshing.current) {
+      dirtyDuringRefresh.current = true
+      eventsDuringRefresh.current.set(change.conversationId, change.unreadCount)
+    }
     setOverlay((current) => {
       const next = new Map(current)
       next.set(change.conversationId, change.unreadCount)
@@ -408,7 +424,6 @@ export function ChatPage({
   }, [])
 
   /** Сверка: круг REST за истиной. Общий на оба повода — ответ один и тот же. */
-  const refreshing = useRef(false)
   const refresh = useCallback(async () => {
     // Два повода могут совпасть (возврат видимости сразу за выходом из
     // разрыва). Второй круг при этом не отменяется, а **не начинается**:
@@ -416,12 +431,21 @@ export function ChatPage({
     if (refreshing.current) return
     refreshing.current = true
     try {
-      const page = await refreshConversations()
-      // Момент времени — свой, а не тот, что был на загрузке: список
-      // перечитывается сейчас, и display-время обязано считаться от этого
-      // момента, иначе «14:22» уехало бы в прошлое от самой сверки.
-      setBase(adaptConversations(page, currentUserId, new Date()))
-      setOverlay(EMPTY_OVERLAY)
+      for (let pass = 1; pass <= MAX_REFRESH_PASSES; pass += 1) {
+        dirtyDuringRefresh.current = false
+        eventsDuringRefresh.current = new Map()
+        const page = await refreshConversations()
+        // Событие пришло, пока шёл запрос: снимок мог начаться раньше него. Читаем заново.
+        if (dirtyDuringRefresh.current && pass < MAX_REFRESH_PASSES) continue
+
+        // Момент времени — свой, а не тот, что был на загрузке: список
+        // перечитывается сейчас, и display-время обязано считаться от этого
+        // момента, иначе «14:22» уехало бы в прошлое от самой сверки.
+        setBase(adaptConversations(page, currentUserId, new Date()))
+        // Последний круг тоже мог пересечься с событием: оно остаётся поверх снимка.
+        setOverlay(dirtyDuringRefresh.current ? new Map(eventsDuringRefresh.current) : EMPTY_OVERLAY)
+        return
+      }
     } catch {
       // Отказ сверки оставлен без строки на экране, и это не «проглочено»:
       // сверка не обещает ничего нового — она заменяет уже показанное более
@@ -747,6 +771,9 @@ const LIST_URL = "/"
 function chatUrl(conversationId: string): string {
   return `/?conversation=${encodeURIComponent(conversationId)}`
 }
+
+/** Сколько раз круг сверки перечитывается, если посреди него пришло событие личного канала. */
+const MAX_REFRESH_PASSES = 3
 
 const SIDEBAR_COLLAPSED_KEY = "messenger.sidebar.collapsed"
 

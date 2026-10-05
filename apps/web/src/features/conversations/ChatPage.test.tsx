@@ -703,6 +703,60 @@ describe("число непрочитанного: событие личного
     expect(calls.refreshes).toBe(1);
   });
 
+  it("событие, пришедшее посреди круга сверки, не откатывается устаревшим снимком", async () => {
+    // Круг начался и завис; `unread.changed = 4` пришло новее; потом пришёл снимок со старым
+    // числом (3). Применить его вслепую — откатить число назад, а «максимум» не годится:
+    // непрочитанное и уменьшается. Круг с событием посередине перечитывается.
+    const stale = deferred<ConversationListPage>();
+    let reads = 0;
+    const { fake, unread, calls } = setup({
+      conversations: [conversationOf({ id: "c1", unreadCount: 1 })],
+      refresh: () => {
+        reads += 1;
+        return reads === 1 ? stale.promise : Promise.resolve(pageWith("c1", 4));
+      },
+    });
+
+    await returnToVisible();
+    await waitFor(() => expect(calls.refreshes).toBe(1));
+
+    await publishUnread(fake, "c1", 4);
+    expect(unread("c1")).toBe("4");
+
+    await act(async () => {
+      stale.resolve(pageWith("c1", 3));
+    });
+
+    // Не «3»: устаревший снимок отброшен, круг перечитан и принёс 4.
+    await waitFor(() => expect(calls.refreshes).toBe(2));
+    await waitFor(() => expect(unread("c1")).toBe("4"));
+  });
+
+  it("перечитанный снимок без новых событий авторитетен: он новее события и заменяет его", async () => {
+    const stale = deferred<ConversationListPage>();
+    let reads = 0;
+    const { fake, unread, calls } = setup({
+      conversations: [conversationOf({ id: "c1", unreadCount: 1 })],
+      // Сервер отдаёт 3 и при повторном чтении.
+      refresh: () => {
+        reads += 1;
+        return reads === 1 ? stale.promise : Promise.resolve(pageWith("c1", 3));
+      },
+    });
+
+    await returnToVisible();
+    await waitFor(() => expect(calls.refreshes).toBe(1));
+    await publishUnread(fake, "c1", 4);
+    await act(async () => {
+      stale.resolve(pageWith("c1", 3));
+    });
+    await waitFor(() => expect(calls.refreshes).toBe(2));
+
+    // Второй круг прошёл без новых событий: он авторитетен, и число — его (3). Событие было
+    // раньше этого снимка, и снимок честно новее.
+    await waitFor(() => expect(unread("c1")).toBe("3"));
+  });
+
   it("сверка берёт число из ответа, а не из пропса, оставшегося прежним", async () => {
     // Пропс не менялся вовсе: `conversations` — снимок момента загрузки, и
     // перечитанный список обязан заменить его целиком, а не «дополнить».
