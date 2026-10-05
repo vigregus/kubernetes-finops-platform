@@ -424,13 +424,7 @@ paths:
           description: Сигналы с номером больше `after`, по возрастанию
           content:
             application/json:
-              schema:
-                type: object
-                required: [signals]
-                properties:
-                  signals:
-                    type: array
-                    items: { $ref: '#/components/schemas/CallSignalEvent' }
+              schema: { $ref: '#/components/schemas/CallSignalList' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/CallNotFound' }
 
@@ -1337,6 +1331,14 @@ components:
               candidate: { type: string, maxLength: 1024 }
               sdpMid: { type: string, nullable: true }
               sdpMLineIndex: { type: integer, nullable: true }
+
+    CallSignalList:
+      type: object
+      required: [signals]
+      properties:
+        signals:
+          type: array
+          items: { $ref: '#/components/schemas/CallSignalEvent' }
 
     CallSignalEvent:
       type: object
