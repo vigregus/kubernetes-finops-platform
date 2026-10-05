@@ -41,6 +41,22 @@ class FakeStream {
   }
 }
 
+/** Выбранная пара «хост — хост»: прямой путь. */
+function directPair() {
+  return new Map<string, Record<string, unknown>>([
+    ["T", { type: "transport", selectedCandidatePairId: "P" }],
+    ["P", { type: "candidate-pair", localCandidateId: "L", remoteCandidateId: "R" }],
+    ["L", { type: "local-candidate", candidateType: "host" }],
+    ["R", { type: "remote-candidate", candidateType: "host" }],
+  ])
+}
+
+function relayPair() {
+  const stats = directPair()
+  stats.set("L", { type: "local-candidate", candidateType: "relay" })
+  return stats
+}
+
 class FakePeer {
   connectionState: RTCPeerConnectionState = "new"
   localDescription: { type: string; sdp: string } | null = null
@@ -54,7 +70,7 @@ class FakePeer {
   senders: Array<{ track: FakeTrack }> = []
   configuration: RTCConfiguration = {}
   configurations: RTCConfiguration[] = []
-  stats = new Map<string, Record<string, unknown>>()
+  stats = directPair()
 
   getConfiguration() {
     return this.configuration
@@ -468,5 +484,66 @@ describe("качество исходящего видео", () => {
     await r.engine.start()
     r.engine.setVideoQuality("low")
     expect(r.peer.applied).toEqual([])
+  })
+})
+
+
+describe("путь соединения при смене сети (метрика стоимости)", () => {
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0))
+
+  it("сменился прямой путь на релейный после перезапуска ICE — сообщается и релей", async () => {
+    const r = rig()
+    await r.engine.start()
+    r.peer.emitState("connected")
+    await settle()
+    expect(r.events.filter((e) => e.startsWith("connected"))).toEqual(["connected:direct"])
+
+    // сеть сменилась: связь потеряна и вернулась уже через TURN
+    r.peer.emitState("disconnected")
+    r.peer.stats = relayPair()
+    r.peer.emitState("connected")
+    await settle()
+    expect(r.events.filter((e) => e.startsWith("connected"))).toEqual([
+      "connected:direct",
+      "connected:relay",
+    ])
+  })
+
+  it("повторное «connected» с тем же путём не шлёт сообщений", async () => {
+    const r = rig()
+    await r.engine.start()
+    r.peer.emitState("connected")
+    await settle()
+    r.peer.emitState("disconnected")
+    r.peer.emitState("connected")
+    await settle()
+    expect(r.events.filter((e) => e.startsWith("connected"))).toEqual(["connected:direct"])
+  })
+
+  it("пара ещё не выбрана — измерение повторяется, а не фиксирует direct сразу", async () => {
+    const r = rig()
+    await r.engine.start()
+    r.peer.stats = new Map()
+    r.peer.emitState("connected")
+    await settle()
+    expect(r.events.filter((e) => e.startsWith("connected"))).toEqual([])
+    // пара появилась до следующей попытки
+    r.peer.stats = relayPair()
+    fire(r, 500)
+    await settle()
+    expect(r.events.filter((e) => e.startsWith("connected"))).toEqual(["connected:relay"])
+  })
+
+  it("пара так и не определилась — первое сообщение уходит как direct, метрика не молчит", async () => {
+    const r = rig()
+    await r.engine.start()
+    r.peer.stats = new Map()
+    r.peer.emitState("connected")
+    for (let i = 0; i < 4; i += 1) {
+      await settle()
+      fire(r, 500)
+    }
+    await settle()
+    expect(r.events.filter((e) => e.startsWith("connected"))).toEqual(["connected:direct"])
   })
 })

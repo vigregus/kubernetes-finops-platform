@@ -274,6 +274,10 @@ class Signal:
     kind: str
     sdp: str | None = None
     candidates: tuple[dict[str, object], ...] = ()
+    # Идентификатор логического сигнала от клиента: повтор после потерянного ответа
+    # приходит с тем же значением, и получатель отбрасывает дубль (иначе второй
+    # `offer` запускал бы пересогласование).
+    signal_id: str | None = None
 
 
 def _candidate(item: object) -> dict[str, object] | None:
@@ -301,11 +305,13 @@ def parse_signal(data: object) -> Signal | None:
     if not isinstance(data, dict):
         return None
     kind = data.get("type")
+    raw_id = data.get("signal_id")
+    signal_id = raw_id if isinstance(raw_id, str) and 0 < len(raw_id) <= 64 else None
     if kind in ("offer", "answer"):
         sdp = data.get("sdp")
         if not isinstance(sdp, str) or not sdp or len(sdp.encode()) > MAX_SIGNAL_BYTES:
             return None
-        return Signal(kind=str(kind), sdp=sdp)
+        return Signal(kind=str(kind), sdp=sdp, signal_id=signal_id)
     if kind == "ice":
         raw = data.get("candidates")
         if not isinstance(raw, list) or not raw or len(raw) > MAX_CANDIDATES:
@@ -313,7 +319,11 @@ def parse_signal(data: object) -> Signal | None:
         parsed = [_candidate(item) for item in raw]
         if any(item is None for item in parsed):
             return None
-        return Signal(kind="ice", candidates=tuple(item for item in parsed if item))
+        return Signal(
+            kind="ice",
+            candidates=tuple(item for item in parsed if item),
+            signal_id=signal_id,
+        )
     return None
 
 
@@ -360,9 +370,12 @@ def signal_event(*, call: Call, signal: Signal, seq: int) -> dict[str, object]:
         body["sdp"] = signal.sdp
     if signal.kind == "ice":
         body["candidates"] = list(signal.candidates)
-    return {
+    event: dict[str, object] = {
         "type": "call.signal",
         "call_id": str(call.call_id),
         "seq": seq,
         "signal": body,
     }
+    if signal.signal_id is not None:
+        event["signal_id"] = signal.signal_id
+    return event

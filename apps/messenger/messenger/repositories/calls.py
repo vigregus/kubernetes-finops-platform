@@ -194,10 +194,14 @@ async def touch(conn: asyncpg.Connection, call_id: uuid.UUID) -> None:
     await conn.execute("UPDATE calls SET last_keepalive_at = now() WHERE call_id = $1", call_id)
 
 
+async def connection_type(conn: asyncpg.Connection, call_id: uuid.UUID) -> str | None:
+    value = await conn.fetchval("SELECT connection_type FROM calls WHERE call_id = $1", call_id)
+    return str(value) if value is not None else None
+
+
 async def set_connection_type(conn: asyncpg.Connection, call_id: uuid.UUID, value: str) -> None:
     await conn.execute(
-        "UPDATE calls SET connection_type = $2 WHERE call_id = $1 AND connection_type IS NULL",
-        call_id, value,
+        "UPDATE calls SET connection_type = $2 WHERE call_id = $1", call_id, value
     )
 
 

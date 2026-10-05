@@ -40,6 +40,7 @@ class Reason(str, Enum):
     CALL_ENDED = "call_ended"
     CALL_NOT_READY = "call_not_ready"
     CALL_TAKEN = "call_taken"
+    REALTIME_UNAVAILABLE = "realtime_unavailable"
     ALREADY_IN_CALL = "already_in_call"
     INVALID_SIGNAL = "invalid_signal"
     RATE_LIMITED = "rate_limited"
@@ -89,6 +90,11 @@ _PUBLIC: dict[Reason, Problem] = {
     Reason.CALL_ENDED: Problem(409, "call_ended", "Звонок уже завершён"),
     Reason.CALL_NOT_READY: Problem(409, "call_not_ready", "Звонок ещё не принят"),
     Reason.CALL_TAKEN: Problem(409, "call_taken", "Звонок принят в другой вкладке"),
+    # Сигнал не удалось **передать** собеседнику: канал звонков без истории, и
+    # молчаливый успех оставил бы звонящего уверенным, что `offer` доставлен.
+    Reason.REALTIME_UNAVAILABLE: Problem(
+        503, "realtime_unavailable", "Сигнал не доставлен, повторите"
+    ),
     Reason.ALREADY_IN_CALL: Problem(409, "already_in_call", "У вас уже идёт звонок"),
     Reason.INVALID_SIGNAL: Problem(400, "invalid_signal", "Сигнал не принят"),
     # Чужое и несуществующее вложение неразличимы — по тому же доводу, что и

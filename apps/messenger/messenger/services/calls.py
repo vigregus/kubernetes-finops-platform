@@ -70,11 +70,31 @@ class CallResult:
         return self.call is not None and self.rejection is None
 
 
+class RealtimeUnavailable(Exception):
+    """Событие не удалось передать: Centrifugo недоступен или отказал."""
+
+
 async def _publish(realtime: Publisher | None, events: list[Event]) -> None:
+    """Лучшее из возможного: состояние уже в базе, клиент узнает его сверкой."""
     if realtime is None:
         return
     for channel, data in events:
         await realtime.publish(channel, data)
+
+
+async def _publish_required(realtime: Publisher | None, events: list[Event]) -> None:
+    """Событие **обязано** дойти: иначе исключение, и транзакция откатывается.
+
+    Канал звонков без истории: потерянный `offer` или `answer` не вернуть, и
+    «успех» с потерянным сигналом оставляет звонящего уверенным, что собеседник его
+    получил. Недоставленное входящее — звонок, которого собеседник не увидит.
+    Откат уносит и выданный номер сигнала, поэтому повтор клиента получает тот же.
+    """
+    if realtime is None:
+        raise RealtimeUnavailable
+    for channel, data in events:
+        if not await realtime.publish(channel, data):
+            raise RealtimeUnavailable
 
 
 def _state_events(call: Call, *, accepted_elsewhere: bool = False) -> list[Event]:
@@ -133,6 +153,14 @@ async def _transition(
 # --- начать звонок ----------------------------------------------------------------
 
 
+class _Rollback(Exception):
+    """Откат транзакции с готовым отказом: исключение — единственный способ откатить."""
+
+    def __init__(self, reason: Reason) -> None:
+        super().__init__(reason.value)
+        self.reason = reason
+
+
 async def start_call(
     conn: asyncpg.Connection,
     *,
@@ -143,7 +171,26 @@ async def start_call(
 ) -> CallResult:
     if not enabled():
         return CallResult(rejection=Reason.CALLS_UNAVAILABLE)
+    try:
+        return await _start_call(
+            conn,
+            realtime=realtime,
+            caller_id=caller_id,
+            conversation_id=conversation_id,
+            kind=kind,
+        )
+    except _Rollback as rollback:
+        return CallResult(rejection=rollback.reason)
 
+
+async def _start_call(
+    conn: asyncpg.Connection,
+    *,
+    realtime: Publisher | None,
+    caller_id: UserId,
+    conversation_id: ConversationId,
+    kind: CallKind,
+) -> CallResult:
     async with conn.transaction():
         conversation = await conversations.fetch_conversation(
             conn, conversation_id=conversation_id
@@ -191,10 +238,16 @@ async def start_call(
         else:
             outcome = CallResult(rejection=Reason.ALREADY_IN_CALL)
 
+        # Входящий звонок **обязан** дойти до вызываемого: у канала нет истории, и
+        # звонок, которого собеседник не увидит, — это 30 секунд гудков в пустоту.
+        # Публикация идёт до фиксации: не дошло — звонок не создаётся (откат).
+        if outcome.call is not None and outcome.events:
+            try:
+                await _publish_required(realtime, outcome.events)
+            except RealtimeUnavailable:
+                raise _Rollback(Reason.REALTIME_UNAVAILABLE) from None
+
     await _publish(realtime, expiry_events)
-    if outcome.call is None:
-        return outcome
-    await _publish(realtime, outcome.events)
     return outcome
 
 
@@ -354,6 +407,13 @@ async def accept(
     call_id: uuid.UUID,
     tab: str | None = None,
 ) -> CallResult:
+    try:
+        return await _accept(conn, realtime, user_id, call_id, tab)
+    except _Rollback as rollback:
+        return CallResult(rejection=rollback.reason)
+
+
+async def _accept(conn, realtime, user_id, call_id, tab) -> CallResult:
     events: list[Event] = []
     async with conn.transaction():
         call, expired = await _open(conn, call_id, user_id, events)
@@ -370,9 +430,16 @@ async def accept(
                 outcome = CallResult(call=call)
             else:
                 updated = await _transition(conn, call, change, accepted_by=tab)
-                events.extend(_state_events(updated, accepted_elsewhere=True))
-                # Звонящему — обычное «принято»: переопределяем его событие.
-                events[-2] = (domain.call_channel(updated.caller_id), domain.state_event(updated))
+                # Звонящему — обычное «принято»: по нему он начинает `offer`, и потерянное
+                # событие оставило бы звонок стоять. Поэтому оно **обязательное**: не
+                # дошло — принятие откатывается, и вызываемый может нажать ещё раз.
+                to_caller = (domain.call_channel(updated.caller_id), domain.state_event(updated))
+                try:
+                    await _publish_required(realtime, [to_caller])
+                except RealtimeUnavailable:
+                    raise _Rollback(Reason.REALTIME_UNAVAILABLE) from None
+                # Остальным вкладкам вызываемого — «принято в другой»: лучшее из возможного.
+                events.extend(_state_events(updated, accepted_elsewhere=True)[1:])
                 outcome = CallResult(call=updated)
     await _publish(realtime, events)
     return outcome
@@ -447,20 +514,42 @@ async def report_connected(
             if rejection is not None:
                 outcome = CallResult(rejection=rejection)
             elif not change.changed:
+                # Звонок уже активен, а клиент сообщает путь снова: связь вернулась
+                # после смены сети, и прямой путь мог стать релейным.
                 await repo.touch(conn, call.call_id)
+                if connection_type in ("direct", "relay"):
+                    await _record_connection(conn, call, connection_type)
                 outcome = CallResult(call=call)
             else:
                 updated = await _transition(conn, call, change)
                 if connection_type in ("direct", "relay"):
-                    await repo.set_connection_type(conn, call.call_id, connection_type)
-                    setup = None
-                    if call.accepted_at is not None:
-                        setup = (datetime.now(UTC) - call.accepted_at).total_seconds()
-                    metrics.call_connection(connection_type, setup)
+                    await _record_connection(conn, call, connection_type)
                 events.extend(_state_events(updated))
                 outcome = CallResult(call=updated)
     await _publish(realtime, events)
     return outcome
+
+
+async def _record_connection(conn: asyncpg.Connection, call: Call, connection_type: str) -> None:
+    """Путь соединения в строку звонка и в метрики; повышение direct → relay учитывается.
+
+    Первое сообщение — начальный путь (`messenger_call_connection_total`, время
+    установки). Дальше значение меняется только **к худшему для стоимости**:
+    `direct` → `relay`; обратно не возвращается — «хоть раз релей» остаётся фактом
+    (`messenger_call_relay_used_total`), а повторное `direct` ничего не стирает.
+    """
+    previous = await repo.connection_type(conn, call.call_id)
+    if previous is None:
+        await repo.set_connection_type(conn, call.call_id, connection_type)
+        setup = None
+        if call.accepted_at is not None:
+            setup = (datetime.now(UTC) - call.accepted_at).total_seconds()
+        metrics.call_connection(connection_type, setup)
+        if connection_type == "relay":
+            metrics.call_relay_used(switched=False)
+    elif previous == "direct" and connection_type == "relay":
+        await repo.set_connection_type(conn, call.call_id, "relay")
+        metrics.call_relay_used(switched=True)
 
 
 async def keepalive(
@@ -504,7 +593,26 @@ async def send_signal(
     Клиент не публикует в Centrifugo сам: у него нет такого права, и «подделка
     автора события» закрыта именно этим (`CALL-006`). Собеседнику уходит то, что
     сервер **понял** (`parse_signal`), а не то, что прислали.
+
+    Недоставленный сигнал — `503`, а не `204`: см. `_publish_required`.
     """
+    try:
+        return await _send_signal(
+            conn, realtime=realtime, limiter=limiter, user_id=user_id, call_id=call_id, data=data
+        )
+    except _Rollback as rollback:
+        return CallResult(rejection=rollback.reason)
+
+
+async def _send_signal(
+    conn: asyncpg.Connection,
+    *,
+    realtime: Publisher | None,
+    limiter: RateLimiter,
+    user_id: UserId,
+    call_id: uuid.UUID,
+    data: object,
+) -> CallResult:
     signal = domain.parse_signal(data)
     if signal is None:
         metrics.call_signal("invalid")
@@ -552,7 +660,14 @@ async def send_signal(
             # запросов обгоняли бы друг друга, и сигнал с меньшим номером
             # отбрасывался бы получателем как устаревший. Цена названа: строка
             # звонка занята на время одного HTTP-запроса к Centrifugo (до 2 с).
-            await _publish(realtime, events)
+            # **Обязательная**: канал звонков без истории, и сигнал, который не дошёл, не
+            # восстановить. Не дошёл — откат (номер не расходуется), клиент получает
+            # `503` и повторяет с тем же `signal_id`.
+            try:
+                await _publish_required(realtime, events)
+            except RealtimeUnavailable:
+                metrics.call_signal("undelivered")
+                raise _Rollback(Reason.REALTIME_UNAVAILABLE) from None
             return CallResult(call=call)
     await _publish(realtime, events)
     return outcome

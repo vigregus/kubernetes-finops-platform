@@ -20,8 +20,12 @@
  */
 
 export type WireSignal =
-  | { readonly type: "offer" | "answer"; readonly sdp: string }
-  | { readonly type: "ice"; readonly candidates: readonly RTCIceCandidateInit[] }
+  | { readonly type: "offer" | "answer"; readonly sdp: string; readonly signalId?: string }
+  | {
+      readonly type: "ice"
+      readonly candidates: readonly RTCIceCandidateInit[]
+      readonly signalId?: string
+    }
 
 export type ConnectionType = "direct" | "relay"
 
@@ -130,7 +134,8 @@ export class CallEngine {
   private reconnectTimer: unknown = null
   private chain: Promise<void> = Promise.resolve()
   private closed = false
-  private reported = false
+  private lastReported: ConnectionType | null = null
+  private measuring = false
   private refreshTimer: unknown = null
   private quality: VideoQuality = "auto"
 
@@ -347,17 +352,48 @@ export class CallEngine {
     this.reconnectTimer = null
   }
 
+  /**
+   * Сообщает путь соединения при **каждом** установлении связи, а не один раз за звонок.
+   *
+   * Сеть меняется посреди звонка (Wi-Fi → мобильная): ICE перезапускается, и прямой
+   * путь становится релейным. Одноразовое сообщение навсегда оставляло бы `direct`, и
+   * доля релея — главная метрика стоимости — занижалась бы ровно на таких звонках.
+   * Сообщается первое значение и любая **смена**; остальное — тишина.
+   *
+   * Пара кандидатов может быть ещё не выбрана в момент `connected` — тогда измерение
+   * повторяется несколько раз; не вышло — первое сообщение всё равно уходит как
+   * `direct`, чтобы метрика не молчала.
+   */
   private async reportConnected(): Promise<void> {
-    if (this.reported || this.pc === null) return
-    this.reported = true
-    this.applyQuality()
-    let type: ConnectionType = "direct"
+    if (this.pc === null || this.measuring) return
+    this.measuring = true
     try {
-      type = await connectionType(this.pc)
-    } catch {
-      // Не смогли измерить — считаем прямым: метрика получит `direct`, а не тишину.
+      let type: ConnectionType | null = null
+      for (let attempt = 0; attempt < 4 && type === null && !this.closed; attempt += 1) {
+        try {
+          type = await connectionType(this.pc)
+        } catch {
+          type = null
+        }
+        if (type === null) await this.pause(500)
+      }
+      if (this.closed) return
+      if (type === null) {
+        if (this.lastReported !== null) return
+        type = "direct"
+      }
+      const first = this.lastReported === null
+      if (type === this.lastReported) return
+      this.lastReported = type
+      if (first) this.applyQuality()
+      this.opts.onConnected(type)
+    } finally {
+      this.measuring = false
     }
-    if (!this.closed) this.opts.onConnected(type)
+  }
+
+  private pause(ms: number): Promise<void> {
+    return new Promise((resolve) => this.timers.setTimeout(resolve, ms))
   }
 
   /**
@@ -421,8 +457,11 @@ export class CallEngine {
   }
 }
 
-/** Путь медиа по `getStats()`: `relay`, если любой конец идёт через TURN. */
-export async function connectionType(pc: RTCPeerConnection): Promise<ConnectionType> {
+/**
+ * Путь медиа по `getStats()`: `relay`, если любой конец идёт через TURN. `null` —
+ * выбранная пара ещё не определена (не путать с `direct`: это «пока неизвестно»).
+ */
+export async function connectionType(pc: RTCPeerConnection): Promise<ConnectionType | null> {
   const report = await pc.getStats()
   const byId = new Map<string, Record<string, unknown>>()
   report.forEach((value: Record<string, unknown>, key: string) => byId.set(key, value))
@@ -440,7 +479,7 @@ export async function connectionType(pc: RTCPeerConnection): Promise<ConnectionT
       }
     }
   }
-  if (pair === undefined) return "direct"
+  if (pair === undefined) return null
   const local = byId.get(String(pair["localCandidateId"]))
   const remote = byId.get(String(pair["remoteCandidateId"]))
   return local?.["candidateType"] === "relay" || remote?.["candidateType"] === "relay" ? "relay" : "direct"

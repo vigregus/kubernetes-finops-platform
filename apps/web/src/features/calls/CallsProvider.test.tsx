@@ -395,3 +395,62 @@ describe("действие с уведомления", () => {
     expect(ops.accept).not.toHaveBeenCalled()
   })
 })
+
+
+describe("потерянные события и дубли", () => {
+  const offerEvent = (seq: number, id: string) => ({
+    type: "call.signal",
+    call_id: CALL,
+    seq,
+    signal_id: id,
+    signal: { type: "ice", candidates: [{ candidate: "c" }] },
+  })
+
+  it("повтор сигнала с тем же signal_id (потерян ответ, а сигнал дошёл) не применяется второй раз", async () => {
+    const { ops } = fakeOps()
+    const { ctx, publish } = givenProvider(ops)
+    await publish(incoming)
+    await act(async () => ctx.current?.accept())
+    await publish(offerEvent(1, "sig-A"))
+    expect(ctx.current?.view.lastSignalSeq).toBe(1)
+    // тот же логический сигнал вторым номером: сервер выдал новый seq, но это дубль
+    await publish(offerEvent(2, "sig-A"))
+    expect(ctx.current?.view.lastSignalSeq).toBe(1)
+    // другой сигнал применяется
+    await publish(offerEvent(3, "sig-B"))
+    expect(ctx.current?.view.lastSignalSeq).toBe(3)
+  })
+
+  it("пока звонок звонит, клиент сам спрашивает сервер: событие «принято» могло потеряться", async () => {
+    vi.useFakeTimers()
+    try {
+      const { ops } = fakeOps({ start: vi.fn(async () => api({ role: "caller" })) })
+      const { ctx } = givenProvider(ops)
+      await act(async () => ctx.current?.startCall(CONV, "audio", "Bob"))
+      expect(ctx.current?.view.phase).toBe("outgoing")
+      const before = (ops.current as ReturnType<typeof vi.fn>).mock.calls.length
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5100)
+      })
+      expect((ops.current as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(before)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("звонок закончился, а событие потерялось: сверка обнаруживает конец", async () => {
+    vi.useFakeTimers()
+    try {
+      const { ops } = fakeOps({ start: vi.fn(async () => api({ role: "caller" })) })
+      const { ctx } = givenProvider(ops)
+      await act(async () => ctx.current?.startCall(CONV, "audio", "Bob"))
+      // сервер отвечает «живых звонков нет»
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5100)
+      })
+      expect(ctx.current?.view.phase).toBe("ended")
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})

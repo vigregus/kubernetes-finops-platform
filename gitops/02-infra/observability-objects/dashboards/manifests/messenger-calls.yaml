@@ -19,7 +19,7 @@ spec:
         "turn"
       ],
       "schemaVersion": 39,
-      "version": 1,
+      "version": 2,
       "editable": true,
       "time": {
         "from": "now-6h",
@@ -442,7 +442,7 @@ spec:
         {
           "id": 11,
           "type": "timeseries",
-          "title": "Путь соединения, в минуту",
+          "title": "Путь соединения и релей, в минуту",
           "datasource": {
             "type": "prometheus",
             "uid": "victoriametrics"
@@ -472,9 +472,17 @@ spec:
             {
               "expr": "sum by (type) (rate(messenger_call_connection_total{namespace=~\"$namespace\"}[5m])) * 60",
               "legendFormat": "{{type}}"
+            },
+            {
+              "expr": "sum(rate(messenger_call_relay_used_total{namespace=~\"$namespace\"}[5m])) * 60",
+              "legendFormat": "релей хоть раз"
+            },
+            {
+              "expr": "sum(rate(messenger_call_relay_switch_total{namespace=~\"$namespace\"}[5m])) * 60",
+              "legendFormat": "переход direct → relay"
             }
           ],
-          "description": "`direct` — напрямую между браузерами, `relay` — через TURN."
+          "description": "`direct`/`relay` — начальный путь соединения. «Релей хоть раз» — звонки, где релей использовался в любой момент (в том числе после смены сети с прямого пути), ближе всего к оплаченному трафику TURN. «Переход на релей» — звонки, начатые напрямую и перешедшие на релей посреди разговора."
         },
         {
           "id": 12,

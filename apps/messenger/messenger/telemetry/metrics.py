@@ -502,6 +502,19 @@ CALL_CONNECTION = Counter(
     "Путь соединения активного звонка: direct или relay (G4)",
     ["service", "type"],
 )
+# Релей хоть раз за звонок — ближе всего к вопросу «сколько TURN-трафика оплачено»:
+# звонок, начатый напрямую и перешедший на релей после смены сети, в
+# `messenger_call_connection_total{type}` остаётся прямым.
+CALL_RELAY_USED = Counter(
+    "messenger_call_relay_used_total",
+    "Звонки, у которых хоть раз использовался релей TURN (G4)",
+    ["service"],
+)
+CALL_RELAY_SWITCH = Counter(
+    "messenger_call_relay_switch_total",
+    "Звонки, перешедшие с прямого пути на релей посреди разговора (G4)",
+    ["service"],
+)
 CALL_SETUP_SECONDS = Histogram(
     "messenger_call_setup_seconds",
     "От «принял» до «медиа пошло» (G4)",
@@ -540,6 +553,12 @@ def call_connection(connection_type: str, setup_seconds: float | None) -> None:
     CALL_CONNECTION.labels(service=SERVICE, type=connection_type).inc()
     if setup_seconds is not None and setup_seconds >= 0:
         CALL_SETUP_SECONDS.labels(service=SERVICE).observe(setup_seconds)
+
+
+def call_relay_used(*, switched: bool) -> None:
+    CALL_RELAY_USED.labels(service=SERVICE).inc()
+    if switched:
+        CALL_RELAY_SWITCH.labels(service=SERVICE).inc()
 
 
 def call_signal(result: str) -> None:

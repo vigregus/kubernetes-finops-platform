@@ -39,8 +39,10 @@ export function toCallView(call: Call): ApiCallView {
 
 /** Сигнал клиента → тело запроса контракта. */
 export function toCallSignal(signal: WireSignal): CallSignal {
+  const id = signal.signalId === undefined ? {} : { signalId: signal.signalId }
   if (signal.type === "ice") {
     return {
+      ...id,
       type: "ice",
       candidates: signal.candidates.map((candidate) => ({
         candidate: candidate.candidate ?? "",
@@ -53,5 +55,5 @@ export function toCallSignal(signal: WireSignal): CallSignal {
       })),
     }
   }
-  return { type: signal.type, sdp: signal.sdp }
+  return { ...id, type: signal.type, sdp: signal.sdp }
 }

@@ -390,6 +390,14 @@ paths:
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          description: |
+            Сигнал **не доставлен** собеседнику (`realtime_unavailable`): канал звонков без
+            истории, и недоставленный `offer`/`answer` не восстановить. Не `204` — клиент
+            обязан знать, что передача не состоялась, и повторить с тем же `signal_id`.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
 
   /calls/{call_id}/ice-servers:
     get:
@@ -1275,6 +1283,13 @@ components:
       required: [type]
       properties:
         type: { type: string, enum: [offer, answer, ice] }
+        signal_id:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: |
+            Идентификатор логического сигнала: повтор после потерянного ответа идёт с
+            тем же значением, и получатель отбрасывает дубль. Передаётся собеседнику как есть.
         sdp: { type: string, maxLength: 16384 }
         candidates:
           type: array

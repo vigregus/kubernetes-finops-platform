@@ -34,7 +34,7 @@ import {
   type VideoQuality,
   type WireSignal,
 } from "./callEngine"
-import { createSerialQueue } from "./signalQueue"
+import { createSerialQueue, withRetry } from "./signalQueue"
 import {
   IDLE,
   callReducer,
@@ -176,6 +176,9 @@ export function CallsProvider({
   const tabIdRef = useRef<string>(crypto.randomUUID())
 
   const engineRef = useRef<CallEngine | null>(null)
+  // Идентификаторы уже применённых сигналов текущего звонка: повтор после потерянного
+  // ответа приходит с тем же `signal_id` и вторым `offer` запустил бы пересогласование.
+  const appliedSignalIdsRef = useRef<Set<string>>(new Set())
   const keepaliveRef = useRef<number | null>(null)
   const wakeLockRef = useRef<{ release(): Promise<void> } | null>(null)
 
@@ -203,6 +206,7 @@ export function CallsProvider({
   const teardown = useCallback(() => {
     engineRef.current?.close()
     engineRef.current = null
+    appliedSignalIdsRef.current.clear()
     stopKeepalive()
     releaseWakeLock()
     setLocalStream(null)
@@ -276,7 +280,15 @@ export function CallsProvider({
       // отправленные параллельно, достигают сервера в любом порядке, а номер им
       // выдаётся по порядку прихода — и `offer` получал бы номер больше, чем
       // кандидаты, пришедшие раньше.
-      sendSignal: createSerialQueue<WireSignal>((signal) => ops.signal(callId, signal)),
+      sendSignal: createSerialQueue<WireSignal>((signal) => {
+        // Один `signalId` на логический сигнал, общий для всех повторов: если ответ
+        // потерялся, а сигнал дошёл, получатель отбросит дубль по нему.
+        const withId = { ...signal, signalId: crypto.randomUUID() }
+        return withRetry(() => ops.signal(callId, withId), {
+          // Отказ клиента (4xx) повторять бессмысленно; сеть и 5xx — стоит.
+          retryable: (error) => !(error instanceof ApiProblem && error.status < 500),
+        })
+      }),
       // Данные TURN выдаются только **принятому** звонку. Вызываемый поднимает
       // движок в момент нажатия, до ответа сервера на «принять», поэтому его
       // запрос данных ждёт этого ответа (`after`) — иначе он получал бы
@@ -289,9 +301,10 @@ export function CallsProvider({
       onRemoteStream: setRemoteStream,
       onConnected: (type) => {
         apply({ type: "connected" })
+        // Вызывается при **каждой** смене пути (прямой → релейный после смены сети).
         void ops.connected(callId, type).catch(() => undefined)
-        startKeepalive(callId)
-        acquireWakeLock()
+        if (keepaliveRef.current === null) startKeepalive(callId)
+        if (wakeLockRef.current === null) acquireWakeLock()
       },
       onFailed: (reason) => endLocally(reason === "media_denied" ? "media_denied" : "failed"),
     })
@@ -353,6 +366,11 @@ export function CallsProvider({
           if (seq === null || wire === null) return
           // Сигнал чужого звонка и устаревший отбрасываются здесь (`CALL-007`).
           if (!shouldApplySignal(viewRef.current, callId, seq)) return
+          const signalId = str(payload.signal_id)
+          if (signalId !== null) {
+            if (appliedSignalIdsRef.current.has(signalId)) return
+            appliedSignalIdsRef.current.add(signalId)
+          }
           apply({ type: "signal-applied", seq })
           void engineRef.current?.handleSignal(wire)
           return
@@ -434,6 +452,16 @@ export function CallsProvider({
     client.start()
     return () => client.stop()
   }, [centrifugoUrl, viewerId, issueCallsTicket, createCentrifuge])
+
+  // Подстраховка сверкой, пока звонок звонит или соединяется. Событие «принято» —
+  // единственное, по чему звонящий начинает `offer`; у канала нет истории, и пока
+  // соединение звонков живо, потерянное событие иначе не вернуть. Раз в несколько
+  // секунд спросить сервер дёшево, а зависший звонок стоит тридцати секунд гудков.
+  useEffect(() => {
+    if (view.phase !== "outgoing" && view.phase !== "connecting") return
+    const id = window.setInterval(() => void reconcileRef.current(), 5000)
+    return () => window.clearInterval(id)
+  }, [view.phase, view.callId])
 
   // Страница с идущим звонком закрывается или перезагружается: медиа живёт в ней и
   // вместе с ней пропадёт, поэтому звонок завершается сразу, а не через 90 секунд
