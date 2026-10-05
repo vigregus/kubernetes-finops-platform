@@ -86,3 +86,30 @@ describe("подзаголовок шапки беседы", () => {
     expect(screen.queryByRole("button", { name: "Chat details" })).toBeNull();
   });
 });
+
+describe("кнопки звонка", () => {
+  it("недоступные звонки — выключенные кнопки с причиной, а не молчаливое отсутствие", () => {
+    render(<ChatHeader conversation={conversationOf()} callUnavailableReason="Connecting to the call service…" />);
+
+    for (const name of ["Start voice call", "Start video call"]) {
+      const button = screen.getByRole("button", { name });
+      expect((button as HTMLButtonElement).disabled).toBe(true);
+      expect(button.getAttribute("title")).toBe("Connecting to the call service…");
+    }
+  });
+
+  it("рабочие обработчики — рабочие кнопки, причина не нужна", () => {
+    const onVoiceCall = vi.fn();
+    render(<ChatHeader conversation={conversationOf()} onVoiceCall={onVoiceCall} onVideoCall={() => {}} />);
+
+    const button = screen.getByRole("button", { name: "Start voice call" }) as HTMLButtonElement;
+    expect(button.disabled).toBe(false);
+    button.click();
+    expect(onVoiceCall).toHaveBeenCalledOnce();
+  });
+
+  it("звонков нет вовсе (выключены, не беседа один-на-один) — кнопок тоже нет", () => {
+    render(<ChatHeader conversation={conversationOf()} />);
+    expect(screen.queryByRole("button", { name: "Start voice call" })).toBeNull();
+  });
+});

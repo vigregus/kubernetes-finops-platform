@@ -49,3 +49,14 @@ export const NoBackOnDesktop: Story = {
     await expect(within(canvasElement).queryByRole("button", { name: "Back to chats" })).toBeNull()
   },
 }
+
+/** Звонки включены, но недоступны (нет защищённого соединения или связи): кнопки выключены, причина в подсказке. */
+export const CallsUnavailable: Story = {
+  args: { conversation: { ...base, presence: "online" }, callUnavailableReason: "Connecting to the call service…" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const voice = canvas.getByRole("button", { name: "Start voice call" })
+    await expect(voice).toBeDisabled()
+    await expect(voice).toHaveAttribute("title", "Connecting to the call service…")
+  },
+}

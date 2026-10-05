@@ -17,6 +17,12 @@ interface ChatHeaderProps {
   onOpenDetails?: () => void
   onVoiceCall?: () => void
   onVideoCall?: () => void
+  /**
+   * Звонки включены, но сейчас недоступны: кнопки рисуются **выключенными** с причиной в
+   * подсказке. Молча спрятанные, они выглядят поломкой: человек не знает, чего не хватает
+   * (защищённого соединения, связи со службой звонков).
+   */
+  callUnavailableReason?: string
 }
 
 /**
@@ -57,7 +63,15 @@ function subtitle(conversation: Conversation) {
   return undefined
 }
 
-export function ChatHeader({ conversation, onBack, onSearch, onOpenDetails, onVoiceCall, onVideoCall }: ChatHeaderProps) {
+export function ChatHeader({
+  conversation,
+  onBack,
+  onSearch,
+  onOpenDetails,
+  onVoiceCall,
+  onVideoCall,
+  callUnavailableReason,
+}: ChatHeaderProps) {
   const subtitleValue = subtitle(conversation)
   const blocked = conversation.blockedByMe || conversation.blockedMe
   const text = blocked ? "Unavailable" : subtitleValue?.text
@@ -97,6 +111,12 @@ export function ChatHeader({ conversation, onBack, onSearch, onOpenDetails, onVo
         {onSearch && <IconButton icon="search" label="Search messages" onClick={onSearch} />}
         {!blocked && onVoiceCall && <IconButton icon="call" label="Start voice call" onClick={onVoiceCall} />}
         {!blocked && onVideoCall && <IconButton icon="videocam" label="Start video call" onClick={onVideoCall} />}
+        {!blocked && !onVoiceCall && !onVideoCall && callUnavailableReason && (
+          <>
+            <IconButton icon="call" label="Start voice call" disabled hint={callUnavailableReason} />
+            <IconButton icon="videocam" label="Start video call" disabled hint={callUnavailableReason} />
+          </>
+        )}
         {onOpenDetails && (
           <>
             <div className="mx-1 h-6 w-px bg-surface-container-high" />

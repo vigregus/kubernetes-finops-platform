@@ -778,17 +778,29 @@ function ConversationPane({
    * ведёт в отказ, хуже отсутствующей.
    */
   const calls = useCalls()
-  const callHandlers =
+  const callsReady =
     calls !== null &&
     calls.supported &&
     calls.signalingUp &&
     conversation.peerUserId !== undefined &&
     (calls.view.phase === "idle" || calls.view.phase === "ended")
-      ? {
-          onVoiceCall: () => calls.startCall(conversation.id, "audio", conversation.name),
-          onVideoCall: () => calls.startCall(conversation.id, "video", conversation.name),
-        }
-      : {}
+  const callHandlers = callsReady
+    ? {
+        onVoiceCall: () => calls.startCall(conversation.id, "audio", conversation.name),
+        onVideoCall: () => calls.startCall(conversation.id, "video", conversation.name),
+      }
+    : {}
+  // Звонки на этом окружении есть, а кнопки сейчас не работают: причина — в подсказке
+  // выключенных кнопок, а не молчаливое отсутствие. Без собеседника (не беседа
+  // один-на-один) и во время другого звонка кнопок нет вовсе.
+  const callUnavailableReason =
+    calls === null || callsReady || conversation.peerUserId === undefined
+      ? undefined
+      : !calls.supported
+        ? "Calls need a trusted HTTPS connection and a browser with camera and microphone access."
+        : !calls.signalingUp
+          ? "Connecting to the call service…"
+          : undefined
 
   /**
    * Лента этого окна — в ссылке, потому что публикации достаются обработчику,
@@ -1201,6 +1213,7 @@ function ConversationPane({
         conversation={typingNames.length > 0 ? { ...conversation, typingNames: [...typingNames] } : conversation}
         {...(onBack === undefined ? {} : { onBack })}
         {...callHandlers}
+        {...(callUnavailableReason === undefined ? {} : { callUnavailableReason })}
       />
 
       {conversationHistory.phase === "error" ? (
