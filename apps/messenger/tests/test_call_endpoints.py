@@ -256,7 +256,9 @@ def test_сигнал_не_объект_отвергается_до_сервис
 
 def test_пропущенные_сигналы_отдаются_после_номера(client, monkeypatch):
     authenticated(monkeypatch)
-    events = [{"type": "call.signal", "call_id": str(CALL_ID), "seq": 4, "signal": {"type": "offer"}}]
+    events = [
+        {"type": "call.signal", "call_id": str(CALL_ID), "seq": 4, "signal": {"type": "offer"}}
+    ]
     fake = patch(monkeypatch, "list_signals", service.SignalsResult(events=events))
     r = client.get(f"/calls/{CALL_ID}/signals?after=3")
     assert r.status_code == 200 and r.json() == {"signals": events}
