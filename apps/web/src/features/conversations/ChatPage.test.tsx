@@ -1748,6 +1748,54 @@ describe("узкий экран: список и беседа по очеред�
     expect(calls.receipts).toEqual([]);
   });
 
+  it("на экране списка живо личное соединение: число меняется событием, а беседа по-прежнему не читается", async () => {
+    givenPhone();
+    const { container, fake, unread, calls } = setup({
+      conversations: [conversationOf({ id: "c1", unreadCount: 1 })],
+      tail: () => Promise.resolve(tailOf([messageOf(1)])),
+    });
+    expect(screenOf(container)).toBe("list");
+    expect(fake.calls.connect).toBe(1);
+
+    // Сообщение пришло, пока человек смотрит на список: число и карточка обновляются.
+    await publishUnread(fake, "c1", 4);
+    expect(unread("c1")).toBe("4");
+
+    // История не грузится и квитанций нет — свойство мобильного списка сохранено.
+    expect(calls.tails).toEqual([]);
+    expect(calls.receipts).toEqual([]);
+  });
+
+  it("соединение списка после (пере)подключения перечитывает список: пропущенное не теряется", async () => {
+    givenPhone();
+    const { fake, calls } = setup({
+      conversations: [conversationOf({ id: "c1" })],
+      refresh: () => Promise.resolve(emptyPage()),
+    });
+    expect(calls.refreshes).toBe(0);
+
+    await act(async () => {
+      fake.clientHandlers["connected"]?.();
+    });
+    await waitFor(() => expect(calls.refreshes).toBe(1));
+  });
+
+  it("беседа открыта — соединение списка закрыто, у панели своё: одно соединение, а не два", async () => {
+    givenPhone();
+    const { container, fake } = setup({
+      conversations: [ANNA],
+      tail: () => Promise.resolve(tailOf([messageOf(1)])),
+    });
+    expect(fake.calls.connect).toBe(1);
+    expect(fake.calls.disconnect).toBe(0);
+
+    fireEvent.click(container.querySelector("[data-conversation-id]")!);
+    await waitFor(() => expect(screen.getByText("message 1")).toBeTruthy());
+
+    expect(fake.calls.disconnect).toBe(1);
+    expect(fake.calls.connect).toBe(2);
+  });
+
   it("нажатие открывает беседу, «назад» возвращает к списку", async () => {
     givenPhone();
     const { container } = setup({

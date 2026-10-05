@@ -33,6 +33,7 @@ import type { ResendVerificationEmail } from "../auth/components/EmailVerificati
 import { ConnectionStatusLine } from "../realtime/components/ConnectionStatusLine"
 import type { CentrifugeFactory } from "../realtime/realtimeClient"
 import { useRealtimeConnection } from "../realtime/useRealtimeConnection"
+import { useListRealtime } from "../realtime/useListRealtime"
 import type { ConnectionEvent, ConnectionMachineState } from "../realtime/connectionMachine"
 import {
   INITIAL_CONNECTION_TELEMETRY_CONTEXT,
@@ -599,6 +600,25 @@ export function ChatPage({
   )
 
   const activeConversation = merged.find((c) => c.id === activeId) ?? null
+
+  /**
+   * Телефон, экран списка: панели беседы нет, а соединение, которое слушает личный
+   * канал и наборы, живёт в ней. Без своего соединения список был бы снимком на момент
+   * загрузки: новое сообщение не меняло бы ни число, ни превью. Пока беседа открыта,
+   * соединение у панели; здесь оно выключено, чтобы не держать два.
+   */
+  const listScreen = isMobile && !(chatOpen && activeConversation !== null)
+  useListRealtime({
+    enabled: listScreen,
+    centrifugoUrl,
+    userChannel: `user:${currentUserId}`,
+    issueTicket,
+    onUserPublication: onUnreadPublication,
+    onTypingPublication: typing.onPublication,
+    // Пока соединения не было, события могли пройти мимо: список перечитывается.
+    onConnected: refresh,
+    ...(createCentrifuge === undefined ? {} : { createCentrifuge }),
+  })
 
   return (
     <>

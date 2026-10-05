@@ -14,6 +14,9 @@ import type { SignedIn, State } from "./support/auth"
  * Отдельно — широкий экран: левая колонка сворачивается в узкую (аватары) и разворачивается,
  * выбор переживает перезагрузку (`MOB-006`).
  *
+ * Порог раскладки — ширина (768 px), а не ориентация: телефон в альбомной ориентации получает
+ * две колонки (`MOB-008`).
+ *
  * Чего здесь нет: реальный телефон и его жесты (ручная проверка `MOB-004`).
  */
 
@@ -94,12 +97,15 @@ test.describe("G4: мобильный интерфейс", () => {
 		await expect(page.locator("[data-screen]")).toHaveAttribute("data-screen", "list", { timeout: 60_000 })
 	})
 
-	test("MOB-002: альбомная ориентация — без горизонтальной прокрутки, композер на экране", async () => {
+	test("MOB-008: телефон в альбомной ориентации (844 px ≥ 768) — две колонки, без горизонтальной прокрутки", async () => {
 		const page = a.page
 		const conversationId = state().conversationId
 		await page.setViewportSize({ width: 844, height: 390 })
 		try {
 			await page.goto("/")
+			// Осознанное решение: порог — ширина (768 px, `md`), а не ориентация. Телефон в
+			// альбомной ориентации шире порога и получает две колонки, как планшет.
+			await expect(page.locator("[data-screen]")).toHaveAttribute("data-screen", "both", { timeout: 60_000 })
 			await page.locator(`[data-conversation-id="${conversationId}"]`).tap()
 			await expect(page.locator("[data-composer-input]")).toBeVisible({ timeout: 60_000 })
 			const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
@@ -150,5 +156,40 @@ test.describe("G4: мобильный интерфейс", () => {
 		} finally {
 			await desktop.context.close()
 		}
+	})
+
+	test("MOB-009: на экране списка число непрочитанного обновляется само, беседа при этом не открывается и не читается", async ({
+		browser,
+	}) => {
+		const page = a.page
+		const conversationId = state().conversationId
+		await page.goto("/")
+		await expect(page.locator("[data-screen]")).toHaveAttribute("data-screen", "list")
+		const card = page.locator(`[data-conversation-id="${conversationId}"]`)
+		await expect(card).toBeVisible({ timeout: 60_000 })
+		const before = Number((await card.getAttribute("data-unread-count")) ?? "0")
+
+		// B пишет в ту же беседу со своего экрана.
+		const b = await signIn(browser, fixtureFor("B"), { viewport: { width: 1280, height: 800 } })
+		try {
+			await b.page.goto("/")
+			await b.page.locator(`[data-conversation-id="${conversationId}"]`).click()
+			await expect(b.page.locator("[data-connection-state]")).toHaveAttribute("data-connection-state", "connected", {
+				timeout: 60_000,
+			})
+			const text = `list-unread ${Date.now()}`
+			await b.page.locator("[data-composer-input]").fill(text)
+			await b.page.locator("[data-composer-send]").click()
+			await expect(b.page.getByText(text)).toBeVisible({ timeout: 30_000 })
+		} finally {
+			await b.context.close()
+		}
+
+		// Без перезагрузки и без открытия беседы: личный канал доехал до списка.
+		await expect
+			.poll(async () => Number((await card.getAttribute("data-unread-count")) ?? "0"), { timeout: 30_000 })
+			.toBeGreaterThan(before)
+		await expect(page.locator("[data-screen]")).toHaveAttribute("data-screen", "list")
+		await expect(page.locator("[data-composer-input]")).toHaveCount(0)
 	})
 })

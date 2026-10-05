@@ -50,8 +50,12 @@ export interface RealtimeClientOptions {
    * Роль у него здесь **отборная, а не выбирающая**: подписку выдаёт сервер, и
    * тем же событием приходят каналы, к этой беседе не относящиеся (`user:{id}`).
    * Имя говорит, какой из них наш.
+   *
+   * Необязателен: без него соединение — **списка бесед** (телефон, экран списка, панели
+   * беседы нет): личный канал и набор доходят, публикации ни одной беседы — нет, а факты
+   * подписки на беседу автомату не передаются.
    */
-  readonly channel: string;
+  readonly channel?: string;
   /**
    * Личный канал — `user:{id}` (`packages/contracts/websocket/channels.json`).
    *
@@ -80,7 +84,7 @@ export interface RealtimeClientOptions {
   /** Факты для автомата. Адаптер их не толкует. */
   readonly onEvent: (event: ConnectionEvent) => void;
   /** Публикация канала беседы — как пришла. Разбирает её срез 3, а не адаптер. */
-  readonly onPublication: (payload: unknown) => void;
+  readonly onPublication?: (payload: unknown) => void;
   /** Публикация **личного** канала — `unread.changed`. Разбирается там же, где список. */
   readonly onUserPublication: (payload: unknown) => void;
   /**
@@ -224,7 +228,7 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
     // беседы — то есть `data-connection-state` уходил бы из `connected` по
     // событию о другом канале. Проверяется мутацией: снятие фильтра краснит
     // автомат, а не косметику.
-    if (ctx.channel !== options.channel) return;
+    if (options.channel === undefined || ctx.channel !== options.channel) return;
 
     options.onEvent({
       type: "subscription-subscribed",
@@ -242,8 +246,8 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
     // клиента вовсе: вкладка узнавала о своём числе только перезагрузкой.
     // Третий канал (которого сервер не выдаёт) не уходит никуда: неизвестное
     // имя — не повод отдать публикацию первому попавшемуся обработчику.
-    if (ctx.channel === options.channel) {
-      options.onPublication(ctx.data);
+    if (options.channel !== undefined && ctx.channel === options.channel) {
+      options.onPublication?.(ctx.data);
       return;
     }
     if (ctx.channel === options.userChannel) {
