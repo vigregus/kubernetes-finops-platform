@@ -25,7 +25,9 @@ A = UserId(uuid.uuid4())
 B = UserId(uuid.uuid4())
 C = UserId(uuid.uuid4())
 CONV = ConversationId(uuid.uuid4())
-NOW = datetime(2026, 10, 5, 12, 0, tzinfo=UTC)
+# Время теста — настоящее: ленивое истечение сравнивает звонок с часами процесса, и
+# фиксированная дата делала бы «свежий» звонок просроченным, как только часы её пройдут.
+NOW = datetime.now(UTC)
 
 
 def run(coro):
