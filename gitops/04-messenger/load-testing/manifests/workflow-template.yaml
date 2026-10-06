@@ -1708,21 +1708,31 @@ spec:
             # тика): в этом случае честнее оставить output-параметр пустым,
             # чем подставить 0, которого не измерили.
             set +e
-            npx playwright test --project=canary 2>&1 | tee /tmp/canary-output.txt
-            status="${PIPESTATUS[0]}"
 
             # Раздел 31 — profile=media: к текстовому canary добавляются настоящие
-            # звонки с аудио и видео (canary-calls.spec.ts). Идут после текстового,
-            # в том же окне k6: их строка CANARY_CALLS_METRICS печатается отдельно,
-            # а провал звонков валит шаг так же, как провал текстового обмена.
+            # звонки с аудио и видео (canary-calls.spec.ts). Они идут **параллельно**
+            # текстовому и k6, а не после: текстовый canary обходит пары по очереди и
+            # сам занимает окно целиком. Свой каталог результатов (`--output`): два
+            # запуска Playwright в одном каталоге стирают артефакты друг друга.
+            CALLS_PID=""
             if [ "{{workflow.parameters.profile}}" = "media" ]; then
               export CALL_PAIRS="{{workflow.parameters.call_pairs}}"
               export CANARY_CALL_HOLD_SECONDS="{{workflow.parameters.call_hold_seconds}}"
               export CANARY_CALL_PAIRS="{{workflow.parameters.canary_call_pairs}}"
               echo "browser-canary: звонки, $CANARY_CALL_PAIRS пар(ы)"
-              npx playwright test --project=canary-calls 2>&1 | tee /tmp/canary-calls-output.txt
-              calls_status="${PIPESTATUS[0]}"
+              ( npx playwright test --project=canary-calls --output=/tmp/pw-calls \
+                  >/tmp/canary-calls-output.txt 2>&1; echo $? >/tmp/canary-calls-status ) &
+              CALLS_PID=$!
+            fi
+
+            npx playwright test --project=canary 2>&1 | tee /tmp/canary-output.txt
+            status="${PIPESTATUS[0]}"
+
+            if [ -n "$CALLS_PID" ]; then
+              wait "$CALLS_PID"
+              cat /tmp/canary-calls-output.txt
               grep -E 'CANARY_CALLS_METRICS ' /tmp/canary-calls-output.txt | tail -1 || true
+              calls_status="$(cat /tmp/canary-calls-status 2>/dev/null || echo 1)"
               [ "$calls_status" -ne 0 ] && status="$calls_status"
             fi
             set -e

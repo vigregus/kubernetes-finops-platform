@@ -79,20 +79,24 @@ async function openConversation(who: SignedIn, conversationId: string): Promise<
 async function hangUp(...people: SignedIn[]): Promise<void> {
 	for (const who of people) {
 		const end = who.page.getByRole("button", { name: "End call" })
-		if (await end.isVisible().catch(() => false)) await end.click().catch(() => undefined)
+		if (await end.isVisible().catch(() => false)) await end.click({ timeout: 5_000 }).catch(() => undefined)
 		const decline = who.page.getByRole("button", { name: "Decline call" })
-		if (await decline.isVisible().catch(() => false)) await decline.click().catch(() => undefined)
+		if (await decline.isVisible().catch(() => false)) await decline.click({ timeout: 5_000 }).catch(() => undefined)
 	}
 }
 
 async function oneCall(a: SignedIn, b: SignedIn, kind: "audio" | "video"): Promise<Sample> {
 	const started = Date.now()
-	await a.page.getByRole("button", { name: kind === "audio" ? "Start voice call" : "Start video call" }).click()
 	let active = false
 	let mediaFlowing = false
 	try {
+		// Явный срок на каждое действие: у Playwright его по умолчанию нет, и
+		// недоступная кнопка зависила бы шаг на весь час, а не считалась отказом.
+		await a.page
+			.getByRole("button", { name: kind === "audio" ? "Start voice call" : "Start video call" })
+			.click({ timeout: 15_000 })
 		await b.page.getByRole("alertdialog", { name: "Incoming call" }).waitFor({ timeout: 20_000 })
-		await b.page.getByRole("button", { name: "Accept call" }).click()
+		await b.page.getByRole("button", { name: "Accept call" }).click({ timeout: 15_000 })
 		await expect(PHASE(a)).toHaveAttribute("data-call-phase", "active", { timeout: 40_000 })
 		await expect(PHASE(b)).toHaveAttribute("data-call-phase", "active", { timeout: 40_000 })
 		active = true
