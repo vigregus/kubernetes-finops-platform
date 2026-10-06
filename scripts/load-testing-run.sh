@@ -137,7 +137,8 @@ spec:
         value: "${K6_PARALLELISM}"
       - name: cleanup
         value: "${CLEANUP}"
-${EXTRA_PARAMS}EOF
+EOF
+printf '%s' "$EXTRA_PARAMS" >>"$MANIFEST"
 
 WF_NAME="$(kubectl create -f "$MANIFEST" -o jsonpath='{.metadata.name}')"
 echo "Workflow: ${WF_NAME} (namespace ${NAMESPACE}, run_id=${RUN_ID}, profile=${PROFILE})"
