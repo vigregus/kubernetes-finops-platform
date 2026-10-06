@@ -1,0 +1,362 @@
+import http from 'k6/http';
+import ws from 'k6/ws';
+import crypto from 'k6/crypto';
+import exec from 'k6/execution';
+import { check, sleep } from 'k6';
+import { Counter, Trend } from 'k6/metrics';
+
+import { login, authHeaders, API } from './lib/auth.js';
+
+// Профиль `media` (docs/messenger/15-load-testing-platform.md, раздел 31):
+// то, чего нет в `messages`/`mixed`/`stress` — **файлы** и **звонки**.
+//
+// Два сценария:
+//
+//  * `files` — открытая модель (constant-arrival-rate): инициация загрузки →
+//    `PUT` в хранилище по предподписанной ссылке → `complete` → ожидание
+//    `ready` (работа воркера обработки) → сообщение с вложением. Нагружает API
+//    инициации, MinIO, воркер вложений и запись сообщений одним путём.
+//  * `calls` — по одной «линии» на пару: у человека может быть один живой
+//    звонок (`ALREADY_IN_CALL`), поэтому звонки пары идут строго друг за другом, а
+//    нагрузка растёт числом пар (`CALL_PAIRS`), а не частотой. Каждый звонок —
+//    вся **сигнальная** часть (создание, принятие, offer/answer, пачки
+//    кандидатов, `ice-servers`, `connected`, `hangup`, итог в ленте) с живым
+//    соединением вызываемого: без него сервер честно не начнёт звонок
+//    (`callee_reachable`), поэтому вызываемый держит настоящий сокет Centrifugo.
+//
+// Что **не** нагружается: сами аудио и видео (k6 не умеет WebRTC). Реальные
+// звонки с медиа ведёт Playwright-canary (`tests/e2e/canary-calls.spec.ts`).
+//
+// Принятые сообщения с вложением считаются тем же счётчиком, что и обычные
+// (`load_run_accepted_messages`), чтобы reconciliation сверял и их.
+
+const RUN_ID = __ENV.RUN_ID;
+const USERS = parseInt(__ENV.USERS || '10', 10);
+const RUN_PASSWORD = __ENV.RUN_PASSWORD;
+const TARGET_RATE = parseInt(__ENV.TARGET_RATE || '10', 10);
+const DURATION = __ENV.DURATION || '30s';
+
+const PAIRS = Math.max(1, Math.floor(USERS / 2));
+// Доля отправок файла от общего целевого темпа и число пар, ведущих звонки.
+const FILE_RATE = Math.max(1, Math.round(TARGET_RATE * 0.3));
+const CALL_PAIRS = Math.min(PAIRS, Math.max(1, parseInt(__ENV.CALL_PAIRS || '5', 10)));
+const CALL_HOLD_SECONDS = parseFloat(__ENV.CALL_HOLD_SECONDS || '5');
+// Размер текстового файла; картинка — всегда настоящий PNG 1x1 (дорожка миниатюр).
+const FILE_BYTES = parseInt(__ENV.FILE_BYTES || String(256 * 1024), 10);
+const READY_WAIT_SECONDS = 20;
+
+// Центрифуго снаружи кластера — wss://rt.finops.local; внутри — сервис. Origin
+// тот же, что у страницы: allowed_origins пропускает только `*.finops.local`.
+const CENTRIFUGO_WS = __ENV.CENTRIFUGO_WS ||
+  'ws://messenger-centrifugo.messenger.svc.cluster.local:8000/connection/websocket';
+// Хранилище: ссылка подписана на публичный адрес (`app.finops.local/storage`), а
+// шлюз снимает префикс. Изнутри идём прямо в MinIO с тем же `Host` — подпись
+// проверяется по нему, путь после снятия префикса тот же.
+const STORAGE_PUBLIC = __ENV.STORAGE_PUBLIC || 'https://app.finops.local/storage';
+const STORAGE_INTERNAL = __ENV.STORAGE_INTERNAL || 'http://minio.messenger.svc.cluster.local:80';
+
+const accepted = new Counter('load_run_accepted_messages');
+const offered = new Counter('load_run_offered_messages');
+
+const filesOffered = new Counter('load_run_offered_files');
+const filesReady = new Counter('load_run_ready_files');
+const filesRejected = new Counter('load_run_rejected_files');
+const fileInitMs = new Trend('load_run_file_init_ms', true);
+const fileUploadMs = new Trend('load_run_file_upload_ms', true);
+const fileReadyMs = new Trend('load_run_file_ready_ms', true);
+
+const callsOffered = new Counter('load_run_offered_calls');
+const callsActive = new Counter('load_run_active_calls');
+const callsFailed = new Counter('load_run_failed_calls');
+const callsUnavailable = new Counter('load_run_unavailable_calls');
+const callStartMs = new Trend('load_run_call_start_ms', true);
+const callAcceptMs = new Trend('load_run_call_accept_ms', true);
+const callSignalMs = new Trend('load_run_call_signal_ms', true);
+const callReplayMs = new Trend('load_run_call_replay_ms', true);
+
+export const options = {
+  // Файлы идут на внутренний MinIO по http; для `ws://` и `http://` TLS не нужен.
+  scenarios: {
+    files: {
+      executor: 'constant-arrival-rate',
+      rate: FILE_RATE,
+      timeUnit: '1s',
+      duration: DURATION,
+      preAllocatedVUs: Math.max(FILE_RATE * 3, 4),
+      maxVUs: Math.max(FILE_RATE * 8, 8),
+      exec: 'sendFile',
+    },
+    calls: {
+      executor: 'constant-vus',
+      vus: CALL_PAIRS,
+      duration: DURATION,
+      exec: 'runCall',
+    },
+  },
+};
+
+// --- общее ---------------------------------------------------------------------
+
+function uuidv4() {
+  const bytes = new Uint8Array(crypto.randomBytes(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes)
+    .map((x) => x.toString(16).padStart(2, '0'))
+    .join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+const tokens = {};
+
+function emailOf(index) {
+  return `local-capacity-${RUN_ID}-${String(index).padStart(6, '0')}@finops.local`;
+}
+
+// Токен кэшируется на VU и пользователя: логин — отдельная, не таймируемая фаза.
+function tokenFor(index) {
+  if (!tokens[index]) tokens[index] = login(emailOf(index), RUN_PASSWORD);
+  return tokens[index];
+}
+
+function pairOf(id) {
+  const pair = ((id - 1) % PAIRS) + 1;
+  return { caller: pair * 2 - 1, callee: pair * 2 };
+}
+
+function conversationOf(token) {
+  const r = http.get(`${API}/conversations`, { headers: authHeaders(token) });
+  if (r.status !== 200) throw new Error(`список бесед: ${r.status} ${r.body}`);
+  const items = JSON.parse(r.body).items || [];
+  if (items.length === 0) throw new Error('у пользователя нет беседы — prepare-conversations не отработал');
+  return items[0].conversation_id;
+}
+
+function json(url, method, token, body) {
+  return http.request(method, url, body === undefined ? null : JSON.stringify(body), {
+    headers: authHeaders(token),
+  });
+}
+
+// --- файлы ---------------------------------------------------------------------
+
+// Настоящий PNG 1x1: сигнатура проходит сверку типа на сервере (ATT-007).
+const PNG = encodingBase64ToBytes(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==',
+);
+
+function encodingBase64ToBytes(b64) {
+  // k6/encoding не нужен: стандартный b64decode есть в глобальном `encoding`, но
+  // импорт ради одной константы лишний — раскодируем вручную.
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  const out = [];
+  let bits = 0;
+  let acc = 0;
+  for (const ch of b64) {
+    if (ch === '=') break;
+    acc = (acc << 6) | alphabet.indexOf(ch);
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      out.push((acc >> bits) & 0xff);
+    }
+  }
+  return new Uint8Array(out).buffer;
+}
+
+const TEXT = (() => {
+  const line = 'load-testing-media 0123456789 abcdefghijklmnopqrstuvwxyz\n';
+  let s = '';
+  while (s.length < FILE_BYTES) s += line;
+  return s.slice(0, FILE_BYTES);
+})();
+
+// Ссылка подписана на публичный адрес; изнутри — прямо в MinIO с тем же `Host`.
+function storageTarget(uploadUrl) {
+  if (!uploadUrl.startsWith(STORAGE_PUBLIC)) return { url: uploadUrl, host: null };
+  const host = STORAGE_PUBLIC.replace(/^https?:\/\//, '').split('/')[0];
+  return { url: STORAGE_INTERNAL + uploadUrl.slice(STORAGE_PUBLIC.length), host };
+}
+
+export function sendFile() {
+  const { caller } = pairOf(exec.vu.idInTest);
+  const token = tokenFor(caller);
+  const conversationId = conversationOf(token);
+
+  const asImage = exec.scenario.iterationInTest % 2 === 0;
+  const contentType = asImage ? 'image/png' : 'text/plain';
+  const body = asImage ? PNG : TEXT;
+  const size = asImage ? PNG.byteLength : TEXT.length;
+
+  filesOffered.add(1);
+  const t0 = Date.now();
+  const init = json(`${API}/attachments`, 'POST', token, {
+    content_type: contentType,
+    size_bytes: size,
+    file_name: asImage ? 'load.png' : 'load.txt',
+  });
+  fileInitMs.add(Date.now() - t0);
+  if (!check(init, { 'инициация вложения (201)': (r) => r.status === 201 })) return;
+  const slot = JSON.parse(init.body);
+
+  const target = storageTarget(slot.upload_url);
+  const headers = { ...(slot.upload_headers || {}) };
+  if (target.host) headers.Host = target.host;
+  const t1 = Date.now();
+  const put = http.put(target.url, body, { headers });
+  fileUploadMs.add(Date.now() - t1);
+  if (!check(put, { 'загрузка в хранилище (2xx)': (r) => r.status >= 200 && r.status < 300 })) return;
+
+  const done = json(`${API}/attachments/${slot.attachment_id}/complete`, 'POST', token);
+  if (!check(done, { 'завершение загрузки (202)': (r) => r.status === 202 })) return;
+
+  // Обработку делает воркер: готовность — наблюдаемое событие, не гонка.
+  const t2 = Date.now();
+  let state = JSON.parse(done.body).state;
+  const deadline = t2 + READY_WAIT_SECONDS * 1000;
+  while (state === 'processing' && Date.now() < deadline) {
+    sleep(0.5);
+    const s = http.get(`${API}/attachments/${slot.attachment_id}`, { headers: authHeaders(token) });
+    if (s.status !== 200) break;
+    state = JSON.parse(s.body).state;
+  }
+  fileReadyMs.add(Date.now() - t2);
+  if (state !== 'ready') {
+    filesRejected.add(1);
+    return;
+  }
+  filesReady.add(1);
+
+  offered.add(1);
+  const sent = json(`${API}/conversations/${conversationId}/messages`, 'POST', token, {
+    client_message_id: uuidv4(),
+    type: asImage ? 'image' : 'file',
+    payload: { text: `load-testing-media ${RUN_ID} ${Date.now()}` },
+    attachment_ids: [slot.attachment_id],
+  });
+  if (check(sent, { 'сообщение с файлом принято (200/201)': (r) => r.status === 200 || r.status === 201 })) {
+    accepted.add(1);
+  }
+}
+
+// --- звонки --------------------------------------------------------------------
+
+const SDP = ['v=0', 'o=- 1 2 IN IP4 127.0.0.1', 's=-', 't=0 0']
+  .concat(Array.from({ length: 40 }, (_, i) => `a=extmap:${i + 1} urn:load-testing:ext:${i}`))
+  .join('\r\n');
+
+function candidates(n) {
+  return Array.from({ length: n }, (_, i) => ({
+    candidate: `candidate:${i} 1 udp ${2113937151 - i} 10.0.0.${i + 1} ${50000 + i} typ host`,
+    sdpMid: '0',
+    sdpMLineIndex: 0,
+  }));
+}
+
+function signal(token, callId, body) {
+  const t = Date.now();
+  const r = json(`${API}/calls/${callId}/signals`, 'POST', token, { signal_id: uuidv4(), ...body });
+  callSignalMs.add(Date.now() - t);
+  return check(r, { 'сигнал принят (204)': (x) => x.status === 204 });
+}
+
+// Вся сигнальная часть одного звонка; вызывается, когда у вызываемого уже есть сокет.
+function callFlow(callerToken, calleeToken, conversationId, kind) {
+  callsOffered.add(1);
+  const t0 = Date.now();
+  const started = json(`${API}/calls`, 'POST', callerToken, { conversation_id: conversationId, kind });
+  callStartMs.add(Date.now() - t0);
+  if (!check(started, { 'звонок создан (201)': (r) => r.status === 201 })) {
+    callsFailed.add(1);
+    return;
+  }
+  const call = JSON.parse(started.body);
+  if (call.state === 'ended') {
+    // «Занято» или «не в сети»: честный исход, но не нагрузка на сигнализацию.
+    callsUnavailable.add(1);
+    return;
+  }
+
+  const t1 = Date.now();
+  const acceptedRes = json(`${API}/calls/${call.call_id}/accept`, 'POST', calleeToken, { tab_id: uuidv4() });
+  callAcceptMs.add(Date.now() - t1);
+  if (!check(acceptedRes, { 'звонок принят (200)': (r) => r.status === 200 })) {
+    callsFailed.add(1);
+    json(`${API}/calls/${call.call_id}/hangup`, 'POST', callerToken);
+    return;
+  }
+
+  const ok =
+    signal(callerToken, call.call_id, { type: 'offer', sdp: SDP }) &&
+    signal(calleeToken, call.call_id, { type: 'answer', sdp: SDP }) &&
+    signal(callerToken, call.call_id, { type: 'ice', candidates: candidates(8) }) &&
+    signal(calleeToken, call.call_id, { type: 'ice', candidates: candidates(8) });
+
+  // Replay: вызываемый забирает пропущенное так же, как после обрыва сокета.
+  const t2 = Date.now();
+  const replay = http.get(`${API}/calls/${call.call_id}/signals?after=0`, { headers: authHeaders(calleeToken) });
+  callReplayMs.add(Date.now() - t2);
+  check(replay, { 'replay сигналов (200)': (r) => r.status === 200 });
+
+  // Доступ к TURN выдаётся участнику живого звонка; считаем только выдачу, не релей.
+  for (const token of [callerToken, calleeToken]) {
+    const ice = http.get(`${API}/calls/${call.call_id}/ice-servers`, { headers: authHeaders(token) });
+    check(ice, { 'доступ к TURN выдан (200)': (r) => r.status === 200 });
+  }
+
+  const connected = ok && [callerToken, calleeToken].every((token) => {
+    const c = json(`${API}/calls/${call.call_id}/connected`, 'POST', token, { connection_type: 'direct' });
+    return check(c, { 'медиа пошло (200)': (r) => r.status === 200 });
+  });
+  if (connected) callsActive.add(1);
+  else callsFailed.add(1);
+
+  sleep(CALL_HOLD_SECONDS);
+  json(`${API}/calls/${call.call_id}/keepalive`, 'POST', callerToken);
+  const bye = json(`${API}/calls/${call.call_id}/hangup`, 'POST', callerToken);
+  check(bye, { 'звонок завершён (200)': (r) => r.status === 200 });
+}
+
+export function runCall() {
+  const { caller, callee } = pairOf(exec.vu.idInTest);
+  const callerToken = tokenFor(caller);
+  const calleeToken = tokenFor(callee);
+  const conversationId = conversationOf(callerToken);
+  const kind = exec.scenario.iterationInInstance % 2 === 0 ? 'audio' : 'video';
+
+  const issued = http.post(`${API}/realtime/token?scope=calls`, null, { headers: authHeaders(calleeToken) });
+  if (!check(issued, { 'билет сокета звонков (200)': (r) => r.status === 200 })) {
+    callsFailed.add(1);
+    return;
+  }
+  const ticket = JSON.parse(issued.body).token;
+
+  // Сокет вызываемого живёт, пока идёт звонок: он и делает человека «достижимым».
+  const res = ws.connect(
+    CENTRIFUGO_WS,
+    { headers: { Origin: 'https://app.finops.local' } },
+    (socket) => {
+      let ran = false;
+      socket.on('open', () => socket.send(JSON.stringify({ id: 1, connect: { data: { ticket } } })));
+      socket.on('message', (data) => {
+        if (data === '{}') {
+          // Ping Centrifugo: ответ — пустая команда.
+          socket.send('{}');
+          return;
+        }
+        if (ran) return;
+        const frame = JSON.parse(data);
+        if (frame.connect) {
+          ran = true;
+          callFlow(callerToken, calleeToken, conversationId, kind);
+          socket.close();
+        } else if (frame.error) {
+          callsFailed.add(1);
+          socket.close();
+        }
+      });
+      socket.setTimeout(() => socket.close(), 60000);
+    },
+  );
+  check(res, { 'сокет вызываемого (101)': (r) => r && r.status === 101 });
+}

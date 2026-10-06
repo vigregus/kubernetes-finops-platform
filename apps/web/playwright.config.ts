@@ -127,5 +127,22 @@ export default defineConfig({
 			testMatch: /canary\.spec\.ts$/,
 			timeout: 3_600_000,
 		},
+		{
+			// Раздел 31: настоящие аудио и видео звонки параллельно k6 `media`. Те же
+			// фейковые камера и микрофон, что в `g4`; от `fixture` не зависит, как и
+			// текстовый canary: берёт synthetic-пользователей LOCAL-CAPACITY-001.
+			name: "canary-calls",
+			testMatch: /canary-calls\.spec\.ts$/,
+			timeout: 3_600_000,
+			use: {
+				launchOptions: {
+					args: [
+						"--use-fake-device-for-media-stream",
+						"--use-fake-ui-for-media-stream",
+						"--ignore-certificate-errors",
+					],
+				},
+			},
+		},
 	],
 })

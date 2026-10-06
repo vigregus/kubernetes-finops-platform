@@ -52,6 +52,7 @@ spec:
           - stress
           - recovery
           - mixed
+          - media
       - name: users
         value: "100"
       - name: online_users
@@ -66,6 +67,18 @@ spec:
         value: "3"
       - name: recovery_high_duration
         value: "1m"
+      # Раздел 31 — profile=media. Число пар, ведущих звонки одновременно (у
+      # человека один живой звонок, поэтому нагрузка звонков растёт числом пар),
+      # длительность звонка и размер текстового файла.
+      - name: call_pairs
+        value: "5"
+      - name: call_hold_seconds
+        value: "5"
+      - name: file_bytes
+        value: "262144"
+      # Пары браузерных звонков с настоящими аудио и видео (по 2 Chromium на пару).
+      - name: canary_call_pairs
+        value: "2"
       - name: trace_sampling_mode
         value: capacity
         enum:
@@ -585,6 +598,13 @@ spec:
             elif [ "$PROFILE" = "mixed" ]; then
               SCRIPT_CONFIGMAP="k6-mixed-script"
               SCRIPT_FILE="mixed.js"
+            elif [ "$PROFILE" = "media" ]; then
+              # Раздел 31 - profile=media: файлы (инициация, загрузка, обработка
+              # воркером, сообщение) и сигнальная часть звонков, tests/load/
+              # messenger/media.js. Аудио и видео сами не нагружаются: их ведёт
+              # browser-canary настоящими звонками (canary-calls.spec.ts).
+              SCRIPT_CONFIGMAP="k6-media-script"
+              SCRIPT_FILE="media.js"
             elif [ "$PROFILE" = "recovery" ]; then
               # Раздел 19 - profile=recovery: контролируемый backlog
               # (stage_high), потом возврат к базовой нагрузке (stage_low),
@@ -650,6 +670,12 @@ spec:
                     value: "{{workflow.parameters.recovery_high_rate_fraction}}"
                   - name: HIGH_DURATION
                     value: "{{workflow.parameters.recovery_high_duration}}"
+                  - name: CALL_PAIRS
+                    value: "{{workflow.parameters.call_pairs}}"
+                  - name: CALL_HOLD_SECONDS
+                    value: "{{workflow.parameters.call_hold_seconds}}"
+                  - name: FILE_BYTES
+                    value: "{{workflow.parameters.file_bytes}}"
             EOF
 
             kubectl apply -f /tmp/testrun.yaml
@@ -1682,8 +1708,33 @@ spec:
             # тика): в этом случае честнее оставить output-параметр пустым,
             # чем подставить 0, которого не измерили.
             set +e
+
+            # Раздел 31 — profile=media: к текстовому canary добавляются настоящие
+            # звонки с аудио и видео (canary-calls.spec.ts). Они идут **параллельно**
+            # текстовому и k6, а не после: текстовый canary обходит пары по очереди и
+            # сам занимает окно целиком. Свой каталог результатов (`--output`): два
+            # запуска Playwright в одном каталоге стирают артефакты друг друга.
+            CALLS_PID=""
+            if [ "{{workflow.parameters.profile}}" = "media" ]; then
+              export CALL_PAIRS="{{workflow.parameters.call_pairs}}"
+              export CANARY_CALL_HOLD_SECONDS="{{workflow.parameters.call_hold_seconds}}"
+              export CANARY_CALL_PAIRS="{{workflow.parameters.canary_call_pairs}}"
+              echo "browser-canary: звонки, $CANARY_CALL_PAIRS пар(ы)"
+              ( npx playwright test --project=canary-calls --output=/tmp/pw-calls \
+                  >/tmp/canary-calls-output.txt 2>&1; echo $? >/tmp/canary-calls-status ) &
+              CALLS_PID=$!
+            fi
+
             npx playwright test --project=canary 2>&1 | tee /tmp/canary-output.txt
             status="${PIPESTATUS[0]}"
+
+            if [ -n "$CALLS_PID" ]; then
+              wait "$CALLS_PID"
+              cat /tmp/canary-calls-output.txt
+              grep -E 'CANARY_CALLS_METRICS ' /tmp/canary-calls-output.txt | tail -1 || true
+              calls_status="$(cat /tmp/canary-calls-status 2>/dev/null || echo 1)"
+              [ "$calls_status" -ne 0 ] && status="$calls_status"
+            fi
             set -e
             # [0-9]+ (grep -E), не [0-9]* - на упавшем тесте Playwright печатает
             # исходный код строки ассерта в error-context, а он буквально содержит
@@ -1700,9 +1751,11 @@ spec:
             grep -oE 'CANARY_METRICS failures=[0-9]+' /tmp/canary-output.txt | tail -1 |
               grep -o '[0-9]*$' > /tmp/canary-failures || true
             exit "$status"
+        # Лимит с запасом под profile=media: четыре Chromium с фейковым видео
+        # (две пары) тяжелее текстового canary.
         resources:
           requests: {cpu: "1", memory: 1Gi}
-          limits: {cpu: "2", memory: 2Gi}
+          limits: {cpu: "3", memory: 3Gi}
       outputs:
         parameters:
           - name: canary_failures
@@ -1870,6 +1923,20 @@ spec:
                               await conn.execute(
                                   "delete from read_states where conversation_id = any($1::uuid[])",
                                   conv_ids,
+                              )
+                              # Раздел 31 — profile=media оставляет звонки (их сигналы и
+                              # участники уходят каскадом) и вложения: те и другие держат
+                              # ссылки на сообщения и пользователей, поэтому идут раньше
+                              # них. Объекты в хранилище здесь не удаляются (у шага нет
+                              # доступа к MinIO): строки уходят, файлы остаются до уборки
+                              # хранилища; размер файла в профиле задан параметром.
+                              await conn.execute(
+                                  "delete from calls where conversation_id = any($1::uuid[])",
+                                  conv_ids,
+                              )
+                              await conn.execute(
+                                  "delete from attachments where uploader_id = any($1::uuid[])",
+                                  user_ids,
                               )
                               await conn.execute(
                                   "delete from messages where conversation_id = any($1::uuid[])",

@@ -22,12 +22,13 @@ CLEANUP="true"
 RUN_ID=""
 WAIT="false"
 NAMESPACE="load-testing"
+EXTRA_PARAMS=""
 
 usage() {
 	cat <<'USAGE'
 Использование: scripts/load-testing-run.sh [опции]
 
-  --profile <messages|identity|connections|stress|recovery|mixed>
+  --profile <messages|identity|connections|stress|recovery|mixed|media>
                             профиль нагрузки (по умолчанию messages)
   --users <N>               число synthetic-пользователей (по умолчанию 100)
   --target-rate <N>         целевой rate сообщений/с для open-model k6 (по умолчанию 10)
@@ -35,6 +36,7 @@ usage() {
   --k6-parallelism <N>      TestRun.spec.parallelism (по умолчанию 1)
   --run-id <строка>         run_id; по умолчанию генерируется как local-<epoch>-<random>
   --no-cleanup              не удалять synthetic-данные после прогона (диагностика)
+  --param <имя=значение>    дополнительный параметр Workflow (повторяемый), напр. call_pairs=3
   --wait                    дождаться терминального статуса Workflow;
                             код возврата ненулевой при Failed/Error/таймауте
   -h, --help                эта справка
@@ -69,6 +71,14 @@ while [ $# -gt 0 ]; do
 		;;
 	--run-id)
 		RUN_ID="$2"
+		shift 2
+		;;
+	--param)
+		name="${2%%=*}"
+		value="${2#*=}"
+		EXTRA_PARAMS="${EXTRA_PARAMS}      - name: ${name}
+        value: \"${value}\"
+"
 		shift 2
 		;;
 	--no-cleanup)
@@ -108,7 +118,7 @@ metadata:
   namespace: ${NAMESPACE}
 spec:
   workflowTemplateRef:
-    name: messenger-local-capacity
+    name: ${WORKFLOW_TEMPLATE:-messenger-local-capacity}
   arguments:
     parameters:
       - name: run_id
@@ -128,6 +138,7 @@ spec:
       - name: cleanup
         value: "${CLEANUP}"
 EOF
+printf '%s' "$EXTRA_PARAMS" >>"$MANIFEST"
 
 WF_NAME="$(kubectl create -f "$MANIFEST" -o jsonpath='{.metadata.name}')"
 echo "Workflow: ${WF_NAME} (namespace ${NAMESPACE}, run_id=${RUN_ID}, profile=${PROFILE})"
