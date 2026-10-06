@@ -179,7 +179,7 @@ function storageTarget(uploadUrl) {
 }
 
 export function sendFile() {
-  const { caller } = pairOf(exec.vu.idInScenario);
+  const { caller } = pairOf(exec.vu.idInTest);
   const token = tokenFor(caller);
   const conversationId = conversationOf(token);
 
@@ -318,7 +318,7 @@ function callFlow(callerToken, calleeToken, conversationId, kind) {
 }
 
 export function runCall() {
-  const { caller, callee } = pairOf(exec.vu.idInScenario);
+  const { caller, callee } = pairOf(exec.vu.idInTest);
   const callerToken = tokenFor(caller);
   const calleeToken = tokenFor(callee);
   const conversationId = conversationOf(callerToken);
