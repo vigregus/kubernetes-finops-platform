@@ -330,8 +330,17 @@ data:
       check(bye, { 'звонок завершён (200)': (r) => r.status === 200 });
     }
 
+    // Пара закрепляется за VU при его первой итерации. Нельзя брать её из номера VU:
+    // номера общие на весь тест и расходятся между сценариями (у `files` свои VU
+    // впереди), поэтому два VU звонков получали одну пару и получали `409` друг у друга
+    // (живой дефект прогона media-probe4: 308 из 316 попыток). Первые N итераций сценария
+    // стартуют по одной на каждый из N VU, их номера 0…N−1 различны.
+    let myPair = null;
+
     export function runCall() {
-      const { caller, callee } = pairOf(exec.vu.idInTest);
+      if (myPair === null) myPair = (exec.scenario.iterationInTest % CALL_PAIRS) + 1;
+      const caller = myPair * 2 - 1;
+      const callee = myPair * 2;
       const callerToken = tokenFor(caller);
       const calleeToken = tokenFor(callee);
       const conversationId = conversationOf(callerToken);
