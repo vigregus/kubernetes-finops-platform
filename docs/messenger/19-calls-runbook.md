@@ -52,3 +52,12 @@ push-подписки. Кнопка недоступна с причиной, а
 
 Блокировка пользователей и лимит звонков (`CALL-017`), Web Push о звонках (`CALL-018…020`), несколько TURN и TLS на 443 (`RES-005`/`RES-006`),
 панель «Network capabilities» (`RES-012`), звонки по ссылке (`LINK-*`) — по мере реализации дополняют этот файл.
+
+## Путь и причины отказов (RES-009)
+
+- `messenger_call_media_path_total{path,turn_transport,network_country,network_class}`: `path` — `host | srflx | prflx | relay`, `turn_transport` — `udp | tcp | tls` у релея
+  (`none` без релея; `relayProtocol` есть в `getStats()` Chromium, в других браузерах транспорт неизвестен). Доля TLS-релея — `…{path="relay",turn_transport="tls"}` к `…{path="relay"}`.
+- `messenger_call_failure_total{reason,network_country,network_class}`: причины — `ice_connect_timeout` (связь так и не поднялась), `ice_disconnected` (оборвалась после
+  разговора), `media_denied`, `unknown`; остальные значения таксономии (часть 18, §8) заполнят диагностика и запасные транспорты.
+- Страна и класс сети приходят заголовками шлюза `X-Client-Country`, `X-Client-Network-Class`. Без GeoIP на шлюзе они `unknown`, и разреза «в мобильных сетях РФ»
+  нет — это настройка входа, не ошибка приложения. IP не сохраняется и в метки не попадает.

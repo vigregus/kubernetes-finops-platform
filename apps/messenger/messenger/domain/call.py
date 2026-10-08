@@ -71,6 +71,38 @@ TURN_WINDOW_SECONDS = 300
 # в несколько минут (обновление).
 TURN_REQUESTS_PER_MINUTE = 30
 
+# Путь выбранной пары кандидатов (по `getStats()` клиента) и транспорт TURN у релея.
+# Закрытые наборы: клиент присылает значение, а в метку метрики оно попадает только
+# из этих множеств (иначе чужая строка становится новой серией).
+MEDIA_PATHS = ("host", "srflx", "prflx", "relay")
+TURN_TRANSPORTS = ("udp", "tcp", "tls")
+
+# Таксономия отказов (`docs/messenger/18-…`, §8). Одной причины «звонок упал»
+# недостаточно: нужно отличать сетевую деградацию от ошибки приложения и от отказа
+# нашей инфраструктуры. Клиент сообщает то, что видит сам; остальное
+# дополняют диагностика (`RES-012`) и сервер.
+FAILURE_REASONS = (
+    "dns_failed",
+    "tcp_connect_timeout",
+    "tls_handshake_failed",
+    "websocket_failed",
+    "sse_failed",
+    "stun_timeout",
+    "turn_udp_allocate_failed",
+    "turn_tcp_allocate_failed",
+    "turn_tls_allocate_failed",
+    "turn_auth_failed",
+    "ice_no_candidate",
+    "ice_connect_timeout",
+    "ice_disconnected",
+    "media_stalled",
+    "media_packet_loss",
+    "signal_timeout",
+    "setup_timeout",
+    "media_denied",
+    "unknown",
+)
+
 _CALL_PREFIX = "call:"
 
 

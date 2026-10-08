@@ -611,6 +611,7 @@ TURN-доступа не даёт.
 | Принудительный релей (`iceTransportPolicy: relay`) | 🟡 флаг и тест в кластере есть; браузерная проверка пропускается без `E2E_TURN_RELAY` |
 | Смена сети, ICE restart, метрика «direct → relay» | 🟡 клиент и метрика есть; приёмки в сети нет |
 | Тип пути в метриках | 🟡 есть, без разреза по транспорту TURN |
+| Путь выбранной пары и транспорт TURN (`udp`/`tcp`/`tls`), причина отказа по таксономии, сетевая размерность из заголовков шлюза (`RES-009`, часть) | 🟡 клиент и метрики `messenger_call_media_path_total`, `messenger_call_failure_total` есть; GeoIP на шлюзе, `signaling_transport`, панели — нет |
 | TURN/TLS :443; несколько TURN; запасные realtime-транспорты; диагностика; Network Intelligence; `RESTRICTED`; HTTPS-only | ⬜ |
 | Звонки по ссылке | ⬜ |
 

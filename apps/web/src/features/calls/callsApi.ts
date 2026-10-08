@@ -3,7 +3,7 @@
  * — в `main.tsx` (там живёт клиент API), здесь — только форма и перевод модели.
  */
 import type { Call, CallSignal, CallSignalEvent } from "../../api/generated"
-import type { IceConfig, WireSignal } from "./callEngine"
+import type { ConnectionDetail, IceConfig, WireSignal } from "./callEngine"
 import type { ApiCallView } from "./callState"
 
 export interface CallsOperations {
@@ -15,10 +15,17 @@ export interface CallsOperations {
   decline(callId: string): Promise<ApiCallView>
   /** `unload` — страница закрывается: запрос должен пережить её (`keepalive`). */
   hangup(callId: string, options?: { readonly unload?: boolean }): Promise<ApiCallView>
-  /** Соединение не состоялось или оборвалось насовсем: итог `failed`, а не `completed`. */
-  fail(callId: string): Promise<ApiCallView>
+  /**
+   * Соединение не состоялось или оборвалось насовсем: итог `failed`, а не `completed`.
+   * `reason` — причина по таксономии отказов (метрика `RES-009`); необязательна.
+   */
+  fail(callId: string, reason?: string): Promise<ApiCallView>
   keepalive(callId: string): Promise<ApiCallView>
-  connected(callId: string, connectionType: "direct" | "relay"): Promise<ApiCallView>
+  connected(
+    callId: string,
+    connectionType: "direct" | "relay",
+    detail?: ConnectionDetail,
+  ): Promise<ApiCallView>
   signal(callId: string, signal: WireSignal): Promise<void>
   /**
    * Пропущенные сигналы собеседника с номером больше `after`, по порядку. Каждый —

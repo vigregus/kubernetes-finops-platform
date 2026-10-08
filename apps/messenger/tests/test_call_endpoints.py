@@ -312,3 +312,36 @@ def test_me_называет_звонки_возможностью_только_
     assert "calls" in client.get("/me").json()["capabilities"]
     monkeypatch.setenv("CALLS_ENABLED", "false")
     assert "calls" not in client.get("/me").json()["capabilities"]
+
+
+def test_медиа_пошло_несёт_подробности_пути_и_сеть_из_заголовков_шлюза(client, monkeypatch):
+    authenticated(monkeypatch)
+    fake = patch(monkeypatch, "report_connected", result(make_call(state=CallState.ACTIVE)))
+    r = client.post(
+        f"/calls/{CALL_ID}/connected",
+        json={"connection_type": "relay", "media_path": "relay", "turn_transport": "tls"},
+        headers={"X-Client-Country": "ru", "X-Client-Network-Class": "mobile"},
+    )
+    assert r.status_code == 200
+    assert (fake.kwargs["media_path"], fake.kwargs["turn_transport"]) == ("relay", "tls")
+    assert (fake.kwargs["network"].country, fake.kwargs["network"].net_class) == ("RU", "mobile")
+
+
+def test_негодный_транспорт_turn_отвергается(client, monkeypatch):
+    authenticated(monkeypatch)
+    patch(monkeypatch, "report_connected", result(make_call()))
+    r = client.post(
+        f"/calls/{CALL_ID}/connected", json={"connection_type": "relay", "turn_transport": "smoke"}
+    )
+    assert r.status_code == 422
+
+
+def test_отказ_несёт_причину_и_принимается_без_тела(client, monkeypatch):
+    authenticated(monkeypatch)
+    ended = make_call(state=CallState.ENDED, reason=EndReason.FAILED)
+    fake = patch(monkeypatch, "fail", result(ended))
+    r = client.post(f"/calls/{CALL_ID}/fail", json={"reason": "ice_disconnected"})
+    assert r.status_code == 200
+    assert fake.kwargs["reason"] == "ice_disconnected"
+    assert client.post(f"/calls/{CALL_ID}/fail").status_code == 200
+    assert fake.kwargs["reason"] is None

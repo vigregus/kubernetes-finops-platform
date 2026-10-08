@@ -38,6 +38,7 @@ from messenger.repositories import calls as repo
 from messenger.repositories import conversations, users
 from messenger.services import messages as message_service
 from messenger.telemetry import metrics
+from messenger.telemetry.network import NetworkContext
 
 log = logging.getLogger(__name__)
 
@@ -475,13 +476,33 @@ async def hangup(
 
 
 async def fail(
-    conn: asyncpg.Connection, *, realtime: Publisher | None, user_id: UserId, call_id: uuid.UUID
+    conn: asyncpg.Connection,
+    *,
+    realtime: Publisher | None,
+    user_id: UserId,
+    call_id: uuid.UUID,
+    reason: str | None = None,
+    network: NetworkContext | None = None,
 ) -> CallResult:
-    """Клиент сообщает, что соединение не состоялось: итог `failed`, а не `completed`."""
-    return await _end_action(conn, realtime, user_id, call_id, domain.fail, expired_ok=True)
+    """Клиент сообщает, что соединение не состоялось: итог `failed`, а не `completed`.
+
+    Причина (`domain.FAILURE_REASONS`) идёт в метрику таксономии отказов (`RES-009`) **один
+    раз** — когда звонок действительно перешёл в `failed`, а не на повторе того же запроса.
+    """
+    context = network or NetworkContext()
+    code = reason if reason in domain.FAILURE_REASONS else "unknown"
+
+    def count() -> None:
+        metrics.call_failure(code, context.country, context.net_class)
+
+    return await _end_action(
+        conn, realtime, user_id, call_id, domain.fail, expired_ok=True, on_changed=count
+    )
 
 
-async def _end_action(conn, realtime, user_id, call_id, action, *, expired_ok: bool) -> CallResult:
+async def _end_action(
+    conn, realtime, user_id, call_id, action, *, expired_ok: bool, on_changed=None
+) -> CallResult:
     events: list[Event] = []
     async with conn.transaction():
         call, expired = await _open(conn, call_id, user_id, events)
@@ -503,6 +524,8 @@ async def _end_action(conn, realtime, user_id, call_id, action, *, expired_ok: b
                 outcome = CallResult(call=call)
             else:
                 updated = await _transition(conn, call, change)
+                if on_changed is not None:
+                    on_changed()
                 events.extend(_state_events(updated))
                 outcome = CallResult(call=updated)
     await _publish(realtime, events)
@@ -516,8 +539,20 @@ async def report_connected(
     user_id: UserId,
     call_id: uuid.UUID,
     connection_type: str,
+    media_path: str | None = None,
+    turn_transport: str | None = None,
+    network: NetworkContext | None = None,
 ) -> CallResult:
-    """«Медиа пошло»: звонок становится активным, путь соединения идёт в метрику."""
+    """«Медиа пошло»: звонок становится активным, путь соединения идёт в метрику.
+
+    `media_path` и `turn_transport` — подробности пути (`host | srflx | prflx | relay`,
+    `udp | tcp | tls` у релея) для метрики `RES-009`; необязательны, старый клиент их не шлёт.
+    """
+    detail = _PathDetail(
+        path=media_path if media_path in domain.MEDIA_PATHS else None,
+        transport=turn_transport if turn_transport in domain.TURN_TRANSPORTS else None,
+        network=network or NetworkContext(),
+    )
     events: list[Event] = []
     async with conn.transaction():
         call, expired = await _open(conn, call_id, user_id, events)
@@ -535,19 +570,28 @@ async def report_connected(
                 # после смены сети, и прямой путь мог стать релейным.
                 await repo.touch(conn, call.call_id)
                 if connection_type in ("direct", "relay"):
-                    await _record_connection(conn, call, connection_type)
+                    await _record_connection(conn, call, connection_type, detail)
                 outcome = CallResult(call=call)
             else:
                 updated = await _transition(conn, call, change)
                 if connection_type in ("direct", "relay"):
-                    await _record_connection(conn, call, connection_type)
+                    await _record_connection(conn, call, connection_type, detail)
                 events.extend(_state_events(updated))
                 outcome = CallResult(call=updated)
     await _publish(realtime, events)
     return outcome
 
 
-async def _record_connection(conn: asyncpg.Connection, call: Call, connection_type: str) -> None:
+@dataclass(frozen=True, slots=True)
+class _PathDetail:
+    path: str | None
+    transport: str | None
+    network: NetworkContext
+
+
+async def _record_connection(
+    conn: asyncpg.Connection, call: Call, connection_type: str, detail: _PathDetail | None = None
+) -> None:
     """Путь соединения в строку звонка и в метрики; повышение direct → relay учитывается.
 
     Первое сообщение — начальный путь (`messenger_call_connection_total`, время
@@ -562,6 +606,12 @@ async def _record_connection(conn: asyncpg.Connection, call: Call, connection_ty
         if call.accepted_at is not None:
             setup = (datetime.now(UTC) - call.accepted_at).total_seconds()
         metrics.call_connection(connection_type, setup)
+        if detail is not None:
+            # Начальный путь и транспорт — один раз за звонок (на первом сообщении).
+            path = detail.path or ("relay" if connection_type == "relay" else "host")
+            transport = detail.transport if path == "relay" and detail.transport else "none"
+            net = detail.network
+            metrics.call_media_path(path, transport, net.country, net.net_class)
         if connection_type == "relay":
             metrics.call_relay_used(switched=False)
     elif previous == "direct" and connection_type == "relay":

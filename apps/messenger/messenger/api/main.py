@@ -76,6 +76,7 @@ from messenger.services import user_lookup as user_lookup_service
 from messenger.services import verification as verification_service
 from messenger.telemetry import logging as logging_envelope
 from messenger.telemetry import metrics, trace, tracing
+from messenger.telemetry import network as network_context
 from messenger.telemetry.logging import configure
 
 # Настройка - один раз на процесс; журнал - свой у модуля.
@@ -1125,6 +1126,17 @@ class CallConnected(BaseModel):
     # доля релея; клиенту верим, потому что вреда от неверного значения нет:
     # оно только пополняет метрику.
     connection_type: Literal["direct", "relay"]
+    # Подробности пути для метрики `RES-009` (необязательны: прежний клиент их не шлёт).
+    media_path: Literal["host", "srflx", "prflx", "relay"] | None = None
+    turn_transport: Literal["udp", "tcp", "tls"] | None = None
+
+
+class CallFailed(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Причина по таксономии отказов (`domain.call.FAILURE_REASONS`). Неизвестную строку
+    # принимает как `unknown`: новый клиент не должен ломаться об старый сервер.
+    reason: str | None = Field(default=None, max_length=64)
 
 
 class AcceptCall(BaseModel):
@@ -1251,10 +1263,35 @@ async def call_accept(
     return _call_body(result.call, user.user_id)
 
 
+@app.post("/calls/{call_id}/fail", response_model=dict[str, object], name="call_fail")
+async def call_fail(
+    call_id: uuid.UUID,
+    request: Request,
+    response: Response,
+    body: CallFailed | None = None,
+) -> dict[str, object] | Response:
+    """Соединение не состоялось или оборвалось насовсем; причина — в метрику отказов."""
+    user, failure = await _call_user(request, response)
+    if failure is not None:
+        return failure
+    runtime = request.app.state.runtime
+    async with runtime.connection() as conn:
+        result = await calls_service.fail(
+            conn,
+            realtime=runtime.centrifugo,
+            user_id=user.user_id,
+            call_id=call_id,
+            reason=body.reason if body is not None else None,
+            network=network_context.from_headers(request.headers),
+        )
+    if not result.ok:
+        return _call_failure(result, response)
+    return _call_body(result.call, user.user_id)
+
+
 for _action, _summary in (
     ("decline", "Отклонить входящий звонок"),
     ("hangup", "Повесить трубку (или отменить исходящий)"),
-    ("fail", "Сообщить, что соединение не состоялось или оборвалось"),
     ("keepalive", "Подтвердить, что звонок жив"),
 ):
     app.post(
@@ -1281,6 +1318,9 @@ async def call_connected(
             user_id=user.user_id,
             call_id=call_id,
             connection_type=body.connection_type,
+            media_path=body.media_path,
+            turn_transport=body.turn_transport,
+            network=network_context.from_headers(request.headers),
         )
     if not result.ok:
         return _call_failure(result, response)

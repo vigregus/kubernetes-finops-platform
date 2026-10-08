@@ -260,7 +260,7 @@ export function CallsProvider({
   )
 
   const endLocally = useCallback(
-    (reason: CallEndReason) => {
+    (reason: CallEndReason, failureReason?: string) => {
       const callId = viewRef.current.callId
       apply({ type: "local-ended", reason })
       teardown()
@@ -269,7 +269,7 @@ export function CallsProvider({
       // записывается сервером как состоявшийся разговор (`completed`), и сбой
       // сети попадал бы в ленту, метрики и долю неудач разговором.
       const failed = reason === "failed" || reason === "media_denied"
-      void (failed ? ops.fail(callId) : ops.hangup(callId)).catch(() => undefined)
+      void (failed ? ops.fail(callId, failureReason) : ops.hangup(callId)).catch(() => undefined)
     },
     [apply, teardown, ops],
   )
@@ -313,14 +313,15 @@ export function CallsProvider({
       },
       onLocalStream: setLocalStream,
       onRemoteStream: setRemoteStream,
-      onConnected: (type) => {
+      onConnected: (type, detail) => {
         apply({ type: "connected" })
         // Вызывается при **каждой** смене пути (прямой → релейный после смены сети).
-        void ops.connected(callId, type).catch(() => undefined)
+        void ops.connected(callId, type, detail).catch(() => undefined)
         if (keepaliveRef.current === null) startKeepalive(callId)
         if (wakeLockRef.current === null) acquireWakeLock()
       },
-      onFailed: (reason) => endLocally(reason === "media_denied" ? "media_denied" : "failed"),
+      onFailed: (reason) =>
+        endLocally(reason === "media_denied" ? "media_denied" : "failed", reason),
     })
     engineRef.current = engine
     void engine.start()

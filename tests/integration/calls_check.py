@@ -275,8 +275,9 @@ async def run() -> None:
                   stale == [], str(stale))
 
             # --- активен, трубка, итог ------------------------------------------------
-            active = await call("POST", f"/calls/{call_id}/connected", a, {"connection_type": "direct"})
-            check("медиа пошло: active", active.status_code == 200 and active.json().get("state") == "active",
+            active = await call("POST", f"/calls/{call_id}/connected", a, {
+                "connection_type": "relay", "media_path": "relay", "turn_transport": "tls"})
+            check("медиа пошло (RES-009: путь и транспорт TURN приняты): active", active.status_code == 200 and active.json().get("state") == "active",
                   active.text[:120])
             keep = await call("POST", f"/calls/{call_id}/keepalive", b)
             check("keepalive отдаёт состояние", keep.status_code == 200 and keep.json().get("state") == "active",
