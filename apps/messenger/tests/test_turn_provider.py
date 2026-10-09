@@ -172,3 +172,113 @@ def test_coturn_без_секрета_или_адресов_откатывает
     monkeypatch.setenv("TURN_COTURN_SECRET", "s")
     monkeypatch.delenv("TURN_COTURN_URLS")
     assert isinstance(turn.provider_from_env(), turn.StaticProvider)
+
+
+# --- RES-006: несколько TURN ----------------------------------------------------------------
+
+
+class Fake:
+    def __init__(self, result=None, error=None, delay=0.0):
+        self.result, self.error, self.delay = result, error, delay
+
+    async def ice_servers(self, *, ttl_seconds, expires_at=None, subject=None):
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        if self.error:
+            raise self.error
+        return self.result
+
+
+def server(url):
+    return turn.IceServer(urls=(url,), username="u", credential="c")
+
+
+def composite(*pairs, timeout=1.0, seen=None):
+    return turn.CompositeTurnProvider(
+        providers=pairs,
+        timeout_seconds=timeout,
+        observe=(lambda name, result: seen.append((name, result)))
+        if seen is not None
+        else (lambda *_: None),
+    )
+
+
+def test_composite_объединяет_серверы_обоих_провайдеров():
+    seen: list = []
+    provider = composite(
+        ("a", Fake([server("turns:a:443?transport=tcp")])),
+        ("b", Fake([server("turns:b:443?transport=tcp")])),
+        seen=seen,
+    )
+    servers = run(provider.ice_servers(ttl_seconds=60))
+    assert [s.urls[0] for s in servers] == [
+        "turns:a:443?transport=tcp", "turns:b:443?transport=tcp"]
+    assert seen == [("a", "ok"), ("b", "ok")]
+
+
+def test_отказ_первого_не_лишает_звонок_второго():
+    seen: list = []
+    provider = composite(
+        ("a", Fake(error=RuntimeError("down"))),
+        ("b", Fake([server("turns:b:443?transport=tcp")])),
+        seen=seen,
+    )
+    servers = run(provider.ice_servers(ttl_seconds=60))
+    assert [s.urls[0] for s in servers] == ["turns:b:443?transport=tcp"]
+    assert ("a", "unavailable") in seen and ("b", "ok") in seen
+
+
+def test_медленный_провайдер_не_держит_выдачу_дольше_срока():
+    seen: list = []
+    provider = composite(
+        ("slow", Fake([server("turns:slow:443")], delay=5.0)),
+        ("b", Fake([server("turns:b:443")])),
+        timeout=0.05,
+        seen=seen,
+    )
+    servers = run(provider.ice_servers(ttl_seconds=60))
+    assert [s.urls[0] for s in servers] == ["turns:b:443"]
+    assert ("slow", "timeout") in seen
+
+
+def test_все_недоступны_значит_нет_релея_а_не_ошибка():
+    provider = composite(("a", Fake(None)), ("b", Fake(error=RuntimeError("x"))))
+    assert run(provider.ice_servers(ttl_seconds=60)) is None
+
+
+def test_два_coturn_из_окружения_собираются_в_composite(monkeypatch):
+    monkeypatch.setenv("TURN_PROVIDER", "coturn,coturn-b")
+    monkeypatch.setenv("TURN_COTURN_SECRET", "s1")
+    monkeypatch.setenv("TURN_COTURN_URLS", "turns:a.example:443?transport=tcp")
+    monkeypatch.setenv("TURN_COTURN_B_SECRET", "s2")
+    monkeypatch.setenv("TURN_COTURN_B_URLS", "turns:b.example:443?transport=tcp")
+    provider = turn.provider_from_env()
+    assert isinstance(provider, turn.CompositeTurnProvider)
+    assert [name for name, _ in provider.providers] == ["coturn", "coturn-b"]
+    servers = run(provider.ice_servers(ttl_seconds=60))
+    assert {s.urls[0] for s in servers} == {
+        "turns:a.example:443?transport=tcp", "turns:b.example:443?transport=tcp"}
+    # у каждого свой секрет: данные одного не подходят другому
+    assert servers[0].credential != servers[1].credential
+
+
+def test_ненастроенный_второй_пропускается_первый_работает(monkeypatch):
+    monkeypatch.setenv("TURN_PROVIDER", "coturn,coturn-b")
+    monkeypatch.setenv("TURN_COTURN_SECRET", "s1")
+    monkeypatch.setenv("TURN_COTURN_URLS", "turns:a.example:443?transport=tcp")
+    monkeypatch.delenv("TURN_COTURN_B_SECRET", raising=False)
+    monkeypatch.delenv("TURN_COTURN_B_URLS", raising=False)
+    provider = turn.provider_from_env()
+    assert isinstance(provider, turn.CompositeTurnProvider)
+    assert [name for name, _ in provider.providers] == ["coturn"]
+
+
+def test_restricted_only_оставляет_только_turns():
+    servers = [
+        turn.IceServer(urls=("stun:s",)),
+        turn.IceServer(
+            urls=("turn:t:3478", "turns:t:443?transport=tcp"), username="u", credential="c"),
+    ]
+    out = turn.restricted_only(servers)
+    assert [s.urls for s in out] == [("turns:t:443?transport=tcp",)]
+    assert out[0].username == "u" and out[0].credential == "c"

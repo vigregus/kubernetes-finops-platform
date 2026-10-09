@@ -3,7 +3,7 @@
  * — в `main.tsx` (там живёт клиент API), здесь — только форма и перевод модели.
  */
 import type { Call, CallSignal, CallSignalEvent } from "../../api/generated"
-import type { ConnectionDetail, IceConfig, WireSignal } from "./callEngine"
+import type { CallProfile, ConnectionDetail, IceConfig, WireSignal } from "./callEngine"
 import type { ApiCallView } from "./callState"
 
 export interface CallsOperations {
@@ -35,7 +35,7 @@ export interface CallsOperations {
    */
   signals(callId: string, after: number): Promise<readonly unknown[]>
   /** Данные STUN/TURN и срок их действия (минуты): клиент обновляет их до конца срока. */
-  iceServers(callId: string): Promise<IceConfig>
+  iceServers(callId: string, profile?: CallProfile): Promise<IceConfig>
 }
 
 /** Модель API → то, что знает автомат клиента. */

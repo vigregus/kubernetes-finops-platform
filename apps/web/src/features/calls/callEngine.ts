@@ -35,7 +35,18 @@ export type TurnTransport = "udp" | "tcp" | "tls"
 export interface ConnectionDetail {
   readonly mediaPath?: MediaPath
   readonly turnTransport?: TurnTransport
+  /** Профиль, в котором звонок соединился (RES-011). */
+  readonly profile?: CallProfile
 }
+
+/**
+ * Профиль соединения (`RES-011`). `normal` — обычный ICE, прямой путь предпочтителен.
+ * `restricted` — `iceTransportPolicy=relay` и только `turns:`: прямой и UDP-путь звонка исключены.
+ */
+export type CallProfile = "normal" | "restricted"
+
+/** Срок прямой попытки до перехода в `restricted` (часть 18, §5: 8–10 с, уточняется измерениями). */
+export const DIRECT_ATTEMPT_MS = 9_000
 
 /**
  * Оставляет только серверы TURN с нужным транспортом — отладочный переключатель проверки
@@ -90,7 +101,7 @@ export interface EngineOptions {
   readonly kind: "audio" | "video"
   readonly sendSignal: (signal: WireSignal) => Promise<void>
   /** Данные STUN/TURN и сколько они действуют: по истечении их нужно взять заново. */
-  readonly iceServers: () => Promise<IceConfig>
+  readonly iceServers: (profile: CallProfile) => Promise<IceConfig>
   readonly onLocalStream: (stream: MediaStream) => void
   readonly onRemoteStream: (stream: MediaStream) => void
   /** Медиа пошло; путь соединения — по `getStats()`. Один раз за звонок. */
@@ -101,6 +112,12 @@ export interface EngineOptions {
   readonly videoQuality?: VideoQuality
   /** Принудительный релей (проверка TURN): `relay` — кандидаты только через сервер. */
   readonly iceTransportPolicy?: RTCIceTransportPolicy
+  /** Начальный профиль: `restricted` — по `last_success` или рекомендации (RES-011/RES-013). */
+  readonly profile?: CallProfile
+  /** Срок прямой попытки до перехода в `restricted`; по умолчанию `DIRECT_ATTEMPT_MS`. */
+  readonly directAttemptMs?: number
+  /** Профиль сменился (прямая попытка не удалась): клиент запоминает его для следующего звонка. */
+  readonly onProfile?: (profile: CallProfile) => void
   /** Предпочесть H.264 (аппаратное кодирование на устройствах Apple). */
   readonly preferH264?: boolean
   readonly reconnectWindowMs?: number
@@ -242,10 +259,13 @@ export class CallEngine {
   private measuring = false
   private refreshTimer: unknown = null
   private quality: VideoQuality = "auto"
+  private profile: CallProfile = "normal"
+  private directTimer: unknown = null
 
   constructor(options: EngineOptions) {
     this.opts = options
     this.quality = options.videoQuality ?? "auto"
+    this.profile = options.profile ?? "normal"
   }
 
   private get timers() {
@@ -291,15 +311,15 @@ export class CallEngine {
       this.local = stream
       this.opts.onLocalStream(stream)
 
-      const ice = await this.opts.iceServers()
+      const ice = await this.opts.iceServers(this.profile)
+      const policy = this.profile === "restricted" ? "relay" : this.opts.iceTransportPolicy
       const pc = this.opts.env.createPeer({
         iceServers: ice.servers,
-        ...(this.opts.iceTransportPolicy === undefined
-          ? {}
-          : { iceTransportPolicy: this.opts.iceTransportPolicy }),
+        ...(policy === undefined ? {} : { iceTransportPolicy: policy }),
       })
       this.pc = pc
       this.scheduleRefresh(ice.ttlSeconds)
+      this.armDirectAttempt()
       stream.getTracks().forEach((track) => {
         // Камера — это движение, а не неподвижная картинка: кодек бережёт плавность,
         // а не резкость каждого кадра.
@@ -393,7 +413,7 @@ export class CallEngine {
     const pc = this.pc
     if (pc === null || this.closed) return
     try {
-      const ice = await this.opts.iceServers()
+      const ice = await this.opts.iceServers(this.profile)
       if (this.closed) return
       pc.setConfiguration({ ...pc.getConfiguration(), iceServers: ice.servers })
       this.scheduleRefresh(ice.ttlSeconds)
@@ -452,11 +472,67 @@ export class CallEngine {
         return
       case "failed":
         this.startReconnect()
+        // Все пары отвергнуты, а связи не было: сразу в `restricted`, не дожидаясь срока.
+        if (this.profile === "normal" && this.lastReported === null) {
+          void this.escalate()
+          return
+        }
         if (this.opts.role === "caller") void this.enqueue(() => this.offer(true))
         return
       default:
         return
     }
+  }
+
+  // --- профиль RESTRICTED (RES-011) --------------------------------------------------
+
+  /**
+   * Прямой попытке дан ограниченный срок (`DIRECT_ATTEMPT_MS`). Не соединились — звонок не
+   * ждёт общего окна установки (30 с), а переходит на relay-only через `turns:`: сеть, где
+   * UDP и прямой путь режутся, иначе теряла бы на ожидании полминуты, а то и весь звонок.
+   * Уже работающая связь переход не запускает.
+   */
+  private armDirectAttempt(): void {
+    if (this.profile !== "normal" || this.opts.iceTransportPolicy === "relay") return
+    this.directTimer = this.timers.setTimeout(() => {
+      this.directTimer = null
+      if (!this.closed && this.lastReported === null && this.pc?.connectionState !== "connected") {
+        void this.escalate()
+      }
+    }, this.opts.directAttemptMs ?? DIRECT_ATTEMPT_MS)
+  }
+
+  /**
+   * Переход `normal` → `restricted`: данные только с `turns:`, `iceTransportPolicy=relay` на живом
+   * соединении (`setConfiguration`) и перезапуск ICE. Звонящий предлагает заново; вызываемый лишь
+   * переставляет конфигурацию и отвечает на перезапуск. Если у сервера нет `turns:` (пустой
+   * список), переход бессмыслен: звонок остаётся в `normal` и ждёт общего окна. Браузер, не
+   * принявший смену политики на лету, оставляет прежнюю: перезапуск всё равно идёт.
+   */
+  private escalate(): Promise<void> {
+    if (this.directTimer !== null) {
+      this.timers.clearTimeout(this.directTimer)
+      this.directTimer = null
+    }
+    return this.enqueue(async () => {
+      const pc = this.pc
+      if (pc === null || this.profile === "restricted") return
+      const ice = await this.opts.iceServers("restricted")
+      if (this.closed || ice.servers.length === 0) return
+      this.profile = "restricted"
+      this.opts.onProfile?.("restricted")
+      try {
+        pc.setConfiguration({
+          ...pc.getConfiguration(),
+          iceServers: ice.servers,
+          iceTransportPolicy: "relay",
+        })
+      } catch {
+        // не принято на лету: перезапуск пойдёт с прежней политикой
+      }
+      this.scheduleRefresh(ice.ttlSeconds)
+      if (this.opts.role === "caller") await this.offer(true)
+    })
   }
 
   private startReconnect(): void {
@@ -514,7 +590,7 @@ export class CallEngine {
       if (type === this.lastReported) return
       this.lastReported = type
       if (first) this.applyQuality()
-      this.opts.onConnected(type, detail)
+      this.opts.onConnected(type, { ...detail, profile: this.profile })
     } finally {
       this.measuring = false
     }
@@ -623,6 +699,7 @@ export class CallEngine {
     this.clearReconnect()
     if (this.flushTimer !== null) this.timers.clearTimeout(this.flushTimer)
     if (this.refreshTimer !== null) this.timers.clearTimeout(this.refreshTimer)
+    if (this.directTimer !== null) this.timers.clearTimeout(this.directTimer)
     this.local?.getTracks().forEach((track) => track.stop())
     if (this.pc !== null) {
       this.pc.ontrack = null

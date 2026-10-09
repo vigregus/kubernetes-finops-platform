@@ -254,6 +254,20 @@ async def run() -> None:
             other = theirs.json().get("ice_servers", [{}])[0].get("username") if theirs.status_code == 200 else None
             check("у второго участника другое имя", other is not None
                   and other != servers[0].get("username"), str(other))
+            # RES-011: профиль RESTRICTED — только turns:, без STUN и turn: по UDP/TCP 3478.
+            restricted = await call("GET", f"/calls/{call_id}/ice-servers?profile=restricted", a)
+            r_urls = [url for srv in restricted.json().get("ice_servers", []) for url in srv["urls"]] \
+                if restricted.status_code == 200 else []
+            check("RES-011: профиль restricted отдаёт только turns: (без STUN, UDP и TCP 3478)",
+                  restricted.status_code == 200 and bool(r_urls)
+                  and all(url.startswith("turns:") for url in r_urls), str(r_urls))
+            normal_urls = [url for srv in servers for url in srv["urls"]]
+            check("RES-011: normal по-прежнему отдаёт и turn:, и turns:",
+                  any(url.startswith("turn:") for url in normal_urls)
+                  and any(url.startswith("turns:") for url in normal_urls), str(normal_urls))
+            unknown = await call("GET", f"/calls/{call_id}/ice-servers?profile=turbo", a)
+            check("RES-011: неизвестный профиль отвергнут (422)", unknown.status_code == 422,
+                  f"{unknown.status_code}")
             # Данные, выданные самим API, принимает настоящий coturn: цепочка
             # API → общий секрет → подпись → сервер замкнута, а не проверена по частям.
             host = os.environ.get("TURN_ADDRESS", "messenger-turn.messenger.svc.cluster.local")
@@ -276,7 +290,8 @@ async def run() -> None:
 
             # --- активен, трубка, итог ------------------------------------------------
             active = await call("POST", f"/calls/{call_id}/connected", a, {
-                "connection_type": "relay", "media_path": "relay", "turn_transport": "tls"})
+                "connection_type": "relay", "media_path": "relay", "turn_transport": "tls",
+                "profile": "restricted"})
             check("медиа пошло (RES-009: путь и транспорт TURN приняты): active", active.status_code == 200 and active.json().get("state") == "active",
                   active.text[:120])
             keep = await call("POST", f"/calls/{call_id}/keepalive", b)

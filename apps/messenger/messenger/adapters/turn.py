@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -209,28 +210,146 @@ def _parse_ice_servers(body: object) -> list[IceServer] | None:
     return result or None
 
 
-def provider_from_env() -> TurnProvider:
-    """`TURN_PROVIDER`: `coturn`, `cloudflare` или (по умолчанию) фиксированный список STUN."""
-    kind = os.getenv("TURN_PROVIDER", "static").strip().lower()
-    if kind == "coturn":
-        secret = os.getenv("TURN_COTURN_SECRET", "")
-        urls = tuple(
-            url.strip() for url in os.getenv("TURN_COTURN_URLS", "").split(",") if url.strip()
+TURN_ENDPOINT_TIMEOUT_SECONDS = 3.0
+
+
+def restricted_only(servers: list[IceServer]) -> list[IceServer]:
+    """Профиль `RESTRICTED` (`RES-011`): только `turns:` (TLS), без UDP, TCP 3478 и STUN.
+
+    STUN в этом профиле бесполезен (`iceTransportPolicy=relay` не использует srflx) и
+    выдаёт адрес клиента внешнему серверу; `turn:` по UDP или TCP 3478 — это именно то, что
+    простая фильтрация режет. Серверы без единого `turns:` отбрасываются целиком.
+    """
+    result: list[IceServer] = []
+    for server in servers:
+        urls = tuple(url for url in server.urls if url.startswith("turns:"))
+        if urls:
+            result.append(
+                IceServer(urls=urls, username=server.username, credential=server.credential)
+            )
+    return result
+
+
+@dataclass(slots=True)
+class CompositeTurnProvider:
+    """Несколько TURN (`RES-006`): список клиента — объединение того, что выдали провайдеры.
+
+    Отказ или медленный ответ одного не лишает звонок остальных: каждый опрашивается
+    параллельно под своим сроком, а недоступный пропускается. Все недоступны — `None`,
+    как у одного провайдера (звонок идёт без релея). Браузер выбирает рабочий TURN сам
+    (ICE проверяет кандидаты со всех серверов), поэтому порядок серверов не обещает
+    приоритета; важно, что они **разных площадок** — иначе второй TURN ничего не даёт.
+
+    Исход по каждому провайдеру (`ok`, `unavailable`, `timeout`) уходит в `observe`:
+    из него строится здоровье точек (`RES-014`).
+    """
+
+    providers: tuple[tuple[str, TurnProvider], ...]
+    timeout_seconds: float = TURN_ENDPOINT_TIMEOUT_SECONDS
+    observe: Callable[[str, str], None] = field(default=lambda name, result: None, repr=False)
+
+    async def _one(
+        self,
+        name: str,
+        provider: TurnProvider,
+        ttl_seconds: int,
+        expires_at: int | None,
+        subject: str | None,
+    ) -> list[IceServer] | None:
+        try:
+            servers = await asyncio.wait_for(
+                provider.ice_servers(
+                    ttl_seconds=ttl_seconds, expires_at=expires_at, subject=subject
+                ),
+                timeout=self.timeout_seconds,
+            )
+        except TimeoutError:
+            self.observe(name, "timeout")
+            return None
+        except Exception as exc:  # провайдер не должен ронять выдачу остальных
+            log.warning(
+                "TURN провайдер упал",
+                extra={
+                    "event": "turn_unavailable",
+                    "result": "failed",
+                    "error_code": type(exc).__name__,
+                    "dependency": name,
+                },
+            )
+            self.observe(name, "unavailable")
+            return None
+        self.observe(name, "ok" if servers is not None else "unavailable")
+        return servers
+
+    async def ice_servers(
+        self,
+        *,
+        ttl_seconds: int,
+        expires_at: int | None = None,
+        subject: str | None = None,
+    ) -> list[IceServer] | None:
+        results = await asyncio.gather(
+            *(
+                self._one(name, provider, ttl_seconds, expires_at, subject)
+                for name, provider in self.providers
+            )
         )
-        if secret and urls:
-            return CoturnProvider(secret=secret, urls=urls)
-        log.warning(
-            "coturn не настроен, звонки идут без релея",
-            extra={"event": "turn_unconfigured", "result": "failed"},
-        )
-    if kind == "cloudflare":
-        key_id = os.getenv("TURN_CLOUDFLARE_KEY_ID", "")
-        token = os.getenv("TURN_CLOUDFLARE_API_TOKEN", "")
-        if key_id and token:
-            return CloudflareProvider(key_id=key_id, api_token=token)
-        log.warning(
-            "TURN Cloudflare не настроен, звонки идут без релея",
-            extra={"event": "turn_unconfigured", "result": "failed"},
+        merged = [server for servers in results if servers for server in servers]
+        return merged or None
+
+
+def _coturn_from_env(prefix: str) -> CoturnProvider | None:
+    secret = os.getenv(f"{prefix}_SECRET", "")
+    urls = tuple(url.strip() for url in os.getenv(f"{prefix}_URLS", "").split(",") if url.strip())
+    return CoturnProvider(secret=secret, urls=urls) if secret and urls else None
+
+
+def provider_from_env(
+    observe: Callable[[str, str], None] | None = None,
+) -> TurnProvider:
+    """`TURN_PROVIDER`: `coturn`, `coturn-<имя>`, `cloudflare` (через запятую) или STUN.
+
+    `coturn` читает `TURN_COTURN_SECRET`/`TURN_COTURN_URLS`, `coturn-b` — `TURN_COTURN_B_SECRET`/
+    `TURN_COTURN_B_URLS`. Несколько настроенных провайдеров собираются в `CompositeTurnProvider`
+    (`RES-006`); ненастроенный пропускается с предупреждением, остальные работают. Ни одного
+    настроенного — запасной список STUN.
+    """
+    kinds = [
+        kind.strip().lower()
+        for kind in os.getenv("TURN_PROVIDER", "static").split(",")
+        if kind.strip()
+    ] or ["static"]
+    built: list[tuple[str, TurnProvider]] = []
+    for kind in kinds:
+        provider: TurnProvider | None = None
+        if kind == "coturn" or kind.startswith("coturn-"):
+            suffix = kind.removeprefix("coturn").removeprefix("-").upper().replace("-", "_")
+            prefix = f"TURN_COTURN_{suffix}" if suffix else "TURN_COTURN"
+            provider = _coturn_from_env(prefix)
+        elif kind == "cloudflare":
+            key_id = os.getenv("TURN_CLOUDFLARE_KEY_ID", "")
+            token = os.getenv("TURN_CLOUDFLARE_API_TOKEN", "")
+            if key_id and token:
+                provider = CloudflareProvider(key_id=key_id, api_token=token)
+        elif kind != "static":
+            log.warning(
+                "неизвестный провайдер TURN",
+                extra={"event": "turn_unconfigured", "result": "failed", "dependency": kind},
+            )
+            continue
+        if provider is None:
+            if kind != "static":
+                log.warning(
+                    "TURN не настроен, пропущен",
+                    extra={"event": "turn_unconfigured", "result": "failed", "dependency": kind},
+                )
+            continue
+        built.append((kind, provider))
+    if len(built) == 1 and len(kinds) == 1:
+        return built[0][1]
+    if built:
+        return CompositeTurnProvider(
+            providers=tuple(built), observe=observe or (lambda name, result: None)
         )
     urls = tuple(
         url.strip() for url in os.getenv("TURN_STUN_URLS", "").split(",") if url.strip()

@@ -76,6 +76,8 @@ TURN_REQUESTS_PER_MINUTE = 30
 # из этих множеств (иначе чужая строка становится новой серией).
 MEDIA_PATHS = ("host", "srflx", "prflx", "relay")
 TURN_TRANSPORTS = ("udp", "tcp", "tls")
+# Профиль соединения (RES-011): `restricted` — relay-only через `turns:`.
+CALL_PROFILES = ("normal", "restricted")
 
 # Таксономия отказов (`docs/messenger/18-…`, §8). Одной причины «звонок упал»
 # недостаточно: нужно отличать сетевую деградацию от ошибки приложения и от отказа

@@ -41,7 +41,12 @@ push-подписки. Кнопка недоступна с причиной, а
 секрет в `messenger-secrets`), частные диапазоны закрыты (`--denied-peer-ip`), потолки `--bps-capacity`, `--user-quota`, `--total-quota`.
 
 - **Узел недоступен.** Клиент делает ICE restart в пределах 15 с; релейные звонки переустанавливаются, прямые не затронуты (`CALL-016`).
-  Если второго TURN нет (`RES-006`), релейные звонки в этот период не соединяются.
+  Если второго TURN нет, релейные звонки в этот период не соединяются. Второй TURN (`RES-006`) подключается переменными
+  `TURN_PROVIDER=coturn,coturn-b`, `TURN_COTURN_B_SECRET`, `TURN_COTURN_B_URLS` (свой секрет и адрес у каждого); недоступный провайдер
+  пропускается, исход виден в `messenger_turn_endpoint_total{endpoint,result}` (`ok`, `unavailable`, `timeout`).
+- **Профиль `RESTRICTED` (`RES-011`).** Звонок, у которого прямая попытка не удалась за 9 с (или все пары отвергнуты), переходит на
+  relay-only через `turns:`; устройство помнит это 30 минут. Доля — `messenger_call_profile_total{profile="restricted"}`. Рост доли — сеть режет
+  прямой путь, и нагрузка на coturn (`--max-bps`, `--total-quota`) растёт пропорционально. Выключить «залипание»: очистить `messenger.call.profile` в localStorage.
 - **TURN/TLS на 443 (`RES-005`).** Отдельная служба `messenger-turn-tls` (443 → 5349 в поде), имя `turns.finops.local`, сертификат `messenger-turn-tls`
   (cert-manager, локальный CA). Под без секрета с сертификатом не запустится. Признак отказа: звонки в закрытых сетях не соединяются, доля `turn_transport="tls"`
   в `messenger_call_media_path_total` падает. Проверка: `tests/integration/turn_check.py` (рукопожатие, релей по TLS); браузерная `RES-A4` (`E2E_TURNS_ADDR`).

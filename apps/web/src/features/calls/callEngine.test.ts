@@ -13,6 +13,8 @@ import {
   selectedPath,
   encodingFor,
   mediaConstraints,
+  DIRECT_ATTEMPT_MS,
+  type CallProfile,
   type ConnectionDetail,
   type EngineOptions,
   type WireSignal,
@@ -144,6 +146,8 @@ interface Rig {
   details: ConnectionDetail[]
   timers: Array<{ id: number; fn: () => void; ms: number; cleared: boolean }>
   media: { requests: MediaStreamConstraints[] }
+  /** Конфигурации, с которыми движок создавал соединение. */
+  created: RTCConfiguration[]
 }
 
 function rig(overrides: Partial<EngineOptions> & { mediaFails?: Array<boolean> } = {}): Rig {
@@ -153,6 +157,7 @@ function rig(overrides: Partial<EngineOptions> & { mediaFails?: Array<boolean> }
   const details: ConnectionDetail[] = []
   const timers: Rig["timers"] = []
   const media: Rig["media"] = { requests: [] }
+  const created: RTCConfiguration[] = []
   const fails = [...(overrides.mediaFails ?? [])]
   const base: EngineOptions = {
     env: {
@@ -163,7 +168,10 @@ function rig(overrides: Partial<EngineOptions> & { mediaFails?: Array<boolean> }
         if (constraints.video) tracks.push(new FakeTrack("video"))
         return new FakeStream(tracks) as unknown as MediaStream
       },
-      createPeer: () => peer as unknown as RTCPeerConnection,
+      createPeer: (config) => {
+        created.push(config)
+        return peer as unknown as RTCPeerConnection
+      },
     },
     role: "caller",
     kind: "audio",
@@ -192,7 +200,7 @@ function rig(overrides: Partial<EngineOptions> & { mediaFails?: Array<boolean> }
   }
   const { mediaFails: _ignored, ...rest } = overrides
   void _ignored
-  return { engine: new CallEngine({ ...base, ...rest }), peer, sent, events, details, timers, media }
+  return { engine: new CallEngine({ ...base, ...rest }), peer, sent, events, details, timers, media, created }
 }
 
 const fire = (r: Rig, ms: number) => {
@@ -323,7 +331,7 @@ describe("соединение и обрыв (CALL-011)", () => {
     ])
     r.peer.emitState("connected")
     await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(r.details).toEqual([{ mediaPath: "relay", turnTransport: "tls" }])
+    expect(r.details).toEqual([{ mediaPath: "relay", turnTransport: "tls", profile: "normal" }])
   })
 
   it("прямой путь не несёт транспорта TURN, а чужая строка не становится значением", async () => {
@@ -754,5 +762,132 @@ describe("отладочный выбор транспорта TURN (RES-005/RES
   it("сервер без подходящих адресов отбрасывается целиком", () => {
     const only: RTCIceServer[] = [{ urls: "turn:t:3478?transport=udp", username: "u", credential: "c" }]
     expect(filterTurnTransport(only, "tls")).toEqual([])
+  })
+})
+
+
+describe("профиль RESTRICTED (RES-011)", () => {
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
+  const NORMAL = [{ urls: ["stun:s", "turn:t:3478"], username: "u", credential: "c" }]
+  const TLS = [{ urls: ["turns:t:443?transport=tcp"], username: "u", credential: "c" }]
+
+  /** `iceServers` помнит, какой профиль у него просили, и отдаёт список под профиль. */
+  function profileRig(overrides: Partial<EngineOptions> = {}, restricted: RTCIceServer[] = TLS) {
+    const asked: CallProfile[] = []
+    const profiles: CallProfile[] = []
+    const r = rig({
+      iceServers: async (profile) => {
+        asked.push(profile)
+        return { servers: profile === "restricted" ? restricted : NORMAL, ttlSeconds: 600 }
+      },
+      onProfile: (profile) => profiles.push(profile),
+      ...overrides,
+    })
+    return { ...r, asked, profiles }
+  }
+
+  it("обычный звонок начинается с normal и без политики relay; срок прямой попытки задан", async () => {
+    const r = profileRig()
+    await r.engine.start()
+    expect(r.asked).toEqual(["normal"])
+    expect(r.created[0].iceTransportPolicy).toBeUndefined()
+    expect(r.timers.some((t) => t.ms === DIRECT_ATTEMPT_MS && !t.cleared)).toBe(true)
+  })
+
+  it("не соединились за срок — relay-only через turns: и перезапуск ICE", async () => {
+    const r = profileRig()
+    await r.engine.start()
+    fire(r, DIRECT_ATTEMPT_MS)
+    await flush()
+    expect(r.asked).toEqual(["normal", "restricted"])
+    expect(r.profiles).toEqual(["restricted"])
+    const applied = r.peer.configurations.at(-1)
+    expect(applied?.iceTransportPolicy).toBe("relay")
+    expect(applied?.iceServers).toEqual(TLS)
+    // звонящий предлагает заново с перезапуском ICE
+    expect(r.peer.offers.at(-1)).toEqual({ iceRestart: true })
+  })
+
+  it("уже соединившийся звонок срок прямой попытки не трогает", async () => {
+    const r = profileRig()
+    await r.engine.start()
+    r.peer.emitState("connected")
+    await new Promise((resolve) => setTimeout(resolve, 2300))
+    fire(r, DIRECT_ATTEMPT_MS)
+    await flush()
+    expect(r.asked).toEqual(["normal"])
+    expect(r.profiles).toEqual([])
+  })
+
+  it("все пары отвергнуты до связи — переход сразу, не дожидаясь срока", async () => {
+    const r = profileRig()
+    await r.engine.start()
+    r.peer.emitState("failed")
+    await flush()
+    expect(r.profiles).toEqual(["restricted"])
+    expect(r.peer.configurations.at(-1)?.iceTransportPolicy).toBe("relay")
+  })
+
+  it("начатый в restricted: relay и turns: с первой секунды, срок прямой попытки не заводится", async () => {
+    const r = profileRig({ profile: "restricted" })
+    await r.engine.start()
+    expect(r.asked).toEqual(["restricted"])
+    expect(r.created[0].iceTransportPolicy).toBe("relay")
+    expect(r.created[0].iceServers).toEqual(TLS)
+    expect(r.timers.some((t) => t.ms === DIRECT_ATTEMPT_MS)).toBe(false)
+  })
+
+  it("у сервера нет turns: — остаёмся в normal, политика не меняется", async () => {
+    const r = profileRig({}, [])
+    await r.engine.start()
+    fire(r, DIRECT_ATTEMPT_MS)
+    await flush()
+    expect(r.profiles).toEqual([])
+    expect(r.peer.configurations.some((c) => c.iceTransportPolicy === "relay")).toBe(false)
+    expect(r.peer.offers).toHaveLength(1)
+  })
+
+  it("вызываемый переставляет конфигурацию, но не предлагает сам", async () => {
+    const r = profileRig({ role: "callee" })
+    await r.engine.start()
+    fire(r, DIRECT_ATTEMPT_MS)
+    await flush()
+    expect(r.profiles).toEqual(["restricted"])
+    expect(r.peer.configurations.at(-1)?.iceTransportPolicy).toBe("relay")
+    expect(r.peer.offers).toHaveLength(0)
+  })
+
+  it("принудительный relay (forceRelay) срок прямой попытки не заводит", async () => {
+    const r = profileRig({ iceTransportPolicy: "relay" })
+    await r.engine.start()
+    expect(r.timers.some((t) => t.ms === DIRECT_ATTEMPT_MS)).toBe(false)
+  })
+
+  it("профиль, в котором звонок соединился, уходит в подробности пути", async () => {
+    const r = profileRig({ profile: "restricted" })
+    await r.engine.start()
+    r.peer.stats = relayPair()
+    r.peer.emitState("connected")
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    await flush()
+    expect(r.details.at(-1)?.profile).toBe("restricted")
+  })
+
+  it("обновление данных TURN идёт под текущим профилем", async () => {
+    const r = profileRig()
+    await r.engine.start()
+    fire(r, DIRECT_ATTEMPT_MS)
+    await flush()
+    r.asked.length = 0
+    fire(r, 540_000)
+    await flush()
+    expect(r.asked).toEqual(["restricted"])
+  })
+
+  it("срок прямой попытки снимается при завершении звонка", async () => {
+    const r = profileRig()
+    await r.engine.start()
+    r.engine.close()
+    expect(r.timers.filter((t) => t.ms === DIRECT_ATTEMPT_MS).every((t) => t.cleared)).toBe(true)
   })
 })
