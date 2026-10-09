@@ -298,13 +298,39 @@ def tls_checks(host: str, secret: str) -> None:
         old.minimum_version = ssl.TLSVersion.TLSv1
     except (ValueError, ssl.SSLError):
         pass
-    refused = False
     try:
-        raw = socket.create_connection((socket.gethostbyname(tls_host), 443), timeout=5.0)
-        old.wrap_socket(raw, server_hostname="turns.finops.local").close()
-    except (OSError, ssl.SSLError, ValueError):
-        refused = True
-    check(f"{prefix}TLS 1.1 и ниже отвергнуты", refused)
+        old.set_ciphers("DEFAULT:@SECLEVEL=0")
+    except ssl.SSLError:
+        pass
+    # Отказ засчитывается, только если ClientHello ушёл и ответил сервер: тревога протокола,
+    # закрытие или сброс соединения. Если локальный OpenSSL сам не способен начать TLS ≤1.1
+    # (нет протоколов или шифров), это не отказ сервера: вывод «не доказано», а не «пройдено».
+    local_limits = ("NO_PROTOCOLS_AVAILABLE", "UNSUPPORTED_PROTOCOL", "NO_CIPHERS_AVAILABLE",
+                    "NO_SUITABLE_DIGEST_ALGORITHM", "UNSUPPORTED_PROTOCOL_VERSION")
+    verdict = None
+    detail = ""
+    raw = socket.create_connection((socket.gethostbyname(tls_host), 443), timeout=5.0)
+    try:
+        try:
+            old.wrap_socket(raw, server_hostname="turns.finops.local").close()
+            verdict = False
+            detail = "сервер принял TLS ≤1.1"
+        finally:
+            raw.close()
+    except ssl.SSLError as error:
+        text = f"{getattr(error, 'reason', '')} {error}"
+        if any(limit in text for limit in local_limits):
+            detail = f"локальный OpenSSL не начинает TLS ≤1.1: {text.strip()}"
+        else:
+            verdict = True
+            detail = text.strip()
+    except (OSError, ValueError) as error:
+        verdict = True
+        detail = f"{type(error).__name__}: {error}"
+    if verdict is None:
+        print(f"    - {prefix}TLS 1.1 и ниже: не доказано ({detail}); пропуск, не отказ сервера")
+    else:
+        check(f"{prefix}TLS 1.1 и ниже отвергнуты", verdict, detail if not verdict else "")
 
     client = TurnTlsClient(tls_host)
     username, password = credentials(secret)
