@@ -289,13 +289,14 @@ test.describe("G4: звонки", () => {
 	 * RES-A4 / RES-007: UDP и TCP 3478 закрыты — звонок идёт через TURN/TLS :443.
 	 *
 	 * Закрыты они не имитацией, а положением вещей: браузер достаёт до TURN **только** по
-	 * `turns:` (адрес `turns.finops.local:443` отображается на проброшенный порт службы
-	 * `messenger-turn-tls`, `E2E_TURNS_PORT`, правило хоста в `playwright.config.ts`), а
-	 * `turn.finops.local:3478` с этой машины не разрешается. Выбранная пара — релейная,
+	 * `turns:` (адрес `turns.finops.local:443` отображается на достижимый адрес службы
+	 * `messenger-turn-tls`, `E2E_TURNS_ADDR=host:port`, правило хоста в `playwright.config.ts`), а
+	 * `turn.finops.local:3478` с этой машины не разрешается. Через `kubectl port-forward` на loopback
+	 * не работает: Chromium закрывает такое соединение, не отправив ни байта (проверено на стенде). Выбранная пара — релейная,
 	 * транспорт TURN — `tls`, а медиа растёт: путь не просто выбран, а несёт звук и картинку.
 	 */
 	test("RES-A4: только TURN/TLS :443 — релей по tls, медиа идёт", async () => {
-		test.skip(!process.env.E2E_TURNS_PORT, "TLS-порт TURN не проброшен (E2E_TURNS_PORT)")
+		test.skip(!process.env.E2E_TURNS_ADDR, "адрес TURN/TLS не задан (E2E_TURNS_ADDR)")
 		for (const who of [a, b]) {
 			await who.page.evaluate(() => {
 				window.localStorage.setItem("messenger.call.forceRelay", "1")

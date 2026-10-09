@@ -163,11 +163,11 @@ Strimzi и другие) на значениях по умолчанию, и и�
   Когда внешний адрес задан, исключение «свой под — допустимый пир» выключается
   само: оно включается только **без** него (скрипт запуска в манифесте).
 - **TURN/TLS на 443 (`RES-005`).** Отдельная служба `messenger-turn-tls` и имя `turns.finops.local` (свой адрес, свой сертификат
-  от cert-manager). Для браузерной приёмки без внешнего адреса порт пробрасывается:
-  `kubectl -n messenger port-forward svc/messenger-turn-tls 8443:443`, затем
-  `E2E_TURNS_PORT=8443 scripts/web-e2e-fixture.sh test --project=g4 -g RES-A4`: Chromium отображает `turns.finops.local:443` на
-  проброшенный порт, а `turn.finops.local:3478` с машины не разрешается — доступен только TLS. Проверка протокола —
-  `INTEGRATION_ONLY=turn_check.py scripts/integration-messenger.sh` (рукопожатие, релей по TLS).
+  от cert-manager). Браузерная приёмка `RES-A4` нужна на достижимом адресе: `E2E_TURNS_ADDR=<host:port> scripts/web-e2e-fixture.sh test --project=g4 -g RES-A4`
+  (Chromium отображает `turns.finops.local:443` на этот адрес, `turn.finops.local:3478` с машины не разрешается). Проброс порта на loopback
+  (`kubectl port-forward`) не годится: Chromium открывает соединение с `127.0.0.1` и тут же закрывает его, не отправив ни байта, как для TLS, так и для TCP 3478.
+  Без достижимого адреса проверяется протокол: `INTEGRATION_ONLY=turn_check.py scripts/integration-messenger.sh` (рукопожатие, TLS 1.2+, релей по TLS;
+  образ задаётся `INTEGRATION_IMAGE`, если тег в `values.yaml` старше).
 - Данные TURN выдаются участнику **принятого** звонка и живут 5–10 минут: coturn не
   знает о таблице звонков, и долгие данные пережили бы звонок. Долгий звонок
   обновляет их сам (клиент берёт новые за минуту до конца срока). Имя
