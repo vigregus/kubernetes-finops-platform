@@ -309,6 +309,11 @@ paths:
       operationId: failCall
       parameters:
         - { $ref: '#/components/parameters/CallId' }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CallFailed' }
       responses:
         '200': { $ref: '#/components/responses/CallState' }
         '401': { $ref: '#/components/responses/Unauthorized' }
@@ -1261,6 +1266,26 @@ components:
           type: string
           enum: [direct, relay]
           description: Путь медиа по `getStats()`; из него считается доля релея.
+        media_path:
+          type: string
+          enum: [host, srflx, prflx, relay]
+          description: Тип выбранного локального кандидата; идёт в метрику пути (RES-009).
+        turn_transport:
+          type: string
+          enum: [udp, tcp, tls]
+          description: Транспорт TURN у релея (`relayProtocol` в `getStats()`); без релея не передаётся.
+
+    CallFailed:
+      type: object
+      additionalProperties: false
+      properties:
+        reason:
+          type: string
+          maxLength: 64
+          description: |
+            Причина по таксономии отказов (часть 18, §8): `ice_connect_timeout`, `ice_disconnected`,
+            `media_stalled`, `signal_timeout`, `media_denied`, `unknown` и другие. Неизвестное сервер
+            считает как `unknown`.
 
     Call:
       type: object

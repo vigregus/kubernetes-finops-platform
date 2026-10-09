@@ -611,7 +611,9 @@ TURN-доступа не даёт.
 | Принудительный релей (`iceTransportPolicy: relay`) | 🟡 флаг и тест в кластере есть; браузерная проверка пропускается без `E2E_TURN_RELAY` |
 | Смена сети, ICE restart, метрика «direct → relay» | 🟡 клиент и метрика есть; приёмки в сети нет |
 | Тип пути в метриках | 🟡 есть, без разреза по транспорту TURN |
-| TURN/TLS :443; несколько TURN; запасные realtime-транспорты; диагностика; Network Intelligence; `RESTRICTED`; HTTPS-only | ⬜ |
+| Путь выбранной пары и транспорт TURN (`udp`/`tcp`/`tls`), причина отказа по таксономии, сетевая размерность из заголовков шлюза (`RES-009`, часть) | 🟡 клиент и метрики `messenger_call_media_path_total`, `messenger_call_failure_total` есть; GeoIP на шлюзе, `signaling_transport`, панели — нет |
+| TURN/TLS :443 (отдельная служба и сертификат, `RES-005`) и приёмка только по `turns:` (`RES-A4`, `RES-007`) | 🟡 манифесты, проверки `turn_check.py` и спека есть; прогон на стенде и публичный адрес вне minikube — нет |
+| Несколько TURN; запасные realtime-транспорты; диагностика; Network Intelligence; `RESTRICTED`; HTTPS-only | ⬜ |
 | Звонки по ссылке | ⬜ |
 
 ## 17. Определение готовности

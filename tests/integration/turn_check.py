@@ -23,6 +23,7 @@ import hmac
 import os
 import secrets
 import socket
+import ssl
 import struct
 import sys
 import time
@@ -152,16 +153,72 @@ class TurnClient:
             return None
 
 
+class TurnTlsClient(TurnClient):
+    """Тот же клиент поверх TLS по TCP (`turns:`, RES-005): сообщения те же, меняется только кадрирование.
+
+    По TCP границы датаграмм нет, поэтому ответ читается по длине из заголовка STUN, а
+    ChannelData дополняется до границы в 4 байта (RFC 8656, п. 12.5).
+    """
+
+    def __init__(self, host: str, port: int = 443, *, hostname: str = "turns.finops.local") -> None:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        # Корневой сертификат локального CA в поде проверки не лежит; соответствие имени
+        # и срок проверяются отдельно (`tls_certificate`), здесь — работа протокола.
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        raw = socket.create_connection((socket.gethostbyname(host), port), timeout=5.0)
+        self.sock = context.wrap_socket(raw, server_hostname=hostname)
+        self.sock.settimeout(5.0)
+        self.realm = REALM
+        self.nonce = b""
+        self.version = self.sock.version()
+
+    def _read(self, size: int) -> bytes:
+        data = b""
+        while len(data) < size:
+            chunk = self.sock.recv(size - len(data))
+            if not chunk:
+                raise ConnectionError("TURN/TLS: соединение закрыто")
+            data += chunk
+        return data
+
+    def _frame(self) -> bytes:
+        header = self._read(20)
+        length = struct.unpack("!H", header[2:4])[0]
+        return header + self._read(length)
+
+    def ask(self, payload: bytes) -> tuple[int, dict[int, bytes]]:
+        self.sock.sendall(payload)
+        return parse(self._frame())
+
+    def send(self, peer: tuple[str, int], data: bytes) -> None:
+        self.sock.sendall(message(SEND_INDICATION, [attribute(0x0012, xor_address(*peer)),
+                                                    attribute(0x0013, data)]))
+
+    def send_channel(self, number: int, data: bytes) -> None:
+        self.sock.sendall(struct.pack("!HH", number, len(data)) + data + b"\0" * (-len(data) % 4))
+
+    def receive(self) -> tuple[tuple[str, int], bytes] | None:
+        try:
+            while True:
+                frame = self._frame()
+                if parse(frame)[0] == DATA_INDICATION:
+                    _, attributes = parse(frame)
+                    return decode_xor_address(attributes[0x0012]), attributes[0x0013]
+        except (TimeoutError, ConnectionError):
+            return None
+
+
 def credentials(secret: str, *, ttl: int = 600, subject: str | None = None) -> tuple[str, str]:
     provider = CoturnProvider(secret=secret, urls=("turn:x",))
     server = asyncio.run(provider.ice_servers(ttl_seconds=ttl, subject=subject))[0]
     return server.username or "", server.credential or ""
 
 
-def allocated(host: str, secret: str, subject: str):
+def allocated(host: str, secret: str, subject: str, make=TurnClient):
     """Клиент TURN с выделением: (клиент, имя, пароль, релейный адрес) или `None`."""
     username, password = credentials(secret, subject=subject)
-    client = TurnClient(host)
+    client = make(host)
     client.challenge()
     kind, attributes = client.allocate(username, password)
     if kind != ALLOCATE_OK or 0x0016 not in attributes:
@@ -169,7 +226,7 @@ def allocated(host: str, secret: str, subject: str):
     return client, username, password, decode_xor_address(attributes[0x0016])
 
 
-def relay_traffic(host: str, secret: str) -> None:
+def relay_traffic(host: str, secret: str, make=TurnClient, label_prefix: str = "") -> None:
     """**Данные идут** через релей между двумя клиентами — не только выделение.
 
     Выделение и разрешение доказывают, что сервер принял данные, но не что он
@@ -177,9 +234,9 @@ def relay_traffic(host: str, secret: str) -> None:
     клиент A через свой релей отправляет байты клиенту B (и обратно), и они
     сверяются побайтно.
     """
-    a = allocated(host, secret, f"relay-a-{secrets.token_hex(4)}")
-    b = allocated(host, secret, f"relay-b-{secrets.token_hex(4)}")
-    check("два клиента получили свои релейные адреса", a is not None and b is not None)
+    a = allocated(host, secret, f"relay-a-{secrets.token_hex(4)}", make)
+    b = allocated(host, secret, f"relay-b-{secrets.token_hex(4)}", make)
+    check(f"{label_prefix}два клиента получили свои релейные адреса", a is not None and b is not None)
     if a is None or b is None:
         return
     a_client, a_user, a_pass, a_relay = a
@@ -219,6 +276,56 @@ def relay_traffic(host: str, secret: str) -> None:
               got is not None and got[1] == payload, f"получено: {None if got is None else len(got[1])}")
 
 
+def tls_checks(host: str, secret: str) -> None:
+    """RES-005: TURN/TLS на отдельном адресе — рукопожатие, старые версии TLS, релей через TLS."""
+    tls_host = os.environ.get("TURN_TLS_ADDRESS", "messenger-turn-tls.messenger.svc.cluster.local")
+    prefix = "RES-005 (TLS): "
+    try:
+        probe = TurnTlsClient(tls_host)
+    except (OSError, ssl.SSLError) as error:
+        check(f"{prefix}рукопожатие TLS на порту 443", False, str(error))
+        return
+    check(f"{prefix}рукопожатие TLS на порту 443", probe.version in ("TLSv1.2", "TLSv1.3"),
+          str(probe.version))
+    probe.sock.close()
+
+    # TLS 1.0 и 1.1 отключены на сервере (`--no-tlsv1 --no-tlsv1_1`).
+    old = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    old.check_hostname = False
+    old.verify_mode = ssl.CERT_NONE
+    old.maximum_version = ssl.TLSVersion.TLSv1_1
+    try:
+        old.minimum_version = ssl.TLSVersion.TLSv1
+    except (ValueError, ssl.SSLError):
+        pass
+    refused = False
+    try:
+        raw = socket.create_connection((socket.gethostbyname(tls_host), 443), timeout=5.0)
+        old.wrap_socket(raw, server_hostname="turns.finops.local").close()
+    except (OSError, ssl.SSLError, ValueError):
+        refused = True
+    check(f"{prefix}TLS 1.1 и ниже отвергнуты", refused)
+
+    client = TurnTlsClient(tls_host)
+    username, password = credentials(secret)
+    client.challenge()
+    check(f"{prefix}сервер отвечает вызовом (401 с nonce)", bool(client.nonce))
+    kind, attributes = client.allocate(username, password)
+    check(f"{prefix}выделение релея по данным CoturnProvider получено", kind == ALLOCATE_OK,
+          f"тип {kind:#06x}, код {error_code(attributes)}")
+    for target, label in (("10.0.0.1", "адрес пода (10/8)"), ("169.254.169.254", "метаданные облака")):
+        kind, attributes = client.permit(username, password, target)
+        check(f"{prefix}SEC: разрешение на {label} отвергнуто",
+              kind == PERMISSION_ERR and error_code(attributes) == 403,
+              f"тип {kind:#06x}, код {error_code(attributes)}")
+    other = TurnTlsClient(tls_host)
+    other.challenge()
+    kind, attributes = other.allocate(username, "не-тот-пароль")
+    check(f"{prefix}чужой пароль отвергнут (401)",
+          kind == ALLOCATE_ERR and error_code(attributes) == 401, f"тип {kind:#06x}")
+    relay_traffic(tls_host, secret, TurnTlsClient, prefix)
+
+
 def run() -> None:
     secret = os.environ.get("TURN_COTURN_SECRET", "")
     host = os.environ.get("TURN_ADDRESS", "messenger-turn.messenger.svc.cluster.local")
@@ -256,6 +363,9 @@ def run() -> None:
 
     # --- данные идут через релей: A ↔ B -------------------------------------------------
     relay_traffic(host, secret)
+
+    # --- TURN/TLS на 443 (RES-005) -------------------------------------------------------
+    tls_checks(host, secret)
 
     # --- чужой пароль и просроченный срок -------------------------------------------------
     other = TurnClient(host)

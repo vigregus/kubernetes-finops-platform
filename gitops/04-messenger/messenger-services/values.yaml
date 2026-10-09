@@ -146,7 +146,7 @@ services:
       - name: TURN_PROVIDER
         value: coturn
       - name: TURN_COTURN_URLS
-        value: "turn:turn.finops.local:3478?transport=udp,turn:turn.finops.local:3478?transport=tcp"
+        value: "turn:turn.finops.local:3478?transport=udp,turn:turn.finops.local:3478?transport=tcp,turns:turns.finops.local:443?transport=tcp"
       - name: TURN_COTURN_SECRET
         valueFrom:
           secretKeyRef:

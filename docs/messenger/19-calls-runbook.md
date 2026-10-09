@@ -42,6 +42,9 @@ push-подписки. Кнопка недоступна с причиной, а
 
 - **Узел недоступен.** Клиент делает ICE restart в пределах 15 с; релейные звонки переустанавливаются, прямые не затронуты (`CALL-016`).
   Если второго TURN нет (`RES-006`), релейные звонки в этот период не соединяются.
+- **TURN/TLS на 443 (`RES-005`).** Отдельная служба `messenger-turn-tls` (443 → 5349 в поде), имя `turns.finops.local`, сертификат `messenger-turn-tls`
+  (cert-manager, локальный CA). Под без секрета с сертификатом не запустится. Признак отказа: звонки в закрытых сетях не соединяются, доля `turn_transport="tls"`
+  в `messenger_call_media_path_total` падает. Проверка: `tests/integration/turn_check.py` (рукопожатие, релей по TLS); браузерная `RES-A4` (`E2E_TURNS_PORT`).
 - **Сервис без внешнего адреса.** На стенде `messenger-turn` в `Progressing` (LoadBalancer без адреса): релей из внешних сетей недоступен,
   локальные звонки идут по `host`-кандидатам.
 - **Ротация секрета.** Секрет TURN меняется в `messenger-secrets`; выданные доступы живут 5–10 минут, активные звонки обновляют их
@@ -52,3 +55,12 @@ push-подписки. Кнопка недоступна с причиной, а
 
 Блокировка пользователей и лимит звонков (`CALL-017`), Web Push о звонках (`CALL-018…020`), несколько TURN и TLS на 443 (`RES-005`/`RES-006`),
 панель «Network capabilities» (`RES-012`), звонки по ссылке (`LINK-*`) — по мере реализации дополняют этот файл.
+
+## Путь и причины отказов (RES-009)
+
+- `messenger_call_media_path_total{path,turn_transport,network_country,network_class}`: `path` — `host | srflx | prflx | relay`, `turn_transport` — `udp | tcp | tls` у релея
+  (`none` без релея; `relayProtocol` есть в `getStats()` Chromium, в других браузерах транспорт неизвестен). Доля TLS-релея — `…{path="relay",turn_transport="tls"}` к `…{path="relay"}`.
+- `messenger_call_failure_total{reason,network_country,network_class}`: причины — `ice_connect_timeout` (связь так и не поднялась), `ice_disconnected` (оборвалась после
+  разговора), `media_denied`, `unknown`; остальные значения таксономии (часть 18, §8) заполнят диагностика и запасные транспорты.
+- Страна и класс сети приходят заголовками шлюза `X-Client-Country`, `X-Client-Network-Class`. Без GeoIP на шлюзе они `unknown`, и разреза «в мобильных сетях РФ»
+  нет — это настройка входа, не ошибка приложения. IP не сохраняется и в метки не попадает.

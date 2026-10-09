@@ -29,6 +29,46 @@ export type WireSignal =
 
 export type ConnectionType = "direct" | "relay"
 
+/** Подробности выбранного пути для метрики (RES-009): тип кандидата и транспорт TURN у релея. */
+export type MediaPath = "host" | "srflx" | "prflx" | "relay"
+export type TurnTransport = "udp" | "tcp" | "tls"
+export interface ConnectionDetail {
+  readonly mediaPath?: MediaPath
+  readonly turnTransport?: TurnTransport
+}
+
+/**
+ * Оставляет только серверы TURN с нужным транспортом — отладочный переключатель проверки
+ * TURN/TLS на 443 (`RES-005`/`RES-007`): без него звонок мог бы пойти по UDP или TCP 3478, и
+ * проверка не доказала бы, что работает именно TLS. `turns:` — TLS; `turn:…transport=tcp` — TCP;
+ * `turn:…transport=udp` (или без параметра) — UDP. STUN (`stun:`) не трогается. Серверы
+ * без подходящих адресов отбрасываются целиком.
+ */
+export function filterTurnTransport(
+  servers: readonly RTCIceServer[],
+  transport: TurnTransport,
+): RTCIceServer[] {
+  const matches = (url: string): boolean => {
+    if (url.startsWith("stun:") || url.startsWith("stuns:")) return true
+    if (url.startsWith("turns:")) return transport === "tls"
+    if (!url.startsWith("turn:")) return false
+    const tcp = /[?&]transport=tcp\b/.test(url)
+    return transport === "tcp" ? tcp : transport === "udp" ? !tcp : false
+  }
+  const result: RTCIceServer[] = []
+  for (const server of servers) {
+    const urls = (Array.isArray(server.urls) ? server.urls : [server.urls]).filter(matches)
+    if (urls.length > 0) result.push({ ...server, urls })
+  }
+  return result
+}
+
+/**
+ * Причина отказа по таксономии части 18 (§8) — та, что движок видит сам. Остальные причины
+ * (отказ TURN по транспортам, DNS, TLS) дают диагностика и сервер (`RES-012`).
+ */
+export type FailureReason = "media_denied" | "ice_connect_timeout" | "ice_disconnected" | "unknown"
+
 export interface EngineEnv {
   getUserMedia(constraints: MediaStreamConstraints): Promise<MediaStream>
   createPeer(config: RTCConfiguration): RTCPeerConnection
@@ -54,9 +94,9 @@ export interface EngineOptions {
   readonly onLocalStream: (stream: MediaStream) => void
   readonly onRemoteStream: (stream: MediaStream) => void
   /** Медиа пошло; путь соединения — по `getStats()`. Один раз за звонок. */
-  readonly onConnected: (type: ConnectionType) => void
+  readonly onConnected: (type: ConnectionType, detail: ConnectionDetail) => void
   /** Звонок не состоялся или оборвался: клиент завершает его. */
-  readonly onFailed: (reason: "media_denied" | "failed") => void
+  readonly onFailed: (reason: FailureReason) => void
   /** Начальное качество исходящего видео; по умолчанию `auto`. */
   readonly videoQuality?: VideoQuality
   /** Принудительный релей (проверка TURN): `relay` — кандидаты только через сервер. */
@@ -223,14 +263,14 @@ export class CallEngine {
       try {
         await task()
       } catch {
-        this.fail("failed")
+        this.fail("unknown")
       }
     })
     this.chain = next
     return next
   }
 
-  private fail(reason: "media_denied" | "failed"): void {
+  private fail(reason: FailureReason): void {
     if (this.closed) return
     this.close()
     this.opts.onFailed(reason)
@@ -422,7 +462,9 @@ export class CallEngine {
   private startReconnect(): void {
     if (this.reconnectTimer !== null) return
     this.reconnectTimer = this.timers.setTimeout(
-      () => this.fail("failed"),
+      // Связь, которая уже была, и связь, которая так и не поднялась, — разные отказы:
+      // первый — потеря пути в разговоре, второй — путь не нашёлся вовсе.
+      () => this.fail(this.lastReported === null ? "ice_connect_timeout" : "ice_disconnected"),
       this.opts.reconnectWindowMs ?? 15_000,
     )
   }
@@ -450,9 +492,14 @@ export class CallEngine {
     this.measuring = true
     try {
       let type: ConnectionType | null = null
+      let detail: ConnectionDetail = {}
       for (let attempt = 0; attempt < 4 && type === null && !this.closed; attempt += 1) {
         try {
-          type = await connectionType(this.pc)
+          const selected = await selectedPath(this.pc)
+          if (selected !== null) {
+            type = selected.type
+            detail = selected.detail
+          }
         } catch {
           type = null
         }
@@ -467,7 +514,7 @@ export class CallEngine {
       if (type === this.lastReported) return
       this.lastReported = type
       if (first) this.applyQuality()
-      this.opts.onConnected(type)
+      this.opts.onConnected(type, detail)
     } finally {
       this.measuring = false
     }
@@ -591,6 +638,21 @@ export class CallEngine {
  * выбранная пара ещё не определена (не путать с `direct`: это «пока неизвестно»).
  */
 export async function connectionType(pc: RTCPeerConnection): Promise<ConnectionType | null> {
+  return (await selectedPath(pc))?.type ?? null
+}
+
+const MEDIA_PATHS: readonly string[] = ["host", "srflx", "prflx", "relay"]
+const TURN_TRANSPORTS: readonly string[] = ["udp", "tcp", "tls"]
+
+/**
+ * Выбранная пара: тип соединения и подробности для метрики (`RES-009`). `relayProtocol`
+ * есть в `getStats()` Chromium; где его нет, транспорт TURN остаётся неизвестным и в метрику
+ * не идёт (честнее, чем угадывать). Строки проходят закрытые наборы: от браузера в метку
+ * попадает только известное.
+ */
+export async function selectedPath(
+  pc: RTCPeerConnection,
+): Promise<{ readonly type: ConnectionType; readonly detail: ConnectionDetail } | null> {
   const report = await pc.getStats()
   const byId = new Map<string, Record<string, unknown>>()
   report.forEach((value: Record<string, unknown>, key: string) => byId.set(key, value))
@@ -611,5 +673,17 @@ export async function connectionType(pc: RTCPeerConnection): Promise<ConnectionT
   if (pair === undefined) return null
   const local = byId.get(String(pair["localCandidateId"]))
   const remote = byId.get(String(pair["remoteCandidateId"]))
-  return local?.["candidateType"] === "relay" || remote?.["candidateType"] === "relay" ? "relay" : "direct"
+  const relayed = local?.["candidateType"] === "relay" || remote?.["candidateType"] === "relay"
+  const localType = String(local?.["candidateType"] ?? "")
+  const mediaPath = relayed ? "relay" : localType
+  const protocol = String(local?.["relayProtocol"] ?? "")
+  return {
+    type: relayed ? "relay" : "direct",
+    detail: {
+      ...(MEDIA_PATHS.includes(mediaPath) ? { mediaPath: mediaPath as MediaPath } : {}),
+      ...(local?.["candidateType"] === "relay" && TURN_TRANSPORTS.includes(protocol)
+        ? { turnTransport: protocol as TurnTransport }
+        : {}),
+    },
+  }
 }

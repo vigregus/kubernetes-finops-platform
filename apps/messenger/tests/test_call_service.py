@@ -20,6 +20,7 @@ from messenger.domain.conversation import (
 from messenger.domain.errors import Reason
 from messenger.domain.ids import ConversationId, UserId
 from messenger.services import calls as service
+from messenger.telemetry.network import NetworkContext
 
 A = UserId(uuid.uuid4())
 B = UserId(uuid.uuid4())
@@ -901,3 +902,83 @@ def test_повтор_того_же_пути_ничего_не_меняет(stor
     connect_as(call_id, A, "direct")
     connect_as(call_id, A, "direct")
     assert counted == ["direct"]
+
+
+# --- RES-009: путь, транспорт TURN и причина отказа в метриках ---------------------------
+
+
+@pytest.fixture
+def seen(monkeypatch):
+    """Что ушло в метрики пути и отказов."""
+    records = {"paths": [], "failures": []}
+    monkeypatch.setattr(
+        service.metrics, "call_media_path", lambda *args: records["paths"].append(args)
+    )
+    monkeypatch.setattr(
+        service.metrics, "call_failure", lambda *args: records["failures"].append(args)
+    )
+    return records
+
+
+def test_путь_и_транспорт_релея_пишутся_один_раз_за_звонок(store, seen):
+    rt = Realtime()
+    call_id = accepted_call(store)
+    net = NetworkContext(country="RU", net_class="mobile")
+    for _ in range(2):
+        run(service.report_connected(
+            Conn(), realtime=rt, user_id=A, call_id=call_id, connection_type="relay",
+            media_path="relay", turn_transport="tls", network=net))
+    assert seen["paths"] == [("relay", "tls", "RU", "mobile")]
+
+
+def test_прямой_путь_пишется_без_транспорта(store, seen):
+    rt = Realtime()
+    call_id = accepted_call(store)
+    run(service.report_connected(
+        Conn(), realtime=rt, user_id=A, call_id=call_id, connection_type="direct",
+        media_path="srflx", turn_transport="udp"))
+    # транспорт TURN при нерелейном пути не считается: иначе «direct через tls» сбивало бы долю
+    assert seen["paths"] == [("srflx", "none", "unknown", "unknown")]
+
+
+def test_старый_клиент_без_подробностей_получает_путь_по_типу_соединения(store, seen):
+    rt = Realtime()
+    call_id = accepted_call(store)
+    run(service.report_connected(
+        Conn(), realtime=rt, user_id=A, call_id=call_id, connection_type="relay"))
+    assert seen["paths"] == [("relay", "none", "unknown", "unknown")]
+
+
+def test_негодные_путь_и_транспорт_не_становятся_метками(store, seen):
+    rt = Realtime()
+    call_id = accepted_call(store)
+    run(service.report_connected(
+        Conn(), realtime=rt, user_id=A, call_id=call_id, connection_type="relay",
+        media_path="carrier-pigeon", turn_transport="smoke"))
+    assert seen["paths"] == [("relay", "none", "unknown", "unknown")]
+
+
+def test_отказ_пишет_причину_один_раз_и_повтор_не_удваивает(store, seen):
+    rt = Realtime()
+    call_id = accepted_call(store)
+    net = NetworkContext(country="RU", net_class="fixed")
+    for _ in range(2):
+        run(service.fail(
+            Conn(), realtime=rt, user_id=A, call_id=call_id,
+            reason="ice_connect_timeout", network=net))
+    assert store.calls[call_id].end_reason is EndReason.FAILED
+    assert seen["failures"] == [("ice_connect_timeout", "RU", "fixed")]
+
+
+def test_неизвестная_причина_отказа_считается_unknown(store, seen):
+    rt = Realtime()
+    call_id = accepted_call(store)
+    run(service.fail(Conn(), realtime=rt, user_id=A, call_id=call_id, reason="aliens"))
+    assert seen["failures"] == [("unknown", "unknown", "unknown")]
+
+
+def test_отказ_без_причины_тоже_считается(store, seen):
+    rt = Realtime()
+    call_id = accepted_call(store)
+    run(service.fail(Conn(), realtime=rt, user_id=A, call_id=call_id))
+    assert seen["failures"] == [("unknown", "unknown", "unknown")]

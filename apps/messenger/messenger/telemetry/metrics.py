@@ -515,6 +515,20 @@ CALL_RELAY_SWITCH = Counter(
     "Звонки, перешедшие с прямого пути на релей посреди разговора (G4)",
     ["service"],
 )
+# RES-009: путь, транспорт TURN и причина отказа с грубой сетевой размерностью.
+# Страна и класс сети — закрытые наборы (`telemetry/network.py`), IP и идентификаторы
+# в метках нет. Из `…_media_path_total{path="relay", turn_transport="tls"}` делится
+# доля TLS-релея (`relay_tls_success`), из `…_failure_total` — таксономия отказов.
+CALL_MEDIA_PATH = Counter(
+    "messenger_call_media_path_total",
+    "Путь выбранной пары кандидатов и транспорт TURN у активного звонка (RES-009)",
+    ["service", "path", "turn_transport", "network_country", "network_class"],
+)
+CALL_FAILURE = Counter(
+    "messenger_call_failure_total",
+    "Отказы звонка по таксономии причин (RES-009)",
+    ["service", "reason", "network_country", "network_class"],
+)
 CALL_SETUP_SECONDS = Histogram(
     "messenger_call_setup_seconds",
     "От «принял» до «медиа пошло» (G4)",
@@ -553,6 +567,22 @@ def call_connection(connection_type: str, setup_seconds: float | None) -> None:
     CALL_CONNECTION.labels(service=SERVICE, type=connection_type).inc()
     if setup_seconds is not None and setup_seconds >= 0:
         CALL_SETUP_SECONDS.labels(service=SERVICE).observe(setup_seconds)
+
+
+def call_media_path(path: str, turn_transport: str, country: str, net_class: str) -> None:
+    CALL_MEDIA_PATH.labels(
+        service=SERVICE,
+        path=path,
+        turn_transport=turn_transport,
+        network_country=country,
+        network_class=net_class,
+    ).inc()
+
+
+def call_failure(reason: str, country: str, net_class: str) -> None:
+    CALL_FAILURE.labels(
+        service=SERVICE, reason=reason, network_country=country, network_class=net_class
+    ).inc()
 
 
 def call_relay_used(*, switched: bool) -> None:

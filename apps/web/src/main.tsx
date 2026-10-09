@@ -221,10 +221,20 @@ const callsOperations: CallsOperations = {
     toCallView(
       await callsApi.hangupCall({ callId }, options?.unload === true ? { keepalive: true } : undefined),
     ),
-  fail: async (callId) => toCallView(await callsApi.failCall({ callId })),
+  fail: async (callId, reason) =>
+    toCallView(await callsApi.failCall({ callId, ...(reason === undefined ? {} : { callFailed: { reason } }) })),
   keepalive: async (callId) => toCallView(await callsApi.keepAliveCall({ callId })),
-  connected: async (callId, connectionType) =>
-    toCallView(await callsApi.reportCallConnected({ callId, callConnected: { connectionType } })),
+  connected: async (callId, connectionType, detail) =>
+    toCallView(
+      await callsApi.reportCallConnected({
+        callId,
+        callConnected: {
+          connectionType,
+          ...(detail?.mediaPath === undefined ? {} : { mediaPath: detail.mediaPath }),
+          ...(detail?.turnTransport === undefined ? {} : { turnTransport: detail.turnTransport }),
+        },
+      }),
+    ),
   signal: (callId, signal) => callsApi.sendCallSignal({ callId, callSignal: toCallSignal(signal) }),
   signals: async (callId, after) => {
     const { signals } = await callsApi.listCallSignals({ callId, after });

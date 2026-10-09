@@ -112,6 +112,11 @@ export default defineConfig({
 						"--use-fake-device-for-media-stream",
 						"--use-fake-ui-for-media-stream",
 						"--ignore-certificate-errors",
+						// RES-A4: `turns.finops.local:443` отображается на проброшенный порт службы
+						// `messenger-turn-tls` (`kubectl port-forward svc/messenger-turn-tls <порт>:443`).
+						...(process.env.E2E_TURNS_PORT
+							? [`--host-resolver-rules=MAP turns.finops.local:443 127.0.0.1:${process.env.E2E_TURNS_PORT}`]
+							: []),
 					],
 				},
 			},

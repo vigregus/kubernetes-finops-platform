@@ -29,8 +29,10 @@ import { isRecord } from "../messages/message-adapter"
 import { createCallChannelClient, type CentrifugeFactory } from "../realtime/realtimeClient"
 import {
   CallEngine,
+  filterTurnTransport,
   parseVideoQuality,
   type EngineEnv,
+  type TurnTransport,
   type VideoQuality,
   type WireSignal,
 } from "./callEngine"
@@ -59,6 +61,19 @@ function forceRelay(): boolean {
     return window.localStorage.getItem("messenger.call.forceRelay") === "1"
   } catch {
     return false
+  }
+}
+
+/**
+ * Отладочный переключатель: `localStorage["messenger.call.forceTurnTransport"]` = `udp | tcp | tls`
+ * оставляет в ICE только TURN с этим транспортом. В интерфейсе его нет намеренно (как у `forceRelay`).
+ */
+function forcedTurnTransport(): TurnTransport | null {
+  try {
+    const value = window.localStorage.getItem("messenger.call.forceTurnTransport")
+    return value === "udp" || value === "tcp" || value === "tls" ? value : null
+  } catch {
+    return null
   }
 }
 
@@ -260,7 +275,7 @@ export function CallsProvider({
   )
 
   const endLocally = useCallback(
-    (reason: CallEndReason) => {
+    (reason: CallEndReason, failureReason?: string) => {
       const callId = viewRef.current.callId
       apply({ type: "local-ended", reason })
       teardown()
@@ -269,7 +284,7 @@ export function CallsProvider({
       // записывается сервером как состоявшийся разговор (`completed`), и сбой
       // сети попадал бы в ленту, метрики и долю неудач разговором.
       const failed = reason === "failed" || reason === "media_denied"
-      void (failed ? ops.fail(callId) : ops.hangup(callId)).catch(() => undefined)
+      void (failed ? ops.fail(callId, failureReason) : ops.hangup(callId)).catch(() => undefined)
     },
     [apply, teardown, ops],
   )
@@ -309,18 +324,21 @@ export function CallsProvider({
       // `call_not_ready`.
       iceServers: async () => {
         if (after !== undefined) await after
-        return ops.iceServers(callId)
+        const ice = await ops.iceServers(callId)
+        const forced = forcedTurnTransport()
+        return forced === null ? ice : { ...ice, servers: filterTurnTransport(ice.servers, forced) }
       },
       onLocalStream: setLocalStream,
       onRemoteStream: setRemoteStream,
-      onConnected: (type) => {
+      onConnected: (type, detail) => {
         apply({ type: "connected" })
         // Вызывается при **каждой** смене пути (прямой → релейный после смены сети).
-        void ops.connected(callId, type).catch(() => undefined)
+        void ops.connected(callId, type, detail).catch(() => undefined)
         if (keepaliveRef.current === null) startKeepalive(callId)
         if (wakeLockRef.current === null) acquireWakeLock()
       },
-      onFailed: (reason) => endLocally(reason === "media_denied" ? "media_denied" : "failed"),
+      onFailed: (reason) =>
+        endLocally(reason === "media_denied" ? "media_denied" : "failed", reason),
     })
     engineRef.current = engine
     void engine.start()

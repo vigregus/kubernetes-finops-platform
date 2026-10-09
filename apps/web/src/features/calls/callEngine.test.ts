@@ -9,8 +9,11 @@ import {
   parseVideoQuality,
   VIDEO_PRESETS,
   connectionType,
+  filterTurnTransport,
+  selectedPath,
   encodingFor,
   mediaConstraints,
+  type ConnectionDetail,
   type EngineOptions,
   type WireSignal,
 } from "./callEngine"
@@ -138,6 +141,7 @@ interface Rig {
   peer: FakePeer
   sent: WireSignal[]
   events: string[]
+  details: ConnectionDetail[]
   timers: Array<{ id: number; fn: () => void; ms: number; cleared: boolean }>
   media: { requests: MediaStreamConstraints[] }
 }
@@ -146,6 +150,7 @@ function rig(overrides: Partial<EngineOptions> & { mediaFails?: Array<boolean> }
   const peer = new FakePeer()
   const sent: WireSignal[] = []
   const events: string[] = []
+  const details: ConnectionDetail[] = []
   const timers: Rig["timers"] = []
   const media: Rig["media"] = { requests: [] }
   const fails = [...(overrides.mediaFails ?? [])]
@@ -168,7 +173,10 @@ function rig(overrides: Partial<EngineOptions> & { mediaFails?: Array<boolean> }
     iceServers: async () => ({ servers: [{ urls: "stun:x" }], ttlSeconds: 600 }),
     onLocalStream: () => events.push("local"),
     onRemoteStream: () => events.push("remote"),
-    onConnected: (type) => events.push(`connected:${type}`),
+    onConnected: (type, detail) => {
+      events.push(`connected:${type}`)
+      details.push(detail)
+    },
     onFailed: (reason) => events.push(`failed:${reason}`),
     timers: {
       setTimeout: (fn, ms) => {
@@ -184,7 +192,7 @@ function rig(overrides: Partial<EngineOptions> & { mediaFails?: Array<boolean> }
   }
   const { mediaFails: _ignored, ...rest } = overrides
   void _ignored
-  return { engine: new CallEngine({ ...base, ...rest }), peer, sent, events, timers, media }
+  return { engine: new CallEngine({ ...base, ...rest }), peer, sent, events, details, timers, media }
 }
 
 const fire = (r: Rig, ms: number) => {
@@ -304,6 +312,45 @@ describe("соединение и обрыв (CALL-011)", () => {
     expect(r.events.filter((e) => e.startsWith("connected"))).toEqual(["connected:direct"])
   })
 
+  it("подробности пути: тип кандидата и транспорт TURN у релея", async () => {
+    const r = rig()
+    await r.engine.start()
+    r.peer.stats = new Map([
+      ["T", { type: "transport", selectedCandidatePairId: "P" }],
+      ["P", { type: "candidate-pair", localCandidateId: "L", remoteCandidateId: "R" }],
+      ["L", { type: "local-candidate", candidateType: "relay", relayProtocol: "tls" }],
+      ["R", { type: "remote-candidate", candidateType: "host" }],
+    ])
+    r.peer.emitState("connected")
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(r.details).toEqual([{ mediaPath: "relay", turnTransport: "tls" }])
+  })
+
+  it("прямой путь не несёт транспорта TURN, а чужая строка не становится значением", async () => {
+    const r = rig()
+    await r.engine.start()
+    r.peer.stats = new Map([
+      ["T", { type: "transport", selectedCandidatePairId: "P" }],
+      ["P", { type: "candidate-pair", localCandidateId: "L", remoteCandidateId: "R" }],
+      ["L", { type: "local-candidate", candidateType: "srflx", relayProtocol: "udp" }],
+      ["R", { type: "remote-candidate", candidateType: "relay" }],
+    ])
+    expect(await selectedPath(r.peer as unknown as RTCPeerConnection)).toEqual({
+      type: "relay",
+      detail: { mediaPath: "relay" },
+    })
+    r.peer.stats = new Map([
+      ["T", { type: "transport", selectedCandidatePairId: "P" }],
+      ["P", { type: "candidate-pair", localCandidateId: "L", remoteCandidateId: "R" }],
+      ["L", { type: "local-candidate", candidateType: "relay", relayProtocol: "smoke" }],
+      ["R", { type: "remote-candidate", candidateType: "host" }],
+    ])
+    expect(await selectedPath(r.peer as unknown as RTCPeerConnection)).toEqual({
+      type: "relay",
+      detail: { mediaPath: "relay" },
+    })
+  })
+
   it("через релей — путь relay", async () => {
     const r = rig()
     await r.engine.start()
@@ -323,7 +370,7 @@ describe("соединение и обрыв (CALL-011)", () => {
     expect(r.timers.some((t) => t.ms === 15_000 && !t.cleared)).toBe(true)
     r.peer.emitState("connected")
     fire(r, 15_000)
-    expect(r.events).not.toContain("failed:failed")
+    expect(r.events.filter((e) => e.startsWith("failed:"))).toEqual([])
   })
 
   it("обрыв 20 с — звонок завершается неудачей", async () => {
@@ -331,8 +378,20 @@ describe("соединение и обрыв (CALL-011)", () => {
     await r.engine.start()
     r.peer.emitState("disconnected")
     fire(r, 15_000)
-    expect(r.events).toContain("failed:failed")
+    // Связи не было вовсе — путь так и не нашёлся, а не оборвался (таксономия RES-009).
+    expect(r.events).toContain("failed:ice_connect_timeout")
     expect(r.peer.closed).toBe(true)
+  })
+
+  it("обрыв после состоявшейся связи — причина ice_disconnected", async () => {
+    const r = rig()
+    await r.engine.start()
+    r.peer.stats = directPair()
+    r.peer.emitState("connected")
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    r.peer.emitState("disconnected")
+    fire(r, 15_000)
+    expect(r.events).toContain("failed:ice_disconnected")
   })
 
   it("звонящий перезапускает ICE новым offer, вызываемый — нет", async () => {
@@ -365,7 +424,7 @@ describe("соединение и обрыв (CALL-011)", () => {
       throw new Error("битый SDP")
     }
     await r.engine.handleSignal({ type: "answer", sdp: "x" })
-    expect(r.events).toContain("failed:failed")
+    expect(r.events).toContain("failed:unknown")
   })
 })
 
@@ -656,5 +715,44 @@ describe("сохранённое качество", () => {
     expect(parseVideoQuality("fhd")).toBe("fhd")
     expect(parseVideoQuality("ultra")).toBe("auto")
     expect(parseVideoQuality(null)).toBe("auto")
+  })
+})
+
+
+describe("отладочный выбор транспорта TURN (RES-005/RES-007)", () => {
+  const servers: RTCIceServer[] = [
+    { urls: ["stun:s:3478"] },
+    {
+      urls: [
+        "turn:t:3478?transport=udp",
+        "turn:t:3478?transport=tcp",
+        "turns:t:443?transport=tcp",
+      ],
+      username: "u",
+      credential: "c",
+    },
+  ]
+  const urlsOf = (list: RTCIceServer[]) => list.flatMap((s) => (Array.isArray(s.urls) ? s.urls : [s.urls]))
+
+  it("tls оставляет только turns: и STUN, учётные данные сохраняются", () => {
+    const out = filterTurnTransport(servers, "tls")
+    expect(urlsOf(out)).toEqual(["stun:s:3478", "turns:t:443?transport=tcp"])
+    expect(out[1].username).toBe("u")
+  })
+
+  it("tcp оставляет только turn: по TCP, udp — только по UDP", () => {
+    expect(urlsOf(filterTurnTransport(servers, "tcp"))).toEqual([
+      "stun:s:3478",
+      "turn:t:3478?transport=tcp",
+    ])
+    expect(urlsOf(filterTurnTransport(servers, "udp"))).toEqual([
+      "stun:s:3478",
+      "turn:t:3478?transport=udp",
+    ])
+  })
+
+  it("сервер без подходящих адресов отбрасывается целиком", () => {
+    const only: RTCIceServer[] = [{ urls: "turn:t:3478?transport=udp", username: "u", credential: "c" }]
+    expect(filterTurnTransport(only, "tls")).toEqual([])
   })
 })
