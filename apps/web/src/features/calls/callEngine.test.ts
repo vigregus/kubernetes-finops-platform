@@ -9,6 +9,7 @@ import {
   parseVideoQuality,
   VIDEO_PRESETS,
   connectionType,
+  filterTurnTransport,
   selectedPath,
   encodingFor,
   mediaConstraints,
@@ -714,5 +715,44 @@ describe("сохранённое качество", () => {
     expect(parseVideoQuality("fhd")).toBe("fhd")
     expect(parseVideoQuality("ultra")).toBe("auto")
     expect(parseVideoQuality(null)).toBe("auto")
+  })
+})
+
+
+describe("отладочный выбор транспорта TURN (RES-005/RES-007)", () => {
+  const servers: RTCIceServer[] = [
+    { urls: ["stun:s:3478"] },
+    {
+      urls: [
+        "turn:t:3478?transport=udp",
+        "turn:t:3478?transport=tcp",
+        "turns:t:443?transport=tcp",
+      ],
+      username: "u",
+      credential: "c",
+    },
+  ]
+  const urlsOf = (list: RTCIceServer[]) => list.flatMap((s) => (Array.isArray(s.urls) ? s.urls : [s.urls]))
+
+  it("tls оставляет только turns: и STUN, учётные данные сохраняются", () => {
+    const out = filterTurnTransport(servers, "tls")
+    expect(urlsOf(out)).toEqual(["stun:s:3478", "turns:t:443?transport=tcp"])
+    expect(out[1].username).toBe("u")
+  })
+
+  it("tcp оставляет только turn: по TCP, udp — только по UDP", () => {
+    expect(urlsOf(filterTurnTransport(servers, "tcp"))).toEqual([
+      "stun:s:3478",
+      "turn:t:3478?transport=tcp",
+    ])
+    expect(urlsOf(filterTurnTransport(servers, "udp"))).toEqual([
+      "stun:s:3478",
+      "turn:t:3478?transport=udp",
+    ])
+  })
+
+  it("сервер без подходящих адресов отбрасывается целиком", () => {
+    const only: RTCIceServer[] = [{ urls: "turn:t:3478?transport=udp", username: "u", credential: "c" }]
+    expect(filterTurnTransport(only, "tls")).toEqual([])
   })
 })

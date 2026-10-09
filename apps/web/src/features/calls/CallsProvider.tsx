@@ -29,8 +29,10 @@ import { isRecord } from "../messages/message-adapter"
 import { createCallChannelClient, type CentrifugeFactory } from "../realtime/realtimeClient"
 import {
   CallEngine,
+  filterTurnTransport,
   parseVideoQuality,
   type EngineEnv,
+  type TurnTransport,
   type VideoQuality,
   type WireSignal,
 } from "./callEngine"
@@ -59,6 +61,19 @@ function forceRelay(): boolean {
     return window.localStorage.getItem("messenger.call.forceRelay") === "1"
   } catch {
     return false
+  }
+}
+
+/**
+ * Отладочный переключатель: `localStorage["messenger.call.forceTurnTransport"]` = `udp | tcp | tls`
+ * оставляет в ICE только TURN с этим транспортом. В интерфейсе его нет намеренно (как у `forceRelay`).
+ */
+function forcedTurnTransport(): TurnTransport | null {
+  try {
+    const value = window.localStorage.getItem("messenger.call.forceTurnTransport")
+    return value === "udp" || value === "tcp" || value === "tls" ? value : null
+  } catch {
+    return null
   }
 }
 
@@ -309,7 +324,9 @@ export function CallsProvider({
       // `call_not_ready`.
       iceServers: async () => {
         if (after !== undefined) await after
-        return ops.iceServers(callId)
+        const ice = await ops.iceServers(callId)
+        const forced = forcedTurnTransport()
+        return forced === null ? ice : { ...ice, servers: filterTurnTransport(ice.servers, forced) }
       },
       onLocalStream: setLocalStream,
       onRemoteStream: setRemoteStream,

@@ -38,6 +38,32 @@ export interface ConnectionDetail {
 }
 
 /**
+ * Оставляет только серверы TURN с нужным транспортом — отладочный переключатель проверки
+ * TURN/TLS на 443 (`RES-005`/`RES-007`): без него звонок мог бы пойти по UDP или TCP 3478, и
+ * проверка не доказала бы, что работает именно TLS. `turns:` — TLS; `turn:…transport=tcp` — TCP;
+ * `turn:…transport=udp` (или без параметра) — UDP. STUN (`stun:`) не трогается. Серверы
+ * без подходящих адресов отбрасываются целиком.
+ */
+export function filterTurnTransport(
+  servers: readonly RTCIceServer[],
+  transport: TurnTransport,
+): RTCIceServer[] {
+  const matches = (url: string): boolean => {
+    if (url.startsWith("stun:") || url.startsWith("stuns:")) return true
+    if (url.startsWith("turns:")) return transport === "tls"
+    if (!url.startsWith("turn:")) return false
+    const tcp = /[?&]transport=tcp\b/.test(url)
+    return transport === "tcp" ? tcp : transport === "udp" ? !tcp : false
+  }
+  const result: RTCIceServer[] = []
+  for (const server of servers) {
+    const urls = (Array.isArray(server.urls) ? server.urls : [server.urls]).filter(matches)
+    if (urls.length > 0) result.push({ ...server, urls })
+  }
+  return result
+}
+
+/**
  * Причина отказа по таксономии части 18 (§8) — та, что движок видит сам. Остальные причины
  * (отказ TURN по транспортам, DNS, TLS) дают диагностика и сервер (`RES-012`).
  */

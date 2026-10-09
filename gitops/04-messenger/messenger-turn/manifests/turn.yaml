@@ -32,8 +32,13 @@
 #    UDP» на Service, каждый порт перечислен. Для стенда этого хватает на ~10
 #    одновременных релейных звонков; облачный вариант — другой диапазон и NLB
 #    (`CALL-011`).
-#  * **Только UDP/TCP без TLS.** `turns:` на 443 для сетей без UDP требует
-#    сертификата и порта 443 — отдельным шагом, когда появится публичный адрес.
+#  * **TURN/TLS на 443 — отдельный адрес и имя (`RES-005`).** Сети, где закрыты UDP и
+#    TCP 3478, пропускают только TLS на 443. Для него заведены отдельная служба
+#    `messenger-turn-tls` (свой адрес: блокировка TURN не должна ронять сайт и наоборот),
+#    своё имя `turns.finops.local` и сертификат от cert-manager. Служба слушает 443,
+#    coturn — 5349 (порт выше 1024, процесс без привилегий). Выбор «отдельный адрес
+#    или общий edge по SNI» — осознанный: отдельный легче отлаживать и изолирует отказы,
+#    общий менее заметен снаружи (часть 18, §6). `turns:` — это TCP, TLS, TURN, а не HTTPS.
 #
 # Достижимость с хоста: на локальном стенде (minikube с драйвером Docker) UDP
 # наружу из кластера не пробрасывается, поэтому релей проверяется **внутри**
@@ -79,6 +84,52 @@ spec:
     - {name: relay-30518, protocol: UDP, port: 30518, targetPort: 30518}
     - {name: relay-30519, protocol: UDP, port: 30519, targetPort: 30519}
 ---
+# Отдельный адрес для TURN/TLS на 443 (`RES-005`): на стенде его выдаёт `minikube tunnel`,
+# в облаке — свой NLB/Elastic IP. Имя для клиента — `turns.finops.local`.
+apiVersion: v1
+kind: Service
+metadata:
+  name: messenger-turn-tls
+  namespace: messenger
+  labels:
+    app.kubernetes.io/name: messenger-turn
+    finops.internal/product: messenger
+    finops.internal/team: platform-engineering
+    finops.internal/environment: local
+    finops.internal/component: turn
+spec:
+  type: LoadBalancer
+  selector:
+    app.kubernetes.io/name: messenger-turn
+  ports:
+    - {name: turn-tls, protocol: TCP, port: 443, targetPort: 5349}
+---
+# Сертификат TURN/TLS: тем же локальным CA, что и у шлюза; продлевает cert-manager.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: messenger-turn-tls
+  namespace: messenger
+  labels:
+    finops.internal/product: messenger
+    finops.internal/team: platform-engineering
+    finops.internal/environment: local
+    finops.internal/component: turn
+spec:
+  secretName: messenger-turn-tls
+  duration: 2160h
+  renewBefore: 720h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  dnsNames:
+    - turns.finops.local
+  issuerRef:
+    name: finops-local-ca
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -112,6 +163,8 @@ spec:
         runAsNonRoot: true
         runAsUser: 65534
         runAsGroup: 65534
+        # Группа тома с ключом TLS: секрет монтируется как root:fsGroup, режим 0440.
+        fsGroup: 65534
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -138,7 +191,9 @@ spec:
                 SELF_PEER="--allowed-peer-ip=$POD_IP"
               fi
               exec turnserver -n --log-file=stdout --simple-log --no-cli \
-                --no-tls --no-dtls --fingerprint \
+                --no-dtls --fingerprint \
+                --cert=/tls/tls.crt --pkey=/tls/tls.key \
+                --no-tlsv1 --no-tlsv1_1 --tls-listening-port=5349 \
                 --realm=turn.finops.local --listening-port=3478 \
                 --min-port=30500 --max-port=30519 \
                 --use-auth-secret --static-auth-secret="$TURN_SECRET" \
@@ -184,6 +239,7 @@ spec:
           ports:
             - {name: turn-udp, containerPort: 3478, protocol: UDP}
             - {name: turn-tcp, containerPort: 3478, protocol: TCP}
+            - {name: turn-tls, containerPort: 5349, protocol: TCP}
             - {name: metrics, containerPort: 9641, protocol: TCP}
           resources:
             requests: {cpu: 25m, memory: 32Mi}
@@ -211,9 +267,18 @@ spec:
             failureThreshold: 12
           volumeMounts:
             - {name: tmp, mountPath: /tmp}
+            - {name: tls, mountPath: /tls, readOnly: true}
       volumes:
         - name: tmp
           emptyDir: {}
+        # Сертификат и ключ TURN/TLS (cert-manager, `messenger-turn-tls`). Без секрета
+        # под не запустится: TLS-порт — часть поставки, а не необязательный вариант.
+        - name: tls
+          secret:
+            secretName: messenger-turn-tls
+            # Ключ читает процесс под 65534; по умолчанию 0644 уже достаточно, права
+            # заданы явно, чтобы не зависеть от значения по умолчанию.
+            defaultMode: 0440
 ---
 # Метрики coturn: число выделений и трафик релея — то, на чём держится оценка
 # стоимости (доля релея, допущение 15%).
