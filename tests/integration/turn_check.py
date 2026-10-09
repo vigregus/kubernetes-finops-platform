@@ -289,7 +289,7 @@ def tls_checks(host: str, secret: str) -> None:
           str(probe.version))
     probe.sock.close()
 
-    # TLS 1.0 и 1.1 отключены на сервере (`--no-tlsv1 --no-tlsv1_1`).
+    # TLS 1.0 и 1.1 отключены на сервере (в этой сборке coturn минимум TLS 1.2 задан по умолчанию).
     old = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     old.check_hostname = False
     old.verify_mode = ssl.CERT_NONE
