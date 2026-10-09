@@ -44,7 +44,7 @@ push-подписки. Кнопка недоступна с причиной, а
   Если второго TURN нет (`RES-006`), релейные звонки в этот период не соединяются.
 - **TURN/TLS на 443 (`RES-005`).** Отдельная служба `messenger-turn-tls` (443 → 5349 в поде), имя `turns.finops.local`, сертификат `messenger-turn-tls`
   (cert-manager, локальный CA). Под без секрета с сертификатом не запустится. Признак отказа: звонки в закрытых сетях не соединяются, доля `turn_transport="tls"`
-  в `messenger_call_media_path_total` падает. Проверка: `tests/integration/turn_check.py` (рукопожатие, релей по TLS); браузерная `RES-A4` (`E2E_TURNS_PORT`).
+  в `messenger_call_media_path_total` падает. Проверка: `tests/integration/turn_check.py` (рукопожатие, релей по TLS); браузерная `RES-A4` (`E2E_TURNS_ADDR`).
 - **Сервис без внешнего адреса.** На стенде `messenger-turn` в `Progressing` (LoadBalancer без адреса): релей из внешних сетей недоступен,
   локальные звонки идут по `host`-кандидатам.
 - **Ротация секрета.** Секрет TURN меняется в `messenger-secrets`; выданные доступы живут 5–10 минут, активные звонки обновляют их

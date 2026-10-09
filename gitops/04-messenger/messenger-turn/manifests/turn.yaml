@@ -193,7 +193,7 @@ spec:
               exec turnserver -n --log-file=stdout --simple-log --no-cli \
                 --no-dtls --fingerprint \
                 --cert=/tls/tls.crt --pkey=/tls/tls.key \
-                --no-tlsv1 --no-tlsv1_1 --tls-listening-port=5349 \
+                --tls-listening-port=5349 \
                 --realm=turn.finops.local --listening-port=3478 \
                 --min-port=30500 --max-port=30519 \
                 --use-auth-secret --static-auth-secret="$TURN_SECRET" \
