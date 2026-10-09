@@ -529,6 +529,17 @@ CALL_FAILURE = Counter(
     "Отказы звонка по таксономии причин (RES-009)",
     ["service", "reason", "network_country", "network_class"],
 )
+# RES-006/RES-014: исход выдачи данных по каждой точке TURN и профиль звонка.
+TURN_ENDPOINT = Counter(
+    "messenger_turn_endpoint_total",
+    "Исход выдачи данных TURN по точке (ok, unavailable, timeout) (RES-006)",
+    ["service", "endpoint", "result"],
+)
+CALL_PROFILE = Counter(
+    "messenger_call_profile_total",
+    "Звонки по профилю соединения: normal или restricted (RES-011)",
+    ["service", "profile"],
+)
 CALL_SETUP_SECONDS = Histogram(
     "messenger_call_setup_seconds",
     "От «принял» до «медиа пошло» (G4)",
@@ -577,6 +588,14 @@ def call_media_path(path: str, turn_transport: str, country: str, net_class: str
         network_country=country,
         network_class=net_class,
     ).inc()
+
+
+def turn_endpoint(endpoint: str, result: str) -> None:
+    TURN_ENDPOINT.labels(service=SERVICE, endpoint=endpoint, result=result).inc()
+
+
+def call_profile(profile: str) -> None:
+    CALL_PROFILE.labels(service=SERVICE, profile=profile).inc()
 
 
 def call_failure(reason: str, country: str, net_class: str) -> None:

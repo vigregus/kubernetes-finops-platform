@@ -232,6 +232,7 @@ const callsOperations: CallsOperations = {
           connectionType,
           ...(detail?.mediaPath === undefined ? {} : { mediaPath: detail.mediaPath }),
           ...(detail?.turnTransport === undefined ? {} : { turnTransport: detail.turnTransport }),
+          ...(detail?.profile === undefined ? {} : { profile: detail.profile }),
         },
       }),
     ),
@@ -240,8 +241,11 @@ const callsOperations: CallsOperations = {
     const { signals } = await callsApi.listCallSignals({ callId, after });
     return signals.map(toSignalPayload);
   },
-  iceServers: async (callId) => {
-    const { iceServers, ttlSeconds } = await callsApi.getCallIceServers({ callId });
+  iceServers: async (callId, profile) => {
+    const { iceServers, ttlSeconds } = await callsApi.getCallIceServers({
+      callId,
+      ...(profile === undefined ? {} : { profile }),
+    });
     return {
       ttlSeconds,
       servers: iceServers.map((server) => ({

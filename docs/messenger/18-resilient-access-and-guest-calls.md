@@ -613,7 +613,9 @@ TURN-доступа не даёт.
 | Тип пути в метриках | 🟡 есть, без разреза по транспорту TURN |
 | Путь выбранной пары и транспорт TURN (`udp`/`tcp`/`tls`), причина отказа по таксономии, сетевая размерность из заголовков шлюза (`RES-009`, часть) | 🟡 клиент и метрики `messenger_call_media_path_total`, `messenger_call_failure_total` есть; GeoIP на шлюзе, `signaling_transport`, панели — нет |
 | TURN/TLS :443 (отдельная служба и сертификат, `RES-005`) и приёмка только по `turns:` (`RES-A4`, `RES-007`) | 🟡 манифесты, проверки `turn_check.py` и спека есть; прогон на стенде и публичный адрес вне minikube — нет |
-| Несколько TURN; запасные realtime-транспорты; диагностика; Network Intelligence; `RESTRICTED`; HTTPS-only | ⬜ |
+| Несколько TURN (`RES-006`): `CompositeTurnProvider`, `TURN_PROVIDER=coturn,coturn-b`, метрика `messenger_turn_endpoint_total` | 🟡 код и тесты есть; второй TURN на другой площадке и приёмка отказа первого — нет |
+| Профиль `RESTRICTED` (`RES-011`): `?profile=restricted`, срок прямой попытки 9 с, переход по `setConfiguration` + ICE restart, «липкий» профиль 30 минут, `messenger_call_profile_total` | 🟡 сервер, клиент и юнит-тесты есть; `RES-A10`/`RES-A11` в браузере и Safari/Firefox не проверены |
+| Запасные realtime-транспорты; диагностика; Network Intelligence; endpoint health (`RES-014`); HTTPS-only | ⬜ |
 | Звонки по ссылке | ⬜ |
 
 ## 17. Определение готовности

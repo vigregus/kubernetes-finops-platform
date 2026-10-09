@@ -27,7 +27,7 @@ from typing import Protocol
 import asyncpg
 
 from messenger.adapters.ratelimit import OnFailure, RateLimiter
-from messenger.adapters.turn import TurnProvider
+from messenger.adapters.turn import TurnProvider, restricted_only
 from messenger.domain import call as domain
 from messenger.domain.call import Call, CallKind, CallState, EndReason
 from messenger.domain.errors import Reason
@@ -541,16 +541,19 @@ async def report_connected(
     connection_type: str,
     media_path: str | None = None,
     turn_transport: str | None = None,
+    profile: str | None = None,
     network: NetworkContext | None = None,
 ) -> CallResult:
     """«Медиа пошло»: звонок становится активным, путь соединения идёт в метрику.
 
     `media_path` и `turn_transport` — подробности пути (`host | srflx | prflx | relay`,
-    `udp | tcp | tls` у релея) для метрики `RES-009`; необязательны, старый клиент их не шлёт.
+    `udp | tcp | tls` у релея) для метрики `RES-009`, `profile` (`normal | restricted`) — для
+    `RES-011`; необязательны, старый клиент их не шлёт.
     """
     detail = _PathDetail(
         path=media_path if media_path in domain.MEDIA_PATHS else None,
         transport=turn_transport if turn_transport in domain.TURN_TRANSPORTS else None,
+        profile=profile if profile in domain.CALL_PROFILES else None,
         network=network or NetworkContext(),
     )
     events: list[Event] = []
@@ -586,6 +589,7 @@ async def report_connected(
 class _PathDetail:
     path: str | None
     transport: str | None
+    profile: str | None
     network: NetworkContext
 
 
@@ -612,6 +616,8 @@ async def _record_connection(
             transport = detail.transport if path == "relay" and detail.transport else "none"
             net = detail.network
             metrics.call_media_path(path, transport, net.country, net.net_class)
+            if detail.profile is not None:
+                metrics.call_profile(detail.profile)
         if connection_type == "relay":
             metrics.call_relay_used(switched=False)
     elif previous == "direct" and connection_type == "relay":
@@ -791,6 +797,7 @@ async def ice_servers(
     limiter: RateLimiter,
     user_id: UserId,
     call_id: uuid.UUID,
+    profile: str = "normal",
     now: datetime | None = None,
 ) -> IceResult:
     """Данные для TURN — участнику **принятого** звонка, на минуты.
@@ -831,6 +838,9 @@ async def ice_servers(
         )
 
     servers = await turn.ice_servers(ttl_seconds=ttl, expires_at=expires_at, subject=str(user_id))
+    if servers is not None and profile == "restricted":
+        # `RESTRICTED` (RES-011): только `turns:`; без них релей по TLS недоступен вовсе.
+        servers = restricted_only(servers)
     if servers is None:
         # Звонок без релея всё равно возможен: клиент строит соединение без него.
         return IceResult(servers=[], ttl_seconds=ttl)

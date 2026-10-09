@@ -36,6 +36,7 @@ import {
   type VideoQuality,
   type WireSignal,
 } from "./callEngine"
+import { browserProfileStorage, loadProfile, rememberProfile } from "./profileMemory"
 import { createSerialQueue, withRetry } from "./signalQueue"
 import {
   IDLE,
@@ -305,6 +306,8 @@ export function CallsProvider({
       // Отладочный переключатель проверки TURN: `localStorage["messenger.call.forceRelay"]="1"`
       // заставляет соединение идти только через релей. В интерфейсе его нет намеренно.
       ...(forceRelay() ? { iceTransportPolicy: "relay" as const } : {}),
+      // «Липкий» профиль: если недавно прямая попытка не удалась, начинаем сразу с `restricted`.
+      profile: loadProfile(browserProfileStorage(), Date.now()),
       // Сигналы уходят **строго по одному**: `offer` и пачка кандидатов,
       // отправленные параллельно, достигают сервера в любом порядке, а номер им
       // выдаётся по порядку прихода — и `offer` получал бы номер больше, чем
@@ -322,9 +325,9 @@ export function CallsProvider({
       // движок в момент нажатия, до ответа сервера на «принять», поэтому его
       // запрос данных ждёт этого ответа (`after`) — иначе он получал бы
       // `call_not_ready`.
-      iceServers: async () => {
+      iceServers: async (profile) => {
         if (after !== undefined) await after
-        const ice = await ops.iceServers(callId)
+        const ice = await ops.iceServers(callId, profile)
         const forced = forcedTurnTransport()
         return forced === null ? ice : { ...ice, servers: filterTurnTransport(ice.servers, forced) }
       },
@@ -334,6 +337,11 @@ export function CallsProvider({
         apply({ type: "connected" })
         // Вызывается при **каждой** смене пути (прямой → релейный после смены сети).
         void ops.connected(callId, type, detail).catch(() => undefined)
+        // Запоминается профиль, в котором звонок соединился: `restricted` — до 30 минут,
+        // `normal` снимает запоминание.
+        if (detail.profile !== undefined) {
+          rememberProfile(browserProfileStorage(), detail.profile, Date.now())
+        }
         if (keepaliveRef.current === null) startKeepalive(callId)
         if (wakeLockRef.current === null) acquireWakeLock()
       },

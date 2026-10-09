@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test"
 import type { BrowserContext, Page } from "@playwright/test"
 import { STATE_FILE, fixtureFor, signIn } from "./support/auth"
 import type { SignedIn, State } from "./support/auth"
-import { packetsReceived, trackPeers } from "./support/calls"
+import { packetsReceived, selectedPair, trackPeers } from "./support/calls"
 
 /**
  * Браузерная приёмка G4: звонки один-на-один (`CALL-001…014`, ADR 0007).
@@ -262,69 +262,7 @@ test.describe("G4: звонки", () => {
 		await b.page.getByRole("button", { name: "Accept call" }).click()
 		await expect(PEER(a)).toHaveAttribute("data-call-phase", "active", { timeout: 60_000 })
 
-		const selected = await a.page.evaluate(async () => {
-			const peers = (window as unknown as { __peers?: RTCPeerConnection[] }).__peers ?? []
-			for (const peer of peers) {
-				const report = await peer.getStats()
-				const byId = new Map<string, Record<string, unknown>>()
-				report.forEach((entry: Record<string, unknown>, id: string) => byId.set(id, entry))
-				for (const entry of byId.values()) {
-					if (entry["type"] === "transport" && typeof entry["selectedCandidatePairId"] === "string") {
-						const pair = byId.get(entry["selectedCandidatePairId"])
-						const local = byId.get(String(pair?.["localCandidateId"]))
-						return String(local?.["candidateType"])
-					}
-				}
-			}
-			return "unknown"
-		})
-		expect(selected).toBe("relay")
-		await expectMediaFlowing(a.page)
-		for (const who of [a, b]) {
-			await who.page.evaluate(() => window.localStorage.removeItem("messenger.call.forceRelay"))
-		}
-	})
-
-	/**
-	 * RES-A4 / RES-007: UDP и TCP 3478 закрыты — звонок идёт через TURN/TLS :443.
-	 *
-	 * Закрыты они не имитацией, а положением вещей: браузер достаёт до TURN **только** по
-	 * `turns:` (адрес `turns.finops.local:443` отображается на достижимый адрес службы
-	 * `messenger-turn-tls`, `E2E_TURNS_ADDR=host:port`, правило хоста в `playwright.config.ts`), а
-	 * `turn.finops.local:3478` с этой машины не разрешается. Через `kubectl port-forward` на loopback
-	 * не работал в наблюдавшемся Chromium: он закрывал такое соединение, не отправив ни байта (проверено на стенде). Выбранная пара — релейная,
-	 * транспорт TURN — `tls`, а медиа растёт: путь не просто выбран, а несёт звук и картинку.
-	 */
-	test("RES-A4: только TURN/TLS :443 — релей по tls, медиа идёт", async () => {
-		test.skip(!process.env.E2E_TURNS_ADDR, "адрес TURN/TLS не задан (E2E_TURNS_ADDR)")
-		for (const who of [a, b]) {
-			await who.page.evaluate(() => {
-				window.localStorage.setItem("messenger.call.forceRelay", "1")
-				window.localStorage.setItem("messenger.call.forceTurnTransport", "tls")
-			})
-		}
-		await a.page.getByRole("button", { name: "Start video call" }).click()
-		await expect(b.page.getByRole("alertdialog", { name: "Incoming call" })).toBeVisible({ timeout: 20_000 })
-		await b.page.getByRole("button", { name: "Accept call" }).click()
-		await expect(PEER(a)).toHaveAttribute("data-call-phase", "active", { timeout: 60_000 })
-		await expect(PEER(b)).toHaveAttribute("data-call-phase", "active", { timeout: 60_000 })
-
-		const selected = await a.page.evaluate(async () => {
-			const peers = (window as unknown as { __peers?: RTCPeerConnection[] }).__peers ?? []
-			for (const peer of peers) {
-				const report = await peer.getStats()
-				const byId = new Map<string, Record<string, unknown>>()
-				report.forEach((entry: Record<string, unknown>, id: string) => byId.set(id, entry))
-				for (const entry of byId.values()) {
-					if (entry["type"] === "transport" && typeof entry["selectedCandidatePairId"] === "string") {
-						const pair = byId.get(entry["selectedCandidatePairId"])
-						const local = byId.get(String(pair?.["localCandidateId"]))
-						return { type: String(local?.["candidateType"]), protocol: String(local?.["relayProtocol"]) }
-					}
-				}
-			}
-			return { type: "unknown", protocol: "unknown" }
-		})
+		const selected = await selectedPair(a.page)
 		expect(selected).toEqual({ type: "relay", protocol: "tls" })
 		await expectMediaFlowing(a.page)
 		await expectMediaFlowing(b.page)
@@ -333,6 +271,38 @@ test.describe("G4: звонки", () => {
 				window.localStorage.removeItem("messenger.call.forceRelay")
 				window.localStorage.removeItem("messenger.call.forceTurnTransport")
 			})
+		}
+	})
+
+	/**
+	 * RES-A10 / RES-011: профиль `RESTRICTED` — relay-only через `turns:…:443`.
+	 *
+	 * Профиль включается тем же способом, что и в жизни: устройство помнит, что прямая попытка в
+	 * этой сети не удалась (`messenger.call.profile`, срок 30 минут). Сервер при этом отдаёт только
+	 * `turns:`, браузер получает `iceTransportPolicy=relay` — host и srflx в звонке не участвуют.
+	 * Как и `RES-A4`, нужен достижимый для браузера TURN/TLS (`E2E_TURNS_ADDR`).
+	 */
+	test("RES-A10: профиль RESTRICTED — relay только через turns, медиа идёт", async () => {
+		test.skip(!process.env.E2E_TURNS_ADDR, "адрес TURN/TLS не задан (E2E_TURNS_ADDR)")
+		for (const who of [a, b]) {
+			await who.page.evaluate(() => {
+				window.localStorage.setItem(
+					"messenger.call.profile",
+					JSON.stringify({ profile: "restricted", at: Date.now() }),
+				)
+			})
+		}
+		await a.page.getByRole("button", { name: "Start video call" }).click()
+		await expect(b.page.getByRole("alertdialog", { name: "Incoming call" })).toBeVisible({ timeout: 20_000 })
+		await b.page.getByRole("button", { name: "Accept call" }).click()
+		await expect(PEER(a)).toHaveAttribute("data-call-phase", "active", { timeout: 60_000 })
+		await expect(PEER(b)).toHaveAttribute("data-call-phase", "active", { timeout: 60_000 })
+
+		expect(await selectedPair(a.page)).toEqual({ type: "relay", protocol: "tls" })
+		await expectMediaFlowing(a.page)
+		await expectMediaFlowing(b.page)
+		for (const who of [a, b]) {
+			await who.page.evaluate(() => window.localStorage.removeItem("messenger.call.profile"))
 		}
 	})
 })
