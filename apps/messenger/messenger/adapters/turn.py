@@ -345,7 +345,7 @@ def provider_from_env(
                 )
             continue
         built.append((kind, provider))
-    if len(built) == 1 and len(kinds) == 1:
+    if len(built) == 1 and len(kinds) == 1 and observe is None:
         return built[0][1]
     if built:
         return CompositeTurnProvider(

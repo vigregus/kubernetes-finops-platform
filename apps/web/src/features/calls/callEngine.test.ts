@@ -890,4 +890,50 @@ describe("профиль RESTRICTED (RES-011)", () => {
     r.engine.close()
     expect(r.timers.filter((t) => t.ms === DIRECT_ATTEMPT_MS).every((t) => t.cleared)).toBe(true)
   })
+
+  it("запомненный restricted при пустом списке: до создания соединения возврат в normal", async () => {
+    const r = profileRig({ profile: "restricted" }, [])
+    await r.engine.start()
+    expect(r.asked).toEqual(["restricted", "normal"])
+    expect(r.profiles).toEqual(["normal"])
+    expect(r.created).toHaveLength(1)
+    expect(r.created[0].iceTransportPolicy).toBeUndefined()
+    expect(r.created[0].iceServers).toEqual(NORMAL)
+    // и срок прямой попытки заведён: звонок не застрянет без кандидатов
+    expect(r.timers.some((t) => t.ms === DIRECT_ATTEMPT_MS && !t.cleared)).toBe(true)
+  })
+
+  it("браузер не принял relay на лету — профиль остаётся normal, ложного restricted нет", async () => {
+    const r = profileRig()
+    await r.engine.start()
+    r.peer.setConfiguration = () => {
+      throw new Error("InvalidModificationError")
+    }
+    fire(r, DIRECT_ATTEMPT_MS)
+    await flush()
+    expect(r.profiles).toEqual([])
+    expect(r.peer.offers).toHaveLength(1)
+    r.peer.emitState("connected")
+    await flush()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(r.details.at(-1)?.profile).toBe("normal")
+  })
+
+  it("не удалось получить данные restricted — прямая попытка жива, звонок не завершается", async () => {
+    let calls = 0
+    const r = rig({
+      iceServers: async (profile) => {
+        calls += 1
+        if (profile === "restricted") throw new Error("503")
+        return { servers: NORMAL, ttlSeconds: 600 }
+      },
+    })
+    await r.engine.start()
+    fire(r, DIRECT_ATTEMPT_MS)
+    await flush()
+    expect(calls).toBe(2)
+    expect(r.events.some((e) => e.startsWith("failed"))).toBe(false)
+    expect(r.peer.closed).toBe(false)
+    expect(r.peer.offers).toHaveLength(1)
+  })
 })

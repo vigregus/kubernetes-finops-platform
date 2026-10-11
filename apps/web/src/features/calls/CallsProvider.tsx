@@ -308,6 +308,10 @@ export function CallsProvider({
       ...(forceRelay() ? { iceTransportPolicy: "relay" as const } : {}),
       // «Липкий» профиль: если недавно прямая попытка не удалась, начинаем сразу с `restricted`.
       profile: loadProfile(browserProfileStorage(), Date.now()),
+      // Запомненный `restricted` не сработал (нет `turns:`): забываем, не дожидаясь срока.
+      onProfile: (profile) => {
+        if (profile === "normal") rememberProfile(browserProfileStorage(), "normal", Date.now())
+      },
       // Сигналы уходят **строго по одному**: `offer` и пачка кандидатов,
       // отправленные параллельно, достигают сервера в любом порядке, а номер им
       // выдаётся по порядку прихода — и `offer` получал бы номер больше, чем

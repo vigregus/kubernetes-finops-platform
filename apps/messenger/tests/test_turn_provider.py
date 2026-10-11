@@ -282,3 +282,15 @@ def test_restricted_only_оставляет_только_turns():
     out = turn.restricted_only(servers)
     assert [s.urls for s in out] == [("turns:t:443?transport=tcp",)]
     assert out[0].username == "u" and out[0].credential == "c"
+
+
+def test_одиночный_провайдер_с_наблюдателем_тоже_пишет_исход(monkeypatch):
+    """Самая обычная конфигурация — один TURN: метрика исхода не должна молчать (RES-014)."""
+    monkeypatch.setenv("TURN_PROVIDER", "coturn")
+    monkeypatch.setenv("TURN_COTURN_SECRET", "s")
+    monkeypatch.setenv("TURN_COTURN_URLS", "turns:a.example:443?transport=tcp")
+    seen: list = []
+    provider = turn.provider_from_env(observe=lambda name, result: seen.append((name, result)))
+    assert isinstance(provider, turn.CompositeTurnProvider)
+    assert run(provider.ice_servers(ttl_seconds=60)) is not None
+    assert seen == [("coturn", "ok")]

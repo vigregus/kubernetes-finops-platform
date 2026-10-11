@@ -311,7 +311,15 @@ export class CallEngine {
       this.local = stream
       this.opts.onLocalStream(stream)
 
-      const ice = await this.opts.iceServers(this.profile)
+      let ice = await this.opts.iceServers(this.profile)
+      if (this.profile === "restricted" && ice.servers.length === 0) {
+        // Запомненный `restricted` при пустом списке (нет `turns:` или TURN недоступен) оставил бы
+        // звонок relay-only без единого кандидата на весь срок памяти. До создания соединения
+        // возвращаемся в `normal` и забываем запомненное.
+        this.profile = "normal"
+        this.opts.onProfile?.("normal")
+        ice = await this.opts.iceServers("normal")
+      }
       const policy = this.profile === "restricted" ? "relay" : this.opts.iceTransportPolicy
       const pc = this.opts.env.createPeer({
         iceServers: ice.servers,
@@ -506,8 +514,9 @@ export class CallEngine {
    * Переход `normal` → `restricted`: данные только с `turns:`, `iceTransportPolicy=relay` на живом
    * соединении (`setConfiguration`) и перезапуск ICE. Звонящий предлагает заново; вызываемый лишь
    * переставляет конфигурацию и отвечает на перезапуск. Если у сервера нет `turns:` (пустой
-   * список), переход бессмыслен: звонок остаётся в `normal` и ждёт общего окна. Браузер, не
-   * принявший смену политики на лету, оставляет прежнюю: перезапуск всё равно идёт.
+   * список), данные не получены или браузер не принял смену политики на лету, переход не
+   * происходит: звонок остаётся в `normal` и ждёт общего окна. Пересоздание соединения для
+   * браузеров без смены политики на лету — отдельная работа, здесь она не изображается.
    */
   private escalate(): Promise<void> {
     if (this.directTimer !== null) {
@@ -517,10 +526,17 @@ export class CallEngine {
     return this.enqueue(async () => {
       const pc = this.pc
       if (pc === null || this.profile === "restricted") return
-      const ice = await this.opts.iceServers("restricted")
+      // Запасной путь не вправе ухудшать звонок: ошибка получения данных (сеть, 5xx) оставляет
+      // живую прямую попытку как есть, а не завершает звонок через общий `enqueue`.
+      let ice: IceConfig
+      try {
+        ice = await this.opts.iceServers("restricted")
+      } catch {
+        return
+      }
       if (this.closed || ice.servers.length === 0) return
-      this.profile = "restricted"
-      this.opts.onProfile?.("restricted")
+      // Профиль `restricted` значит «браузер действительно принял relay-only»: иначе метрика и
+      // запомненный профиль лгали бы. Не принял (`setConfiguration` бросил) — остаёмся в `normal`.
       try {
         pc.setConfiguration({
           ...pc.getConfiguration(),
@@ -528,8 +544,10 @@ export class CallEngine {
           iceTransportPolicy: "relay",
         })
       } catch {
-        // не принято на лету: перезапуск пойдёт с прежней политикой
+        return
       }
+      this.profile = "restricted"
+      this.opts.onProfile?.("restricted")
       this.scheduleRefresh(ice.ttlSeconds)
       if (this.opts.role === "caller") await this.offer(true)
     })

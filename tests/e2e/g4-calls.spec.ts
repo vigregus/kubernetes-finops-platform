@@ -262,8 +262,9 @@ test.describe("G4: звонки", () => {
 		await b.page.getByRole("button", { name: "Accept call" }).click()
 		await expect(PEER(a)).toHaveAttribute("data-call-phase", "active", { timeout: 60_000 })
 
-		const selected = await selectedPair(a.page)
-		expect(selected).toEqual({ type: "relay", protocol: "tls" })
+		// `forceRelay` требует релея, но не TLS: при доступном UDP Chromium вправе выбрать его.
+		// Что релей идёт именно по TLS, доказывают `RES-A4` и `RES-A10`.
+		expect((await selectedPair(a.page)).type).toBe("relay")
 		await expectMediaFlowing(a.page)
 		await expectMediaFlowing(b.page)
 		for (const who of [a, b]) {
