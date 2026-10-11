@@ -496,10 +496,15 @@ paths:
         (подписанный токен без хранилища, привязан к человеку), список проб и
         **диагностические данные TURN на 45 секунд**: они нужны, чтобы проверить `Allocate` до
         звонка, и не превращают TURN в публичный relay. Выдаются только вошедшему человеку, не
-        чаще шести раз в час (`429`), малой квотой; обычные данные звонка по-прежнему
+        чаще шести раз в час (`429`; при недоступном счётчике — отказ, а не выдача), малой квотой; обычные данные звонка по-прежнему
         выдаются только участнику принятого звонка.
       operationId: createNetworkDiagnosticSession
       responses:
+        '503':
+          description: Звонки или диагностика выключены (`calls_unavailable`)
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
         '201':
           description: Сессия диагностики
           headers:
@@ -521,6 +526,7 @@ paths:
       tags: [diagnostics]
       summary: Технический результат диагностики (RES-012)
       description: |
+        Только при включённой диагностике (`NETWORK_DIAGNOSTICS_ENABLED`) и включённых звонках, иначе `503 calls_unavailable`.
         Клиент сообщает **только технический результат** в закрытых наборах: результаты
         проб, `ice_gathering_ms`, `ice_connection_ms`, выбранный кандидат и протокол релея,
         исход установки, причину отказа. IP, имён хостов и идентификаторов в теле нет, а сервер
@@ -1465,7 +1471,11 @@ components:
           type: array
           maxItems: 10
           items: { $ref: '#/components/schemas/NetworkProbeResult' }
-        ice_gathering_ms: { type: integer, minimum: 0, maximum: 120000 }
+        ice_gathering_ms:
+          type: integer
+          minimum: 0
+          maximum: 120000
+          description: Время от создания соединения до **первого** кандидата, а не до конца сбора.
         ice_connection_ms: { type: integer, minimum: 0, maximum: 120000 }
         selected_candidate: { type: string, enum: [host, srflx, prflx, relay] }
         selected_relay_protocol: { type: string, enum: [udp, tcp, tls] }

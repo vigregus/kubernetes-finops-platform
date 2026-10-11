@@ -128,6 +128,7 @@ EVENTS: dict[str, str] = {
     "call_sweep": APPLICATION,
     "turn_unavailable": APPLICATION,
     "turn_unconfigured": APPLICATION,
+    "diagnostics_secret_ephemeral": APPLICATION,
     # Обращения.
     "http_request": "access",
     # Доступ: кого пустили, кого нет и почему.

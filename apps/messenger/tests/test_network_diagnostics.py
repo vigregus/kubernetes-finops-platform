@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 import pytest
 from fastapi.testclient import TestClient
 
-from messenger.adapters.ratelimit import LimitDecision
+from messenger.adapters.ratelimit import LimitDecision, OnFailure
 from messenger.adapters.turn import CoturnProvider
 from messenger.api import main
 from messenger.api.main import app
@@ -55,6 +55,23 @@ def report(**overrides):
     base = dict(phase="failure", trigger="ice_slow", setup_result="failed")
     base.update(overrides)
     return service.Report(**base)
+
+
+@pytest.fixture(autouse=True)
+def switched_on(monkeypatch):
+    monkeypatch.setenv("CALLS_ENABLED", "true")
+    monkeypatch.setenv("NETWORK_DIAGNOSTICS_ENABLED", "true")
+
+
+class DownLimiter:
+    """Счётчик недоступен: решает `on_failure`, как настоящий лимитер при ошибке Redis."""
+
+    def __init__(self):
+        self.keys: list[str] = []
+
+    async def take(self, key, *, limit, window_seconds, on_failure):
+        self.keys.append(key)
+        return LimitDecision(allowed=on_failure is OnFailure.ALLOW)
 
 
 @pytest.fixture
@@ -111,6 +128,51 @@ def test_недоступный_turn_даёт_сессию_без_серверо
     assert result.rejection is None and result.servers == []
 
 
+# --- выключатели и отказ счётчика -----------------------------------------------------
+
+
+@pytest.mark.parametrize("env", [
+    {"CALLS_ENABLED": "false"},
+    {"NETWORK_DIAGNOSTICS_ENABLED": "false"},
+])
+def test_выключатели_закрывают_выдачу_данных_turn(monkeypatch, env):
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    result = run(service.start_session(
+        turn=coturn(), limiter=Limiter(), secret=SECRET, user_id=ME, now=NOW))
+    assert result.rejection.value == "calls_unavailable" and result.servers == []
+    token = service.issue_id(SECRET, ME, int(NOW) + 600)
+    assert accept(Limiter(), token, report()).rejection.value == "calls_unavailable"
+
+
+def test_по_умолчанию_диагностика_выключена(monkeypatch):
+    monkeypatch.delenv("NETWORK_DIAGNOSTICS_ENABLED", raising=False)
+    assert service.enabled() is False
+
+
+def test_упавший_счётчик_не_открывает_выдачу_данных_turn():
+    down = DownLimiter()
+    result = run(service.start_session(
+        turn=coturn(), limiter=down, secret=SECRET, user_id=ME, now=NOW))
+    assert result.rejection is not None and result.servers == []
+
+
+def test_упавший_счётчик_не_даёт_накрутить_метрики(seen):
+    token = service.issue_id(SECRET, ME, int(NOW) + 600)
+    out = accept(DownLimiter(), token, report(probes=(service.Probe("stun", "ok"),)))
+    assert out.rejection.value == "diagnostic_reported"
+    assert seen["probes"] == [] and seen["diagnostics"] == []
+
+
+def test_uuid_человека_не_попадает_в_ключ_лимитера():
+    down = DownLimiter()
+    run(service.start_session(turn=coturn(), limiter=down, secret=SECRET, user_id=ME, now=NOW))
+    assert down.keys and all(str(ME) not in key for key in down.keys)
+    # псевдоним стабилен для человека и разный у разных людей
+    assert service.subject(SECRET, ME) == service.subject(SECRET, ME)
+    assert service.subject(SECRET, ME) != service.subject(SECRET, OTHER)
+
+
 # --- идентификатор --------------------------------------------------------------------
 
 
@@ -164,6 +226,19 @@ def test_прямой_путь_после_восстановления_это_di
     accept(Limiter(), token, report(
         phase="recovery", setup_result="connected", selected_candidate="srflx"))
     assert seen["rescue"] == [("direct", "unknown", "unknown")]
+
+
+def test_неизвестный_путь_после_восстановления_это_unknown_а_не_direct(seen):
+    token = service.issue_id(SECRET, ME, int(NOW) + 600)
+    accept(Limiter(), token, report(phase="recovery", setup_result="connected"))
+    assert seen["rescue"] == [("unknown", "unknown", "unknown")]
+
+
+def test_relay_без_протокола_это_relay(seen):
+    token = service.issue_id(SECRET, ME, int(NOW) + 600)
+    accept(Limiter(), token, report(
+        phase="recovery", setup_result="connected", selected_candidate="relay"))
+    assert seen["rescue"] == [("relay", "unknown", "unknown")]
 
 
 def test_неудачное_восстановление_ничего_не_спасло(seen):
@@ -266,6 +341,12 @@ def test_сессия_201_без_кэширования(client, monkeypatch):
     body = r.json()
     assert body["ttl_seconds"] == 45 and "turn" in str(body["ice_servers"])
     assert "stun" in body["probes"] and "turn_tls" in body["probes"]
+
+
+def test_при_выключенной_диагностике_503(client, monkeypatch):
+    authenticated(monkeypatch)
+    monkeypatch.setenv("NETWORK_DIAGNOSTICS_ENABLED", "false")
+    assert client.post("/network-diagnostics/session").status_code == 503
 
 
 def test_частые_сессии_429_с_retry_after(client, monkeypatch, runtime):

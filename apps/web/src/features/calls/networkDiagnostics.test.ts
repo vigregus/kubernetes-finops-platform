@@ -225,6 +225,38 @@ describe("CallDiagnostics: «до» и «после»", () => {
     expect(o.reports[0].report.failureReason).toBe("ice_connect_timeout")
   })
 
+  it("быстрый fallback: «после» пришло раньше сессии — ждёт идентификатор и уходит с тем же", async () => {
+    const reports: Array<{ id: string; report: DiagnosticReport }> = []
+    let release: (value: { diagnosticId: string; ttlSeconds: number; servers: RTCIceServer[] }) => void = () => {}
+    const slow: DiagnosticsOps = {
+      session: () => new Promise((resolve) => (release = resolve)),
+      report: async (id, report) => {
+        reports.push({ id, report })
+      },
+    }
+    const d = new CallDiagnostics(slow, env(relayAll).probeEnv)
+    const begun = d.begin("fallback_enabled", "timeout")
+    await d.recovered("fallback_enabled", { mediaPath: "relay", turnTransport: "tls" })
+    expect(reports).toHaveLength(0)
+    release({ diagnosticId: "diag-7", ttlSeconds: 45, servers: SERVERS })
+    await begun
+    expect(reports.map((r) => [r.id, r.report.phase])).toEqual([
+      ["diag-7", "recovery"],
+      ["diag-7", "failure"],
+    ])
+    expect(reports[0].report).toMatchObject({ selectedCandidate: "relay", selectedRelayProtocol: "tls" })
+  })
+
+  it("сессия не открылась — отложенное «после» тихо отбрасывается", async () => {
+    const o = ops()
+    o.value.fail = "session"
+    const d = new CallDiagnostics(o.value, env(relayAll).probeEnv)
+    const begun = d.begin("fallback_enabled")
+    await d.recovered("fallback_enabled", { mediaPath: "relay" })
+    await begun
+    expect(o.reports).toHaveLength(0)
+  })
+
   it("«после» без «до» не отправляется", async () => {
     const o = ops()
     const d = new CallDiagnostics(o.value, env(relayAll).probeEnv)

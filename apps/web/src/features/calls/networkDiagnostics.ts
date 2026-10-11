@@ -163,6 +163,7 @@ export class CallDiagnostics {
   private id: string | null = null
   private started = false
   private reportedRecovery = false
+  private pending: { trigger: DiagnosticTrigger; detail: ConnectionDetail } | null = null
 
   private readonly ops: DiagnosticsOps
   private readonly env: ProbeEnv
@@ -183,6 +184,8 @@ export class CallDiagnostics {
     try {
       const session = await this.ops.session()
       this.id = session.diagnosticId
+      // Звонок мог соединиться, пока сессия открывалась: «после» ждало идентификатор.
+      await this.flushRecovery()
       const probes = await runProbes(this.env, session.servers)
       await this.ops.report(session.diagnosticId, {
         phase: "failure",
@@ -196,10 +199,23 @@ export class CallDiagnostics {
     }
   }
 
-  /** Снимок «после»: что именно спасло звонок. Нужен идентификатор «до». */
+  /**
+   * Снимок «после»: что именно спасло звонок. Быстрый fallback соединяется раньше, чем
+   * открылась сессия диагностики, поэтому «после» не теряется, а ждёт идентификатор.
+   * Без `begin` прикрепить его не к чему — тишина.
+   */
   async recovered(trigger: DiagnosticTrigger, detail: ConnectionDetail): Promise<void> {
-    if (this.id === null || this.reportedRecovery) return
+    if (!this.started || this.reportedRecovery) return
+    this.pending = { trigger, detail }
+    if (this.id !== null) await this.flushRecovery()
+  }
+
+  private async flushRecovery(): Promise<void> {
+    const pending = this.pending
+    if (pending === null || this.id === null || this.reportedRecovery) return
+    this.pending = null
     this.reportedRecovery = true
+    const { trigger, detail } = pending
     try {
       await this.ops.report(this.id, {
         phase: "recovery",

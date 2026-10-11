@@ -16,6 +16,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import logging
 import os
 import secrets
 import time
@@ -27,8 +28,27 @@ from messenger.domain import call as call_domain
 from messenger.domain import diagnostics as domain
 from messenger.domain.errors import Reason
 from messenger.domain.ids import UserId
+from messenger.services import calls as calls_service
 from messenger.telemetry import metrics
 from messenger.telemetry.network import NetworkContext
+
+log = logging.getLogger(__name__)
+
+
+def enabled() -> bool:
+    """Выключатель диагностики: свой флаг **и** включённые звонки.
+
+    Диагностика выдаёт данные TURN вне живого звонка, поэтому она не вправе пережить выключатель
+    звонков (`CALLS_ENABLED`, ADR 0007) и включается отдельно: `NETWORK_DIAGNOSTICS_ENABLED`
+    (по умолчанию выключено) — вместе с готовностью защиты от злоупотреблений (`CALL-017`).
+    """
+    flag = os.getenv("NETWORK_DIAGNOSTICS_ENABLED", "false").strip().lower()
+    return calls_service.enabled() and flag in ("1", "true", "yes", "on")
+
+
+def subject(secret: bytes, user_id: UserId) -> str:
+    """Псевдоним человека для ключей лимитера: UUID не попадает в журнал при сбое Redis."""
+    return hmac.new(secret, f"subject:{user_id}".encode(), hashlib.sha256).hexdigest()[:20]
 
 
 def secret_from_env() -> bytes:
@@ -36,7 +56,8 @@ def secret_from_env() -> bytes:
 
     `DIAGNOSTICS_SECRET`, иначе производный от секрета coturn (общий на все реплики), иначе
     случайный на процесс: идентификаторы тогда живут до перезапуска — для сессии в десять
-    минут это допустимо, но с несколькими репликами нужен общий секрет.
+    минут это допустимо, но с несколькими репликами нужен общий секрет (иначе токен,
+    выданный одной репликой, другая отвергнет как чужой), поэтому процесс об этом предупреждает.
     """
     explicit = os.getenv("DIAGNOSTICS_SECRET", "")
     if explicit:
@@ -44,6 +65,10 @@ def secret_from_env() -> bytes:
     coturn = os.getenv("TURN_COTURN_SECRET", "")
     if coturn:
         return hashlib.sha256(b"network-diagnostics:" + coturn.encode()).digest()
+    log.warning(
+        "секрет диагностики случаен на процесс: с несколькими репликами задайте DIAGNOSTICS_SECRET",
+        extra={"event": "diagnostics_secret_ephemeral", "result": "degraded"},
+    )
     return secrets.token_bytes(32)
 
 
@@ -88,12 +113,16 @@ async def start_session(
     user_id: UserId,
     now: float | None = None,
 ) -> SessionResult:
+    if not enabled():
+        return SessionResult(rejection=Reason.CALLS_UNAVAILABLE)
     moment = now if now is not None else time.time()
+    # Fail-closed: данные TURN вне звонка дороже отказа. Упал счётчик — диагностики нет, а не
+    # неограниченная выдача relay-доступа любому аккаунту.
     decision = await limiter.take(
-        f"diag-session:{user_id}",
+        f"diag-session:{subject(secret, user_id)}",
         limit=domain.SESSIONS_PER_HOUR,
         window_seconds=3600,
-        on_failure=OnFailure.ALLOW,
+        on_failure=OnFailure.DENY,
     )
     if not decision.allowed:
         return SessionResult(
@@ -145,16 +174,18 @@ async def accept_report(
     network: NetworkContext | None = None,
     now: float | None = None,
 ) -> ReportResult:
+    if not enabled():
+        return ReportResult(rejection=Reason.CALLS_UNAVAILABLE)
     moment = now if now is not None else time.time()
     if not verify_id(secret, user_id, diagnostic_id, moment):
         return ReportResult(rejection=Reason.DIAGNOSTIC_NOT_FOUND)
-    # Одна фаза — один результат. Недоступный счётчик пропускает (`ALLOW`): метрика не
-    # безопасность, а защита от накрутки держится на аутентификации и сроке.
+    # Одна фаза — один результат. Fail-closed: эти данные станут основой рекомендаций
+    # (`RES-013`), и повтор при упавшем счётчике был бы примитивом отравления метрик.
     taken = await limiter.take(
         f"diag-report:{diagnostic_id}:{report.phase}",
         limit=1,
         window_seconds=domain.REPORT_WINDOW_SECONDS,
-        on_failure=OnFailure.ALLOW,
+        on_failure=OnFailure.DENY,
     )
     if not taken.allowed:
         return ReportResult(rejection=Reason.DIAGNOSTIC_REPORTED)
@@ -174,14 +205,17 @@ async def accept_report(
     if report.ice_connection_ms is not None:
         metrics.network_ice("connection", report.ice_connection_ms / 1000)
     if report.phase == "recovery" and report.setup_result == "connected":
-        # Что спасло звонок: транспорт релея либо прямой путь.
+        # Что спасло звонок: транспорт релея либо прямой путь. Путь неизвестен — `unknown`, а не
+        # «direct»: иначе главная метрика говорила бы противоположное реальности.
         if report.selected_candidate == "relay":
             rescued = (
                 report.selected_relay_protocol
                 if report.selected_relay_protocol in call_domain.TURN_TRANSPORTS
                 else "relay"
             )
-        else:
+        elif report.selected_candidate in ("host", "srflx", "prflx"):
             rescued = "direct"
+        else:
+            rescued = "unknown"
         metrics.network_rescue(rescued, net.country, net.net_class)
     return ReportResult()
