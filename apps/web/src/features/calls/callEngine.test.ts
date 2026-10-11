@@ -14,6 +14,8 @@ import {
   encodingFor,
   mediaConstraints,
   DIRECT_ATTEMPT_MS,
+  ESCALATION_RETRIES,
+  ESCALATION_RETRY_MS,
   type CallProfile,
   type ConnectionDetail,
   type EngineOptions,
@@ -847,14 +849,116 @@ describe("профиль RESTRICTED (RES-011)", () => {
     expect(r.peer.offers).toHaveLength(1)
   })
 
-  it("вызываемый переставляет конфигурацию, но не предлагает сам", async () => {
+  it("вызываемый сам по таймеру в restricted не переходит: срок прямой попытки у него не заводится", async () => {
     const r = profileRig({ role: "callee" })
+    await r.engine.start()
+    expect(r.timers.some((t) => t.ms === DIRECT_ATTEMPT_MS)).toBe(false)
+    r.peer.emitState("failed")
+    await flush()
+    expect(r.profiles).toEqual([])
+    expect(r.peer.configurations.some((c) => c.iceTransportPolicy === "relay")).toBe(false)
+  })
+
+  it("вызываемый переходит по перезапускающему offer до первой связи и отвечает под relay", async () => {
+    const r = profileRig({ role: "callee" })
+    await r.engine.start()
+    await r.engine.handleSignal({ type: "offer", sdp: "o1" })
+    expect(r.profiles).toEqual([])
+    await r.engine.handleSignal({ type: "offer", sdp: "o2" })
+    expect(r.profiles).toEqual(["restricted"])
+    const applied = r.peer.configurations.at(-1)
+    expect(applied?.iceTransportPolicy).toBe("relay")
+    expect(applied?.iceServers).toEqual(TLS)
+    expect(r.sent.filter((x) => x.type === "answer")).toHaveLength(2)
+  })
+
+  it("вызываемый, уже соединившийся напрямую, restricted не объявляет и не запоминает", async () => {
+    const r = profileRig({ role: "callee" })
+    await r.engine.start()
+    await r.engine.handleSignal({ type: "offer", sdp: "o1" })
+    r.peer.emitState("connected")
+    await flush()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    await r.engine.handleSignal({ type: "offer", sdp: "o2" })
+    expect(r.profiles).toEqual([])
+    expect(r.details.at(-1)?.profile).toBe("normal")
+    expect(r.peer.configurations.some((c) => c.iceTransportPolicy === "relay")).toBe(false)
+  })
+
+  it("временный сбой получения restricted: повтор через 3 с, затем перезапуск ICE под relay", async () => {
+    let restrictedCalls = 0
+    const r = rig({
+      iceServers: async (profile) => {
+        if (profile === "restricted") {
+          restrictedCalls += 1
+          if (restrictedCalls === 1) throw new Error("503")
+          return { servers: TLS, ttlSeconds: 600 }
+        }
+        return { servers: NORMAL, ttlSeconds: 600 }
+      },
+    })
     await r.engine.start()
     fire(r, DIRECT_ATTEMPT_MS)
     await flush()
-    expect(r.profiles).toEqual(["restricted"])
+    expect(r.events.some((e) => e.startsWith("failed"))).toBe(false)
+    expect(r.timers.some((t) => t.ms === ESCALATION_RETRY_MS && !t.cleared)).toBe(true)
+    fire(r, ESCALATION_RETRY_MS)
+    await flush()
+    expect(restrictedCalls).toBe(2)
     expect(r.peer.configurations.at(-1)?.iceTransportPolicy).toBe("relay")
-    expect(r.peer.offers).toHaveLength(0)
+    expect(r.peer.offers.at(-1)).toEqual({ iceRestart: true })
+  })
+
+  it("повторы ограничены: постоянный сбой не создаёт бесконечный цикл", async () => {
+    let restrictedCalls = 0
+    const r = rig({
+      iceServers: async (profile) => {
+        if (profile === "restricted") {
+          restrictedCalls += 1
+          throw new Error("503")
+        }
+        return { servers: NORMAL, ttlSeconds: 600 }
+      },
+    })
+    await r.engine.start()
+    fire(r, DIRECT_ATTEMPT_MS)
+    await flush()
+    for (let i = 0; i < 10; i += 1) {
+      fire(r, ESCALATION_RETRY_MS)
+      await flush()
+    }
+    expect(restrictedCalls).toBe(1 + ESCALATION_RETRIES)
+    expect(r.events.some((e) => e.startsWith("failed"))).toBe(false)
+  })
+
+  it("пустой список restricted тоже повторяется: TURN мог быть временно недоступен", async () => {
+    let restrictedCalls = 0
+    const r = rig({
+      iceServers: async (profile) => {
+        if (profile === "restricted") {
+          restrictedCalls += 1
+          return { servers: restrictedCalls === 1 ? [] : TLS, ttlSeconds: 600 }
+        }
+        return { servers: NORMAL, ttlSeconds: 600 }
+      },
+    })
+    await r.engine.start()
+    fire(r, DIRECT_ATTEMPT_MS)
+    await flush()
+    fire(r, ESCALATION_RETRY_MS)
+    await flush()
+    expect(r.peer.configurations.at(-1)?.iceTransportPolicy).toBe("relay")
+  })
+
+  it("браузер не принял relay на лету — повторов нет (бессмысленно)", async () => {
+    const r = profileRig()
+    await r.engine.start()
+    r.peer.setConfiguration = () => {
+      throw new Error("InvalidModificationError")
+    }
+    fire(r, DIRECT_ATTEMPT_MS)
+    await flush()
+    expect(r.timers.some((t) => t.ms === ESCALATION_RETRY_MS)).toBe(false)
   })
 
   it("принудительный relay (forceRelay) срок прямой попытки не заводит", async () => {

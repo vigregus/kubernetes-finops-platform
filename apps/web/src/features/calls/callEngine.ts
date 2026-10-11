@@ -47,6 +47,9 @@ export type CallProfile = "normal" | "restricted"
 
 /** Срок прямой попытки до перехода в `restricted` (часть 18, §5: 8–10 с, уточняется измерениями). */
 export const DIRECT_ATTEMPT_MS = 9_000
+/** Повтор перехода в `restricted` после временной неудачи (данные не получены или пусты). */
+export const ESCALATION_RETRY_MS = 3_000
+export const ESCALATION_RETRIES = 3
 
 /**
  * Оставляет только серверы TURN с нужным транспортом — отладочный переключатель проверки
@@ -381,6 +384,18 @@ export class CallEngine {
         }
         return
       }
+      // Вызываемый переходит в `restricted` по перезапускающему offer звонящего: второй offer до
+      // первой связи — это и есть эскалация (перезапуск при обрыве бывает только после связи).
+      // Конфигурация ставится до ответа, чтобы новый сбор кандидатов шёл уже под relay-only.
+      if (
+        signal.type === "offer" &&
+        this.haveRemote &&
+        this.opts.role === "callee" &&
+        this.profile === "normal" &&
+        this.lastReported === null
+      ) {
+        await this.applyRestricted()
+      }
       await pc.setRemoteDescription({ type: signal.type, sdp: signal.sdp })
       this.haveRemote = true
       for (const candidate of this.pendingRemote.splice(0)) await pc.addIceCandidate(candidate)
@@ -481,8 +496,8 @@ export class CallEngine {
       case "failed":
         this.startReconnect()
         // Все пары отвергнуты, а связи не было: сразу в `restricted`, не дожидаясь срока.
-        if (this.profile === "normal" && this.lastReported === null) {
-          void this.escalate()
+        if (this.profile === "normal" && this.lastReported === null && this.opts.role === "caller") {
+          void this.escalate(0)
           return
         }
         if (this.opts.role === "caller") void this.enqueue(() => this.offer(true))
@@ -501,55 +516,79 @@ export class CallEngine {
    * Уже работающая связь переход не запускает.
    */
   private armDirectAttempt(): void {
+    // Эскалацию ведёт один координатор — звонящий, как и предложение (offer) всегда за ним.
+    // Вызываемый сам по таймеру не переходит: `setConfiguration` без перезапуска ICE не
+    // доказывает, что текущий сбор построен под новую политику, и старая прямая пара могла бы
+    // соединиться «в restricted». Он переходит, получив перезапускающий offer (`handleSignal`).
+    if (this.opts.role !== "caller") return
     if (this.profile !== "normal" || this.opts.iceTransportPolicy === "relay") return
     this.directTimer = this.timers.setTimeout(() => {
       this.directTimer = null
       if (!this.closed && this.lastReported === null && this.pc?.connectionState !== "connected") {
-        void this.escalate()
+        void this.escalate(0)
       }
     }, this.opts.directAttemptMs ?? DIRECT_ATTEMPT_MS)
   }
 
   /**
-   * Переход `normal` → `restricted`: данные только с `turns:`, `iceTransportPolicy=relay` на живом
-   * соединении (`setConfiguration`) и перезапуск ICE. Звонящий предлагает заново; вызываемый лишь
-   * переставляет конфигурацию и отвечает на перезапуск. Если у сервера нет `turns:` (пустой
-   * список), данные не получены или браузер не принял смену политики на лету, переход не
-   * происходит: звонок остаётся в `normal` и ждёт общего окна. Пересоздание соединения для
-   * браузеров без смены политики на лету — отдельная работа, здесь она не изображается.
+   * Применяет `restricted` к живому соединению: данные только с `turns:` и
+   * `iceTransportPolicy=relay` (`setConfiguration`). Результат:
+   * - `applied` — браузер принял; профиль стал `restricted` (метрика и память не лгут);
+   * - `retry` — данные не получены (сеть, 5xx) или список пуст, возможно, временно;
+   * - `unsupported` — `setConfiguration` бросил: смена политики на лету не поддерживается,
+   *   повторять бессмысленно (пересоздание соединения — отдельная работа).
+   * Исключение наружу не уходит: запасной путь не вправе завершать звонок через `enqueue`.
    */
-  private escalate(): Promise<void> {
+  private async applyRestricted(): Promise<"applied" | "retry" | "unsupported"> {
+    const pc = this.pc
+    if (pc === null || this.closed) return "unsupported"
+    let ice: IceConfig
+    try {
+      ice = await this.opts.iceServers("restricted")
+    } catch {
+      return "retry"
+    }
+    if (this.closed) return "unsupported"
+    if (ice.servers.length === 0) return "retry"
+    try {
+      pc.setConfiguration({
+        ...pc.getConfiguration(),
+        iceServers: ice.servers,
+        iceTransportPolicy: "relay",
+      })
+    } catch {
+      return "unsupported"
+    }
+    this.profile = "restricted"
+    this.opts.onProfile?.("restricted")
+    this.scheduleRefresh(ice.ttlSeconds)
+    return "applied"
+  }
+
+  /**
+   * Переход `normal` → `restricted` у звонящего: `applyRestricted`, затем перезапуск ICE.
+   * Временная неудача повторяется через `ESCALATION_RETRY_MS` не более `ESCALATION_RETRIES`
+   * раз и только пока связи не было: одна неудача в единственную попытку не должна лишать
+   * звонок здорового relay, который появится через секунду.
+   */
+  private escalate(attempt: number): Promise<void> {
     if (this.directTimer !== null) {
       this.timers.clearTimeout(this.directTimer)
       this.directTimer = null
     }
     return this.enqueue(async () => {
-      const pc = this.pc
-      if (pc === null || this.profile === "restricted") return
-      // Запасной путь не вправе ухудшать звонок: ошибка получения данных (сеть, 5xx) оставляет
-      // живую прямую попытку как есть, а не завершает звонок через общий `enqueue`.
-      let ice: IceConfig
-      try {
-        ice = await this.opts.iceServers("restricted")
-      } catch {
+      if (this.pc === null || this.profile === "restricted") return
+      const outcome = await this.applyRestricted()
+      if (outcome === "retry" && attempt < ESCALATION_RETRIES) {
+        this.directTimer = this.timers.setTimeout(() => {
+          this.directTimer = null
+          if (!this.closed && this.lastReported === null && this.profile === "normal") {
+            void this.escalate(attempt + 1)
+          }
+        }, ESCALATION_RETRY_MS)
         return
       }
-      if (this.closed || ice.servers.length === 0) return
-      // Профиль `restricted` значит «браузер действительно принял relay-only»: иначе метрика и
-      // запомненный профиль лгали бы. Не принял (`setConfiguration` бросил) — остаёмся в `normal`.
-      try {
-        pc.setConfiguration({
-          ...pc.getConfiguration(),
-          iceServers: ice.servers,
-          iceTransportPolicy: "relay",
-        })
-      } catch {
-        return
-      }
-      this.profile = "restricted"
-      this.opts.onProfile?.("restricted")
-      this.scheduleRefresh(ice.ttlSeconds)
-      if (this.opts.role === "caller") await this.offer(true)
+      if (outcome === "applied") await this.offer(true)
     })
   }
 
