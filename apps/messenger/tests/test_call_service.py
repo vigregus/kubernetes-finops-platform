@@ -540,9 +540,10 @@ class Turn:
         return self.result
 
 
-def ice(call_id, by, turn, limiter=None, now=None):
+def ice(call_id, by, turn, limiter=None, now=None, profile="normal"):
     return run(service.ice_servers(
-        Conn(), turn=turn, limiter=limiter or Limiter(), user_id=by, call_id=call_id, now=now))
+        Conn(), turn=turn, limiter=limiter or Limiter(), user_id=by, call_id=call_id, now=now,
+        profile=profile))
 
 
 def accepted_call(store):
@@ -982,3 +983,64 @@ def test_отказ_без_причины_тоже_считается(store, see
     call_id = accepted_call(store)
     run(service.fail(Conn(), realtime=rt, user_id=A, call_id=call_id))
     assert seen["failures"] == [("unknown", "unknown", "unknown")]
+
+
+# --- RES-011: профиль RESTRICTED ------------------------------------------------------------
+
+
+def test_restricted_отдаёт_только_turns_без_stun_и_udp(store):
+    from messenger.adapters.turn import IceServer
+    call_id = accepted_call(store)
+    turn = Turn([
+        IceServer(urls=("stun:s:3478",)),
+        IceServer(
+            urls=("turn:t:3478?transport=udp", "turns:t:443?transport=tcp"),
+            username="u", credential="c"),
+        IceServer(urls=("turn:u:3478",), username="u2", credential="c2"),
+    ])
+    result = ice(call_id, B, turn, now=TURN_AT, profile="restricted")
+    assert result.servers == [
+        {"urls": ["turns:t:443?transport=tcp"], "username": "u", "credential": "c"}
+    ]
+
+
+def test_normal_отдаёт_всё_как_раньше(store):
+    from messenger.adapters.turn import IceServer
+    call_id = accepted_call(store)
+    turn = Turn([IceServer(urls=("stun:s", "turn:t"), username="u", credential="c")])
+    result = ice(call_id, B, turn, now=TURN_AT)
+    assert result.servers == [{"urls": ["stun:s", "turn:t"], "username": "u", "credential": "c"}]
+
+
+def test_restricted_без_turns_даёт_пустой_список_а_не_открытый_turn(store):
+    from messenger.adapters.turn import IceServer
+    call_id = accepted_call(store)
+    turn = Turn([IceServer(urls=("turn:t:3478",), username="u", credential="c")])
+    assert ice(call_id, B, turn, now=TURN_AT, profile="restricted").servers == []
+
+
+@pytest.fixture
+def profiles(monkeypatch):
+    records: list[str] = []
+    monkeypatch.setattr(service.metrics, "call_profile", records.append)
+    monkeypatch.setattr(service.metrics, "call_media_path", lambda *a: None)
+    return records
+
+
+def test_профиль_звонка_пишется_один_раз(store, profiles):
+    rt = Realtime()
+    call_id = accepted_call(store)
+    for _ in range(2):
+        run(service.report_connected(
+            Conn(), realtime=rt, user_id=A, call_id=call_id, connection_type="relay",
+            media_path="relay", turn_transport="tls", profile="restricted"))
+    assert profiles == ["restricted"]
+
+
+def test_негодный_профиль_не_становится_меткой(store, profiles):
+    rt = Realtime()
+    call_id = accepted_call(store)
+    run(service.report_connected(
+        Conn(), realtime=rt, user_id=A, call_id=call_id, connection_type="relay",
+        profile="turbo"))
+    assert profiles == []

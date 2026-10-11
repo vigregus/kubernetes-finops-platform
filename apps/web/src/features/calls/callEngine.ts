@@ -35,7 +35,21 @@ export type TurnTransport = "udp" | "tcp" | "tls"
 export interface ConnectionDetail {
   readonly mediaPath?: MediaPath
   readonly turnTransport?: TurnTransport
+  /** Профиль, в котором звонок соединился (RES-011). */
+  readonly profile?: CallProfile
 }
+
+/**
+ * Профиль соединения (`RES-011`). `normal` — обычный ICE, прямой путь предпочтителен.
+ * `restricted` — `iceTransportPolicy=relay` и только `turns:`: прямой и UDP-путь звонка исключены.
+ */
+export type CallProfile = "normal" | "restricted"
+
+/** Срок прямой попытки до перехода в `restricted` (часть 18, §5: 8–10 с, уточняется измерениями). */
+export const DIRECT_ATTEMPT_MS = 9_000
+/** Повтор перехода в `restricted` после временной неудачи (данные не получены или пусты). */
+export const ESCALATION_RETRY_MS = 3_000
+export const ESCALATION_RETRIES = 3
 
 /**
  * Оставляет только серверы TURN с нужным транспортом — отладочный переключатель проверки
@@ -90,7 +104,7 @@ export interface EngineOptions {
   readonly kind: "audio" | "video"
   readonly sendSignal: (signal: WireSignal) => Promise<void>
   /** Данные STUN/TURN и сколько они действуют: по истечении их нужно взять заново. */
-  readonly iceServers: () => Promise<IceConfig>
+  readonly iceServers: (profile: CallProfile) => Promise<IceConfig>
   readonly onLocalStream: (stream: MediaStream) => void
   readonly onRemoteStream: (stream: MediaStream) => void
   /** Медиа пошло; путь соединения — по `getStats()`. Один раз за звонок. */
@@ -101,6 +115,12 @@ export interface EngineOptions {
   readonly videoQuality?: VideoQuality
   /** Принудительный релей (проверка TURN): `relay` — кандидаты только через сервер. */
   readonly iceTransportPolicy?: RTCIceTransportPolicy
+  /** Начальный профиль: `restricted` — по `last_success` или рекомендации (RES-011/RES-013). */
+  readonly profile?: CallProfile
+  /** Срок прямой попытки до перехода в `restricted`; по умолчанию `DIRECT_ATTEMPT_MS`. */
+  readonly directAttemptMs?: number
+  /** Профиль сменился (прямая попытка не удалась): клиент запоминает его для следующего звонка. */
+  readonly onProfile?: (profile: CallProfile) => void
   /** Предпочесть H.264 (аппаратное кодирование на устройствах Apple). */
   readonly preferH264?: boolean
   readonly reconnectWindowMs?: number
@@ -242,10 +262,13 @@ export class CallEngine {
   private measuring = false
   private refreshTimer: unknown = null
   private quality: VideoQuality = "auto"
+  private profile: CallProfile = "normal"
+  private directTimer: unknown = null
 
   constructor(options: EngineOptions) {
     this.opts = options
     this.quality = options.videoQuality ?? "auto"
+    this.profile = options.profile ?? "normal"
   }
 
   private get timers() {
@@ -291,15 +314,23 @@ export class CallEngine {
       this.local = stream
       this.opts.onLocalStream(stream)
 
-      const ice = await this.opts.iceServers()
+      let ice = await this.opts.iceServers(this.profile)
+      if (this.profile === "restricted" && ice.servers.length === 0) {
+        // Запомненный `restricted` при пустом списке (нет `turns:` или TURN недоступен) оставил бы
+        // звонок relay-only без единого кандидата на весь срок памяти. До создания соединения
+        // возвращаемся в `normal` и забываем запомненное.
+        this.profile = "normal"
+        this.opts.onProfile?.("normal")
+        ice = await this.opts.iceServers("normal")
+      }
+      const policy = this.profile === "restricted" ? "relay" : this.opts.iceTransportPolicy
       const pc = this.opts.env.createPeer({
         iceServers: ice.servers,
-        ...(this.opts.iceTransportPolicy === undefined
-          ? {}
-          : { iceTransportPolicy: this.opts.iceTransportPolicy }),
+        ...(policy === undefined ? {} : { iceTransportPolicy: policy }),
       })
       this.pc = pc
       this.scheduleRefresh(ice.ttlSeconds)
+      this.armDirectAttempt()
       stream.getTracks().forEach((track) => {
         // Камера — это движение, а не неподвижная картинка: кодек бережёт плавность,
         // а не резкость каждого кадра.
@@ -353,6 +384,18 @@ export class CallEngine {
         }
         return
       }
+      // Вызываемый переходит в `restricted` по перезапускающему offer звонящего: второй offer до
+      // первой связи — это и есть эскалация (перезапуск при обрыве бывает только после связи).
+      // Конфигурация ставится до ответа, чтобы новый сбор кандидатов шёл уже под relay-only.
+      if (
+        signal.type === "offer" &&
+        this.haveRemote &&
+        this.opts.role === "callee" &&
+        this.profile === "normal" &&
+        this.lastReported === null
+      ) {
+        await this.applyRestricted()
+      }
       await pc.setRemoteDescription({ type: signal.type, sdp: signal.sdp })
       this.haveRemote = true
       for (const candidate of this.pendingRemote.splice(0)) await pc.addIceCandidate(candidate)
@@ -393,7 +436,7 @@ export class CallEngine {
     const pc = this.pc
     if (pc === null || this.closed) return
     try {
-      const ice = await this.opts.iceServers()
+      const ice = await this.opts.iceServers(this.profile)
       if (this.closed) return
       pc.setConfiguration({ ...pc.getConfiguration(), iceServers: ice.servers })
       this.scheduleRefresh(ice.ttlSeconds)
@@ -452,11 +495,101 @@ export class CallEngine {
         return
       case "failed":
         this.startReconnect()
+        // Все пары отвергнуты, а связи не было: сразу в `restricted`, не дожидаясь срока.
+        if (this.profile === "normal" && this.lastReported === null && this.opts.role === "caller") {
+          void this.escalate(0)
+          return
+        }
         if (this.opts.role === "caller") void this.enqueue(() => this.offer(true))
         return
       default:
         return
     }
+  }
+
+  // --- профиль RESTRICTED (RES-011) --------------------------------------------------
+
+  /**
+   * Прямой попытке дан ограниченный срок (`DIRECT_ATTEMPT_MS`). Не соединились — звонок не
+   * ждёт общего окна установки (30 с), а переходит на relay-only через `turns:`: сеть, где
+   * UDP и прямой путь режутся, иначе теряла бы на ожидании полминуты, а то и весь звонок.
+   * Уже работающая связь переход не запускает.
+   */
+  private armDirectAttempt(): void {
+    // Эскалацию ведёт один координатор — звонящий, как и предложение (offer) всегда за ним.
+    // Вызываемый сам по таймеру не переходит: `setConfiguration` без перезапуска ICE не
+    // доказывает, что текущий сбор построен под новую политику, и старая прямая пара могла бы
+    // соединиться «в restricted». Он переходит, получив перезапускающий offer (`handleSignal`).
+    if (this.opts.role !== "caller") return
+    if (this.profile !== "normal" || this.opts.iceTransportPolicy === "relay") return
+    this.directTimer = this.timers.setTimeout(() => {
+      this.directTimer = null
+      if (!this.closed && this.lastReported === null && this.pc?.connectionState !== "connected") {
+        void this.escalate(0)
+      }
+    }, this.opts.directAttemptMs ?? DIRECT_ATTEMPT_MS)
+  }
+
+  /**
+   * Применяет `restricted` к живому соединению: данные только с `turns:` и
+   * `iceTransportPolicy=relay` (`setConfiguration`). Результат:
+   * - `applied` — браузер принял; профиль стал `restricted` (метрика и память не лгут);
+   * - `retry` — данные не получены (сеть, 5xx) или список пуст, возможно, временно;
+   * - `unsupported` — `setConfiguration` бросил: смена политики на лету не поддерживается,
+   *   повторять бессмысленно (пересоздание соединения — отдельная работа).
+   * Исключение наружу не уходит: запасной путь не вправе завершать звонок через `enqueue`.
+   */
+  private async applyRestricted(): Promise<"applied" | "retry" | "unsupported"> {
+    const pc = this.pc
+    if (pc === null || this.closed) return "unsupported"
+    let ice: IceConfig
+    try {
+      ice = await this.opts.iceServers("restricted")
+    } catch {
+      return "retry"
+    }
+    if (this.closed) return "unsupported"
+    if (ice.servers.length === 0) return "retry"
+    try {
+      pc.setConfiguration({
+        ...pc.getConfiguration(),
+        iceServers: ice.servers,
+        iceTransportPolicy: "relay",
+      })
+    } catch {
+      return "unsupported"
+    }
+    this.profile = "restricted"
+    this.opts.onProfile?.("restricted")
+    this.scheduleRefresh(ice.ttlSeconds)
+    return "applied"
+  }
+
+  /**
+   * Переход `normal` → `restricted` у звонящего: `applyRestricted`, затем перезапуск ICE.
+   * Временная неудача повторяется через `ESCALATION_RETRY_MS` не более `ESCALATION_RETRIES`
+   * раз и только пока связи не было: одна неудача в единственную попытку не должна лишать
+   * звонок здорового relay, который появится через секунду.
+   */
+  private escalate(attempt: number): Promise<void> {
+    if (this.directTimer !== null) {
+      this.timers.clearTimeout(this.directTimer)
+      this.directTimer = null
+    }
+    return this.enqueue(async () => {
+      if (this.pc === null || this.profile === "restricted") return
+      const outcome = await this.applyRestricted()
+      if (outcome === "retry" && attempt < ESCALATION_RETRIES) {
+        this.directTimer = this.timers.setTimeout(() => {
+          this.directTimer = null
+          if (!this.closed && this.lastReported === null && this.profile === "normal") {
+            void this.escalate(attempt + 1)
+          }
+        }, ESCALATION_RETRY_MS)
+        return
+      }
+      if (outcome === "applied") await this.offer(true)
+    })
   }
 
   private startReconnect(): void {
@@ -514,7 +647,7 @@ export class CallEngine {
       if (type === this.lastReported) return
       this.lastReported = type
       if (first) this.applyQuality()
-      this.opts.onConnected(type, detail)
+      this.opts.onConnected(type, { ...detail, profile: this.profile })
     } finally {
       this.measuring = false
     }
@@ -623,6 +756,7 @@ export class CallEngine {
     this.clearReconnect()
     if (this.flushTimer !== null) this.timers.clearTimeout(this.flushTimer)
     if (this.refreshTimer !== null) this.timers.clearTimeout(this.refreshTimer)
+    if (this.directTimer !== null) this.timers.clearTimeout(this.directTimer)
     this.local?.getTracks().forEach((track) => track.stop())
     if (this.pc !== null) {
       this.pc.ontrack = null

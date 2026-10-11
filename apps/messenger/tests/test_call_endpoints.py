@@ -345,3 +345,17 @@ def test_отказ_несёт_причину_и_принимается_без_�
     assert fake.kwargs["reason"] == "ice_disconnected"
     assert client.post(f"/calls/{CALL_ID}/fail").status_code == 200
     assert fake.kwargs["reason"] is None
+
+
+def test_профиль_restricted_уходит_в_сервис(client, monkeypatch):
+    authenticated(monkeypatch)
+    fake = patch(monkeypatch, "ice_servers", service.IceResult(servers=[], ttl_seconds=60))
+    assert client.get(f"/calls/{CALL_ID}/ice-servers?profile=restricted").status_code == 200
+    assert fake.kwargs["profile"] == "restricted"
+    assert client.get(f"/calls/{CALL_ID}/ice-servers").status_code == 200
+    assert fake.kwargs["profile"] == "normal"
+
+
+def test_неизвестный_профиль_отвергается(client, monkeypatch):
+    authenticated(monkeypatch)
+    assert client.get(f"/calls/{CALL_ID}/ice-servers?profile=turbo").status_code == 422

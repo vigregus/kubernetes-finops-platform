@@ -39,3 +39,23 @@ export async function packetsReceived(page: Page): Promise<number> {
 		return total
 	})
 }
+
+/** Выбранная пара кандидатов: тип локального кандидата и транспорт TURN (`relayProtocol`). */
+export async function selectedPair(page: Page): Promise<{ type: string; protocol: string }> {
+	return page.evaluate(async () => {
+		const peers = (window as unknown as { __peers?: RTCPeerConnection[] }).__peers ?? []
+		for (const peer of peers) {
+			const report = await peer.getStats()
+			const byId = new Map<string, Record<string, unknown>>()
+			report.forEach((entry: Record<string, unknown>, id: string) => byId.set(id, entry))
+			for (const entry of byId.values()) {
+				if (entry["type"] === "transport" && typeof entry["selectedCandidatePairId"] === "string") {
+					const pair = byId.get(entry["selectedCandidatePairId"])
+					const local = byId.get(String(pair?.["localCandidateId"]))
+					return { type: String(local?.["candidateType"]), protocol: String(local?.["relayProtocol"]) }
+				}
+			}
+		}
+		return { type: "unknown", protocol: "unknown" }
+	})
+}

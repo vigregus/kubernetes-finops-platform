@@ -1129,6 +1129,8 @@ class CallConnected(BaseModel):
     # Подробности пути для метрики `RES-009` (необязательны: прежний клиент их не шлёт).
     media_path: Literal["host", "srflx", "prflx", "relay"] | None = None
     turn_transport: Literal["udp", "tcp", "tls"] | None = None
+    # Профиль соединения звонка (`RES-011`): `restricted` — relay-only через `turns:`.
+    profile: Literal["normal", "restricted"] | None = None
 
 
 class CallFailed(BaseModel):
@@ -1320,6 +1322,7 @@ async def call_connected(
             connection_type=body.connection_type,
             media_path=body.media_path,
             turn_transport=body.turn_transport,
+            profile=body.profile,
             network=network_context.from_headers(request.headers),
         )
     if not result.ok:
@@ -1375,7 +1378,10 @@ async def call_signals_missed(
 
 @app.get("/calls/{call_id}/ice-servers", response_model=dict[str, object])
 async def call_ice_servers(
-    call_id: uuid.UUID, request: Request, response: Response
+    call_id: uuid.UUID,
+    request: Request,
+    response: Response,
+    profile: Literal["normal", "restricted"] = "normal",
 ) -> dict[str, object] | Response:
     """Краткоживущий доступ к STUN/TURN — участнику живого звонка (`CALL-008`)."""
     user, failure = await _call_user(request, response)
@@ -1389,6 +1395,7 @@ async def call_ice_servers(
             limiter=runtime.limiter,
             user_id=user.user_id,
             call_id=call_id,
+            profile=profile,
         )
     if result.rejection is not None:
         if result.retry_after_seconds is not None:

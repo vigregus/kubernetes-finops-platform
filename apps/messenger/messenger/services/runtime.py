@@ -257,7 +257,7 @@ class Runtime:
         if self.centrifugo is None:
             self.centrifugo = centrifugo_client_from_env()
         if self.turn is None:
-            self.turn = turn.provider_from_env()
+            self.turn = turn.provider_from_env(observe=metrics.turn_endpoint)
         if self.object_store is None:
             store_settings = object_store.ObjectStoreSettings.from_env()
             if store_settings is not None:

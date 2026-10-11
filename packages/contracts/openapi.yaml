@@ -454,6 +454,14 @@ paths:
       operationId: getCallIceServers
       parameters:
         - { $ref: '#/components/parameters/CallId' }
+        - name: profile
+          in: query
+          required: false
+          description: |
+            Профиль соединения (`RES-011`). `normal` (по умолчанию) — все серверы (STUN, `turn:`, `turns:`).
+            `restricted` — только `turns:` (TLS): для звонка с `iceTransportPolicy=relay`, где UDP и TCP 3478
+            исключены. Если `turns:` нет, список пуст.
+          schema: { type: string, enum: [normal, restricted], default: normal }
       responses:
         '200':
           description: Список для `RTCConfiguration.iceServers`
@@ -1274,6 +1282,10 @@ components:
           type: string
           enum: [udp, tcp, tls]
           description: Транспорт TURN у релея (`relayProtocol` в `getStats()`); без релея не передаётся.
+        profile:
+          type: string
+          enum: [normal, restricted]
+          description: Профиль соединения звонка (RES-011); идёт в метрику `messenger_call_profile_total`.
 
     CallFailed:
       type: object
