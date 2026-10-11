@@ -25,6 +25,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, ge
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.requests import Request
 
+from messenger.domain import diagnostics as diagnostics_domain
 from messenger.domain.call import Call, CallKind
 from messenger.domain.conversation_list import (
     ActivityCursor,
@@ -61,6 +62,7 @@ from messenger.services import backchannel as backchannel_service
 from messenger.services import browser_telemetry as browser_telemetry_service
 from messenger.services import calls as calls_service
 from messenger.services import conversations as conversation_service
+from messenger.services import diagnostics as diagnostics_service
 from messenger.services import history as history_service
 from messenger.services import identity as identity_service
 from messenger.services import login as login_service
@@ -1133,6 +1135,37 @@ class CallConnected(BaseModel):
     profile: Literal["normal", "restricted"] | None = None
 
 
+class ProbeResultBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    probe: Literal["https", "websocket", "sse", "stun", "turn_udp", "turn_tcp", "turn_tls"]
+    result: Literal["ok", "failed", "timeout", "skipped"]
+
+
+class NetworkDiagnosticReport(BaseModel):
+    """Технический результат диагностики (`RES-012`): только закрытые наборы и числа."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    phase: Literal["failure", "recovery"]
+    trigger: Literal[
+        "ice_slow",
+        "ice_failed",
+        "allocation_timeout",
+        "realtime_failed",
+        "fallback_enabled",
+        "network_change",
+        "setup_timeout",
+    ]
+    setup_result: Literal["connected", "failed", "timeout"]
+    probes: list[ProbeResultBody] = Field(default_factory=list, max_length=10)
+    ice_gathering_ms: int | None = Field(default=None, ge=0, le=120_000)
+    ice_connection_ms: int | None = Field(default=None, ge=0, le=120_000)
+    selected_candidate: Literal["host", "srflx", "prflx", "relay"] | None = None
+    selected_relay_protocol: Literal["udp", "tcp", "tls"] | None = None
+    failure_reason: str | None = Field(default=None, max_length=40)
+
+
 class CallFailed(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1406,6 +1439,74 @@ async def call_ice_servers(
         {"ice_servers": result.servers or [], "ttl_seconds": result.ttl_seconds},
         headers={"Cache-Control": "no-store"},
     )
+
+
+@app.post("/network-diagnostics/session", status_code=201, response_model=dict[str, object])
+async def network_diagnostic_session(
+    request: Request, response: Response
+) -> dict[str, object] | Response:
+    """Сессия диагностики сети (`RES-012`): идентификатор, список проб и данные TURN на 45 с."""
+    user, failure = await _call_user(request, response)
+    if failure is not None:
+        return failure
+    runtime = request.app.state.runtime
+    result = await diagnostics_service.start_session(
+        turn=runtime.turn,
+        limiter=runtime.limiter,
+        secret=runtime.diagnostics_secret,
+        user_id=user.user_id,
+    )
+    if result.rejection is not None:
+        if result.retry_after_seconds is not None:
+            response.headers["Retry-After"] = str(result.retry_after_seconds)
+        return _problem_response(to_problem(result.rejection), response)
+    return JSONResponse(
+        {
+            "diagnostic_id": result.diagnostic_id,
+            "ttl_seconds": result.ttl_seconds,
+            "report_within_seconds": result.report_within_seconds,
+            "probes": list(diagnostics_domain.PROBES),
+            "ice_servers": result.servers,
+        },
+        status_code=201,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/network-diagnostics/{diagnostic_id}/report", status_code=204, response_model=None
+)
+async def network_diagnostic_report(
+    diagnostic_id: str, body: NetworkDiagnosticReport, request: Request, response: Response
+) -> Response | None:
+    """Результат диагностики: «до» (`failure`) и «после» (`recovery`), раз на фазу."""
+    user, failure = await _call_user(request, response)
+    if failure is not None:
+        return failure
+    runtime = request.app.state.runtime
+    result = await diagnostics_service.accept_report(
+        limiter=runtime.limiter,
+        secret=runtime.diagnostics_secret,
+        user_id=user.user_id,
+        diagnostic_id=diagnostic_id,
+        report=diagnostics_service.Report(
+            phase=body.phase,
+            trigger=body.trigger,
+            setup_result=body.setup_result,
+            probes=tuple(
+                diagnostics_service.Probe(item.probe, item.result) for item in body.probes
+            ),
+            ice_gathering_ms=body.ice_gathering_ms,
+            ice_connection_ms=body.ice_connection_ms,
+            selected_candidate=body.selected_candidate,
+            selected_relay_protocol=body.selected_relay_protocol,
+            failure_reason=body.failure_reason,
+        ),
+        network=network_context.from_headers(request.headers),
+    )
+    if result.rejection is not None:
+        return _problem_response(to_problem(result.rejection), response)
+    return Response(status_code=204)
 
 
 @app.get("/users", response_model=dict[str, object])

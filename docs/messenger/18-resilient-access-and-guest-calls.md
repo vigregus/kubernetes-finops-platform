@@ -247,6 +247,8 @@ cohort → оценка здоровья → рекомендованный пр
 сетей. Реальные сети (мобильные и домашние: МТС, МегаФон, Билайн, Ростелеком; Wi-Fi гостиницы и офиса; IPv6/NAT64) — **приёмочная
 среда**: эмуляция сети в Chromium блокировки операторов не воспроизводит, и именно эти данные определяют следующие изменения.
 
+**Что сервер хранит (решение о приватности, `RES-012`).** Только закрытые наборы и числа: результаты проб (`ok|failed|timeout|skipped`), тайминги ICE, тип выбранного кандидата, протокол релея, исход, причина по таксономии. IP, имена хостов, ASN и идентификаторы человека в метки и журнал не попадают; страна и класс сети приходят заголовками шлюза и сами проходят закрытый набор (`telemetry/network.py`). ASN и cohort — только в `RES-013` и только после минимума уникальных устройств. Идентификатор диагностики — подписанный токен, привязанный к человеку и сроку (10 минут), без хранилища.
+
 **Таксономия отказов.** Одной метрики «звонок упал» недостаточно: `dns_failed`, `tcp_connect_timeout`, `tls_handshake_failed`,
 `websocket_failed`, `sse_failed`, `stun_timeout`, `turn_udp_allocate_failed`, `turn_tcp_allocate_failed`, `turn_tls_allocate_failed`,
 `turn_auth_failed`, `ice_no_candidate`, `ice_connect_timeout`, `ice_disconnected`, `media_stalled`, `media_packet_loss`,
@@ -617,7 +619,8 @@ TURN-доступа не даёт.
 | TURN/TLS :443 (отдельная служба и сертификат, `RES-005`) и приёмка только по `turns:` (`RES-A4`, `RES-007`) | 🟡 манифесты, проверки `turn_check.py` и спека есть; прогон на стенде и публичный адрес вне minikube — нет |
 | Несколько TURN (`RES-006`): `CompositeTurnProvider`, `TURN_PROVIDER=coturn,coturn-b`, метрика `messenger_turn_endpoint_total` | 🟡 код и тесты есть; второй TURN на другой площадке и приёмка отказа первого — нет |
 | Профиль `RESTRICTED` (`RES-011`): `?profile=restricted`, срок прямой попытки 9 с, переход по `setConfiguration` + ICE restart, «липкий» профиль 30 минут, `messenger_call_profile_total` | 🟡 сервер, клиент и юнит-тесты есть; `RES-A10`/`RES-A11` в браузере и Safari/Firefox не проверены |
-| Запасные realtime-транспорты; диагностика; Network Intelligence; endpoint health (`RES-014`); HTTPS-only | ⬜ |
+| Диагностика сети по событию (`RES-012`): сессия, данные TURN на 45 с, пробы, снимки «до»/«после», `messenger_network_*` | 🟡 сервер, клиент, юнит-тесты и стенд есть; проб `sse`/DNS/IPv6, панели и браузерной приёмки нет |
+| Запасные realtime-транспорты; Network Intelligence (`RES-013`); endpoint health (`RES-014`); HTTPS-only | ⬜ |
 | Звонки по ссылке | ⬜ |
 
 ## 17. Определение готовности

@@ -37,6 +37,10 @@ export interface ConnectionDetail {
   readonly turnTransport?: TurnTransport
   /** Профиль, в котором звонок соединился (RES-011). */
   readonly profile?: CallProfile
+  /** От создания соединения до связи, мс (RES-012). */
+  readonly setupMs?: number
+  /** До первого кандидата, мс (RES-012). */
+  readonly gatheringMs?: number
 }
 
 /**
@@ -264,6 +268,8 @@ export class CallEngine {
   private quality: VideoQuality = "auto"
   private profile: CallProfile = "normal"
   private directTimer: unknown = null
+  private startedAt = 0
+  private firstCandidateMs: number | null = null
 
   constructor(options: EngineOptions) {
     this.opts = options
@@ -323,6 +329,7 @@ export class CallEngine {
         this.opts.onProfile?.("normal")
         ice = await this.opts.iceServers("normal")
       }
+      this.startedAt = Date.now()
       const policy = this.profile === "restricted" ? "relay" : this.opts.iceTransportPolicy
       const pc = this.opts.env.createPeer({
         iceServers: ice.servers,
@@ -453,6 +460,7 @@ export class CallEngine {
       this.flush()
       return
     }
+    if (this.firstCandidateMs === null) this.firstCandidateMs = Date.now() - this.startedAt
     this.outgoing.push(candidate.toJSON())
     if (this.flushTimer === null) {
       this.flushTimer = this.timers.setTimeout(() => this.flush(), this.opts.candidateFlushMs ?? 150)
@@ -647,7 +655,13 @@ export class CallEngine {
       if (type === this.lastReported) return
       this.lastReported = type
       if (first) this.applyQuality()
-      this.opts.onConnected(type, { ...detail, profile: this.profile })
+      this.opts.onConnected(type, {
+        ...detail,
+        profile: this.profile,
+        // Первое установление: время до связи и до первого кандидата (диагностика, RES-012).
+        ...(first ? { setupMs: Date.now() - this.startedAt } : {}),
+        ...(first && this.firstCandidateMs !== null ? { gatheringMs: this.firstCandidateMs } : {}),
+      })
     } finally {
       this.measuring = false
     }

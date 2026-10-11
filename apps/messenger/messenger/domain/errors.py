@@ -43,6 +43,8 @@ class Reason(str, Enum):
     REALTIME_UNAVAILABLE = "realtime_unavailable"
     ALREADY_IN_CALL = "already_in_call"
     INVALID_SIGNAL = "invalid_signal"
+    DIAGNOSTIC_NOT_FOUND = "diagnostic_not_found"
+    DIAGNOSTIC_REPORTED = "diagnostic_reported"
     RATE_LIMITED = "rate_limited"
     UNAUTHENTICATED = "unauthenticated"
     UPSTREAM_UNAVAILABLE = "upstream_unavailable"
@@ -116,6 +118,9 @@ _PUBLIC: dict[Reason, Problem] = {
     Reason.PAYLOAD_TOO_LARGE: Problem(413, "payload_too_large", "Содержимое слишком велико"),
     Reason.UNSUPPORTED_MEDIA_TYPE: Problem(415, "unsupported_media_type", "Тип не разрешён"),
     Reason.ATTACHMENT_NOT_READY: Problem(409, "attachment_not_ready", "Вложение не готово"),
+    # Чужой, просроченный и подделанный идентификатор диагностики неразличимы.
+    Reason.DIAGNOSTIC_NOT_FOUND: _HIDDEN_NOT_FOUND,
+    Reason.DIAGNOSTIC_REPORTED: Problem(409, "diagnostic_reported", "Результат уже принят"),
     Reason.RATE_LIMITED: Problem(429, "rate_limited", "Слишком часто"),
     Reason.UNAUTHENTICATED: Problem(401, "unauthenticated", "Требуется вход"),
     Reason.UPSTREAM_UNAVAILABLE: Problem(503, "upstream_unavailable", "Временно недоступно"),

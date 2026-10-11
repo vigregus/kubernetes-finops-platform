@@ -36,6 +36,7 @@ import {
   type VideoQuality,
   type WireSignal,
 } from "./callEngine"
+import { CallDiagnostics, type ProbeEnv } from "./networkDiagnostics"
 import { browserProfileStorage, loadProfile, rememberProfile } from "./profileMemory"
 import { createSerialQueue, withRetry } from "./signalQueue"
 import {
@@ -84,6 +85,24 @@ function loadVideoQuality(): VideoQuality {
     return parseVideoQuality(window.localStorage.getItem(QUALITY_KEY))
   } catch {
     return "auto"
+  }
+}
+
+/** Пробы диагностики в браузере: свои соединения под диагностическими данными TURN. */
+function browserProbeEnv(env: EngineEnv | null, websocketUp: () => boolean): ProbeEnv {
+  return {
+    createPeer: (config) =>
+      env === null ? new RTCPeerConnection(config) : env.createPeer(config),
+    https: async () => {
+      const response = await fetch(window.location.origin + "/", {
+        method: "HEAD",
+        cache: "no-store",
+      })
+      return response.ok
+    },
+    websocketUp,
+    setTimeout: (fn, ms) => window.setTimeout(fn, ms),
+    clearTimeout: (id) => window.clearTimeout(id as number),
   }
 }
 
@@ -189,6 +208,10 @@ export function CallsProvider({
   const [localStream, setLocalStream] = useState<MediaStream | null>(null)
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null)
   const [signalingUp, setSignalingUp] = useState(false)
+  const signalingUpRef = useRef(false)
+  signalingUpRef.current = signalingUp
+  // Диагностика сети (`RES-012`): одна на звонок, создаётся вместе с движком.
+  const diagnosticsRef = useRef<CallDiagnostics | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [videoQuality, setVideoQualityState] = useState<VideoQuality>(loadVideoQuality)
   const videoQualityRef = useRef(videoQuality)
@@ -311,6 +334,8 @@ export function CallsProvider({
       // Запомненный `restricted` не сработал (нет `turns:`): забываем, не дожидаясь срока.
       onProfile: (profile) => {
         if (profile === "normal") rememberProfile(browserProfileStorage(), "normal", Date.now())
+        // Запасной путь включён: снимок «до» (какие транспорты достижимы).
+        if (profile === "restricted") void diagnosticsRef.current?.begin("fallback_enabled", "timeout")
       },
       // Сигналы уходят **строго по одному**: `offer` и пачка кандидатов,
       // отправленные параллельно, достигают сервера в любом порядке, а номер им
@@ -346,13 +371,30 @@ export function CallsProvider({
         if (detail.profile !== undefined) {
           rememberProfile(browserProfileStorage(), detail.profile, Date.now())
         }
+        // Снимок «после»: что именно спасло звонок.
+        if (detail.profile === "restricted") {
+          void diagnosticsRef.current?.recovered("fallback_enabled", detail)
+        }
         if (keepaliveRef.current === null) startKeepalive(callId)
         if (wakeLockRef.current === null) acquireWakeLock()
       },
-      onFailed: (reason) =>
-        endLocally(reason === "media_denied" ? "media_denied" : "failed", reason),
+      onFailed: (reason) => {
+        // Звонок не состоялся не по вине сети — диагностика не нужна (отказ в доступе к камере).
+        if (reason !== "media_denied") {
+          void diagnosticsRef.current?.begin(
+            reason === "ice_connect_timeout" ? "setup_timeout" : "ice_failed",
+            "failed",
+            reason,
+          )
+        }
+        endLocally(reason === "media_denied" ? "media_denied" : "failed", reason)
+      },
     })
     engineRef.current = engine
+    diagnosticsRef.current =
+      ops.diagnostics === undefined
+        ? null
+        : new CallDiagnostics(ops.diagnostics, browserProbeEnv(env, () => signalingUpRef.current))
     void engine.start()
   }, [env, ops, apply, startKeepalive, acquireWakeLock, endLocally])
 

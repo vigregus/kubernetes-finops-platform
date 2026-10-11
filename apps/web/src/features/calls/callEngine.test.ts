@@ -333,7 +333,8 @@ describe("соединение и обрыв (CALL-011)", () => {
     ])
     r.peer.emitState("connected")
     await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(r.details).toEqual([{ mediaPath: "relay", turnTransport: "tls", profile: "normal" }])
+    expect(r.details).toMatchObject([{ mediaPath: "relay", turnTransport: "tls", profile: "normal" }])
+    expect(typeof r.details[0].setupMs).toBe("number")
   })
 
   it("прямой путь не несёт транспорта TURN, а чужая строка не становится значением", async () => {

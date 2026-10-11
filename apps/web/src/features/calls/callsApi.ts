@@ -4,9 +4,12 @@
  */
 import type { Call, CallSignal, CallSignalEvent } from "../../api/generated"
 import type { CallProfile, ConnectionDetail, IceConfig, WireSignal } from "./callEngine"
+import type { DiagnosticsOps } from "./networkDiagnostics"
 import type { ApiCallView } from "./callState"
 
 export interface CallsOperations {
+  /** Диагностика сети по событию (`RES-012`); без неё звонки работают как раньше. */
+  readonly diagnostics?: DiagnosticsOps
   start(conversationId: string, kind: "audio" | "video"): Promise<ApiCallView>
   /** Мой живой звонок или `null`. */
   current(): Promise<ApiCallView | null>

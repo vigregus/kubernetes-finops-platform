@@ -540,6 +540,30 @@ CALL_PROFILE = Counter(
     "Звонки по профилю соединения: normal или restricted (RES-011)",
     ["service", "profile"],
 )
+# RES-012: диагностика сети по событию. Пробы — в закрытых наборах (`domain/diagnostics.py`).
+# `rescued_by` отвечает, что именно спасло звонок после отказа других путей: транспорт релея
+# (`tls`/`tcp`/`udp`) или `direct`.
+NETWORK_PROBE = Counter(
+    "messenger_network_probe_total",
+    "Результаты проб диагностики сети (RES-012)",
+    ["service", "phase", "probe", "result", "network_country", "network_class"],
+)
+NETWORK_DIAGNOSTIC = Counter(
+    "messenger_network_diagnostic_total",
+    "Принятые результаты диагностики по триггеру и исходу (RES-012)",
+    ["service", "phase", "trigger", "setup_result", "reason"],
+)
+NETWORK_RESCUE = Counter(
+    "messenger_network_rescue_total",
+    "Что спасло звонок после отказа других путей (RES-012)",
+    ["service", "rescued_by", "network_country", "network_class"],
+)
+NETWORK_ICE_SECONDS = Histogram(
+    "messenger_network_ice_seconds",
+    "Время сбора кандидатов и установки соединения по данным клиента (RES-012)",
+    ["service", "stage"],
+    buckets=(0.25, 0.5, 1, 2, 3, 5, 8, 13, 20, 30, 60),
+)
 CALL_SETUP_SECONDS = Histogram(
     "messenger_call_setup_seconds",
     "От «принял» до «медиа пошло» (G4)",
@@ -592,6 +616,33 @@ def call_media_path(path: str, turn_transport: str, country: str, net_class: str
 
 def turn_endpoint(endpoint: str, result: str) -> None:
     TURN_ENDPOINT.labels(service=SERVICE, endpoint=endpoint, result=result).inc()
+
+
+def network_probe(phase: str, probe: str, result: str, country: str, net_class: str) -> None:
+    NETWORK_PROBE.labels(
+        service=SERVICE,
+        phase=phase,
+        probe=probe,
+        result=result,
+        network_country=country,
+        network_class=net_class,
+    ).inc()
+
+
+def network_diagnostic(phase: str, trigger: str, setup_result: str, reason: str) -> None:
+    NETWORK_DIAGNOSTIC.labels(
+        service=SERVICE, phase=phase, trigger=trigger, setup_result=setup_result, reason=reason
+    ).inc()
+
+
+def network_rescue(rescued_by: str, country: str, net_class: str) -> None:
+    NETWORK_RESCUE.labels(
+        service=SERVICE, rescued_by=rescued_by, network_country=country, network_class=net_class
+    ).inc()
+
+
+def network_ice(stage: str, seconds: float) -> None:
+    NETWORK_ICE_SECONDS.labels(service=SERVICE, stage=stage).observe(seconds)
 
 
 def call_profile(profile: str) -> None:
