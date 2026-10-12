@@ -1445,13 +1445,12 @@ async def call_ice_servers(
 async def network_diagnostic_session(
     request: Request, response: Response
 ) -> dict[str, object] | Response:
-    """Сессия диагностики сети (`RES-012`): идентификатор, список проб и данные TURN на 45 с."""
+    """Сессия диагностики сети (`RES-012`): идентификатор и список проб, без данных TURN."""
     user, failure = await _call_user(request, response)
     if failure is not None:
         return failure
     runtime = request.app.state.runtime
     result = await diagnostics_service.start_session(
-        turn=runtime.turn,
         limiter=runtime.limiter,
         secret=runtime.diagnostics_secret,
         user_id=user.user_id,
@@ -1463,10 +1462,11 @@ async def network_diagnostic_session(
     return JSONResponse(
         {
             "diagnostic_id": result.diagnostic_id,
-            "ttl_seconds": result.ttl_seconds,
+            # Поля прежнего контракта сохранены (CTR-001): данных TURN нет, срок не применим.
+            "ttl_seconds": 0,
             "report_within_seconds": result.report_within_seconds,
             "probes": list(diagnostics_domain.PROBES),
-            "ice_servers": result.servers,
+            "ice_servers": [],
         },
         status_code=201,
         headers={"Cache-Control": "no-store"},

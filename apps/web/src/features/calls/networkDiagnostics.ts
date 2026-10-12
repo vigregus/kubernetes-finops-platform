@@ -38,8 +38,6 @@ export interface DiagnosticReport {
 
 export interface DiagnosticSession {
   readonly diagnosticId: string
-  readonly ttlSeconds: number
-  readonly servers: RTCIceServer[]
 }
 
 export interface DiagnosticsOps {
@@ -163,14 +161,18 @@ export class CallDiagnostics {
   private id: string | null = null
   private started = false
   private reportedRecovery = false
+  private failureSent = false
   private pending: { trigger: DiagnosticTrigger; detail: ConnectionDetail } | null = null
 
   private readonly ops: DiagnosticsOps
   private readonly env: ProbeEnv
+  private readonly servers: () => readonly RTCIceServer[]
 
-  constructor(ops: DiagnosticsOps, env: ProbeEnv) {
+  /** `servers` — данные ICE текущего звонка: своих учётных данных диагностика не получает. */
+  constructor(ops: DiagnosticsOps, env: ProbeEnv, servers: () => readonly RTCIceServer[]) {
     this.ops = ops
     this.env = env
+    this.servers = servers
   }
 
   /** Снимок «до»: пробы и отчёт `failure`. Повторный вызов на тот же звонок — пустой. */
@@ -184,9 +186,7 @@ export class CallDiagnostics {
     try {
       const session = await this.ops.session()
       this.id = session.diagnosticId
-      // Звонок мог соединиться, пока сессия открывалась: «после» ждало идентификатор.
-      await this.flushRecovery()
-      const probes = await runProbes(this.env, session.servers)
+      const probes = await runProbes(this.env, this.servers())
       await this.ops.report(session.diagnosticId, {
         phase: "failure",
         trigger,
@@ -194,6 +194,9 @@ export class CallDiagnostics {
         probes,
         ...(failureReason === undefined ? {} : { failureReason }),
       })
+      // «После» не обгоняет «до»: звонок мог соединиться, пока шли пробы, — оно ждало здесь.
+      this.failureSent = true
+      await this.flushRecovery()
     } catch {
       // диагностика не должна быть причиной новых проблем
     }
@@ -207,12 +210,12 @@ export class CallDiagnostics {
   async recovered(trigger: DiagnosticTrigger, detail: ConnectionDetail): Promise<void> {
     if (!this.started || this.reportedRecovery) return
     this.pending = { trigger, detail }
-    if (this.id !== null) await this.flushRecovery()
+    if (this.failureSent) await this.flushRecovery()
   }
 
   private async flushRecovery(): Promise<void> {
     const pending = this.pending
-    if (pending === null || this.id === null || this.reportedRecovery) return
+    if (pending === null || this.id === null || !this.failureSent || this.reportedRecovery) return
     this.pending = null
     this.reportedRecovery = true
     const { trigger, detail } = pending

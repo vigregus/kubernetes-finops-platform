@@ -1041,4 +1041,13 @@ describe("профиль RESTRICTED (RES-011)", () => {
     expect(r.peer.closed).toBe(false)
     expect(r.peer.offers).toHaveLength(1)
   })
+
+  it("снимок ICE (для диагностики): данные звонка доступны и после его завершения", async () => {
+    const r = profileRig()
+    expect(r.engine.iceSnapshot()).toEqual([])
+    await r.engine.start()
+    expect(r.engine.iceSnapshot()).toEqual(NORMAL)
+    r.engine.close()
+    expect(r.engine.iceSnapshot()).toEqual(NORMAL)
+  })
 })

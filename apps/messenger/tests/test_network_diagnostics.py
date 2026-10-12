@@ -89,43 +89,19 @@ def seen(monkeypatch):
 # --- сессия ---------------------------------------------------------------------------
 
 
-def test_сессия_выдаёт_идентификатор_пробы_и_короткие_данные_turn():
-    result = run(service.start_session(
-        turn=coturn(), limiter=Limiter(), secret=SECRET, user_id=ME, now=NOW))
+def test_сессия_выдаёт_идентификатор_и_не_выдаёт_данных_turn():
+    result = run(service.start_session(limiter=Limiter(), secret=SECRET, user_id=ME, now=NOW))
     assert result.rejection is None
-    assert result.ttl_seconds == 45
     assert service.verify_id(SECRET, ME, result.diagnostic_id, NOW)
-    turn_server = next(s for s in result.servers if any(u.startswith("turn:") for u in s["urls"]))
-    # срок данных — ровно 45 секунд: проверка, а не канал
-    assert turn_server["username"].split(":")[0] == str(int(NOW) + 45)
-
-
-def test_данные_диагностики_и_звонка_у_человека_разные():
-    """Диагностическая метка не совпадает с меткой звонка: квота и журнал раздельны."""
-    diag = run(service.start_session(
-        turn=coturn(), limiter=Limiter(), secret=SECRET, user_id=ME, now=NOW))
-    call = run(coturn().ice_servers(ttl_seconds=45, expires_at=int(NOW) + 45, subject=str(ME)))
-    diag_name = next(s["username"] for s in diag.servers if s.get("username"))
-    assert diag_name != call[0].username
-    assert str(ME) not in diag_name
+    assert result.report_within_seconds == 600
+    # у результата нет и поля для учётных данных: relay-доступа диагностика не прибавляет
+    assert not hasattr(result, "servers")
 
 
 def test_сессий_не_больше_лимита_в_час():
     result = run(service.start_session(
-        turn=coturn(), limiter=Limiter(deny_prefix="diag-session:"), secret=SECRET,
-        user_id=ME, now=NOW))
+        limiter=Limiter(deny_prefix="diag-session:"), secret=SECRET, user_id=ME, now=NOW))
     assert result.rejection.value == "rate_limited" and result.retry_after_seconds == 120
-    assert result.servers == []
-
-
-def test_недоступный_turn_даёт_сессию_без_серверов():
-    class Down:
-        async def ice_servers(self, **kwargs):
-            return None
-
-    result = run(service.start_session(
-        turn=Down(), limiter=Limiter(), secret=SECRET, user_id=ME, now=NOW))
-    assert result.rejection is None and result.servers == []
 
 
 # --- выключатели и отказ счётчика -----------------------------------------------------
@@ -138,9 +114,8 @@ def test_недоступный_turn_даёт_сессию_без_серверо
 def test_выключатели_закрывают_выдачу_данных_turn(monkeypatch, env):
     for name, value in env.items():
         monkeypatch.setenv(name, value)
-    result = run(service.start_session(
-        turn=coturn(), limiter=Limiter(), secret=SECRET, user_id=ME, now=NOW))
-    assert result.rejection.value == "calls_unavailable" and result.servers == []
+    result = run(service.start_session(limiter=Limiter(), secret=SECRET, user_id=ME, now=NOW))
+    assert result.rejection.value == "calls_unavailable"
     token = service.issue_id(SECRET, ME, int(NOW) + 600)
     assert accept(Limiter(), token, report()).rejection.value == "calls_unavailable"
 
@@ -150,11 +125,10 @@ def test_по_умолчанию_диагностика_выключена(monke
     assert service.enabled() is False
 
 
-def test_упавший_счётчик_не_открывает_выдачу_данных_turn():
+def test_упавший_счётчик_закрывает_сессию():
     down = DownLimiter()
-    result = run(service.start_session(
-        turn=coturn(), limiter=down, secret=SECRET, user_id=ME, now=NOW))
-    assert result.rejection is not None and result.servers == []
+    result = run(service.start_session(limiter=down, secret=SECRET, user_id=ME, now=NOW))
+    assert result.rejection is not None and result.diagnostic_id == ""
 
 
 def test_упавший_счётчик_не_даёт_накрутить_метрики(seen):
@@ -166,7 +140,7 @@ def test_упавший_счётчик_не_даёт_накрутить_метр
 
 def test_uuid_человека_не_попадает_в_ключ_лимитера():
     down = DownLimiter()
-    run(service.start_session(turn=coturn(), limiter=down, secret=SECRET, user_id=ME, now=NOW))
+    run(service.start_session(limiter=down, secret=SECRET, user_id=ME, now=NOW))
     assert down.keys and all(str(ME) not in key for key in down.keys)
     # псевдоним стабилен для человека и разный у разных людей
     assert service.subject(SECRET, ME) == service.subject(SECRET, ME)
@@ -334,13 +308,15 @@ def test_без_входа_401(client, monkeypatch):
     assert client.post("/network-diagnostics/x/report", json=body).status_code == 401
 
 
-def test_сессия_201_без_кэширования(client, monkeypatch):
+def test_сессия_201_без_кэширования_и_без_данных_turn(client, monkeypatch):
     authenticated(monkeypatch)
     r = client.post("/network-diagnostics/session")
     assert r.status_code == 201 and r.headers["cache-control"] == "no-store"
     body = r.json()
-    assert body["ttl_seconds"] == 45 and "turn" in str(body["ice_servers"])
+    # relay-доступа диагностика не выдаёт: срок выделения TURN не равен сроку учётных данных
+    assert body["ice_servers"] == [] and body["ttl_seconds"] == 0
     assert "stun" in body["probes"] and "turn_tls" in body["probes"]
+    assert "turn" not in r.text.replace("turn_", "")
 
 
 def test_при_выключенной_диагностике_503(client, monkeypatch):

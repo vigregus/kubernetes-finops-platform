@@ -274,19 +274,10 @@ async def run() -> None:
             diag_body = diag.json() if diag.status_code == 201 else {}
             check("RES-012: сессия диагностики выдана, без кэширования",
                   diag.status_code == 201 and diag.headers.get("cache-control") == "no-store"
-                  and diag_body.get("ttl_seconds") == 45, f"{diag.status_code} {diag.text[:120]}")
-            diag_servers = [srv for srv in diag_body.get("ice_servers", []) if srv.get("username")]
-            diag_user = diag_servers[0]["username"] if diag_servers else ""
-            check("RES-012: срок данных ~45 с и метка не раскрывает человека",
-                  bool(diag_user) and abs(int(diag_user.split(":")[0]) - int(time.time()) - 45) <= 5
-                  and a.user_id not in diag_user, diag_user)
-            if diag_servers:
-                diag_host = os.environ.get("TURN_ADDRESS", "messenger-turn.messenger.svc.cluster.local")
-                diag_client = TurnClient(diag_host)
-                diag_client.challenge()
-                kind, _ = diag_client.allocate(diag_servers[0]["username"], diag_servers[0]["credential"])
-                check("RES-012: coturn принял диагностические данные (Allocate до звонка)",
-                      kind == ALLOCATE_OK, f"тип {kind:#06x}")
+                  and bool(diag_body.get("diagnostic_id")), f"{diag.status_code} {diag.text[:120]}")
+            check("RES-012: диагностика не выдаёт данных TURN (relay-доступа не прибавляет)",
+                  diag_body.get("ice_servers") == [] and "credential" not in diag.text,
+                  diag.text[:120])
             diag_id = diag_body.get("diagnostic_id", "")
             failure_body = {
                 "phase": "failure", "trigger": "fallback_enabled", "setup_result": "timeout",

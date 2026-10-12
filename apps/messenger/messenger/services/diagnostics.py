@@ -1,15 +1,17 @@
 """Диагностика сети по событию (`RES-012`).
 
-Две ручки: выдать сессию (идентификатор, список проб, **диагностические данные TURN** на
-45 секунд) и принять результат. Идентификатор — подписанный токен без хранилища:
-`{случайная часть}.{срок}.{подпись}`, где подпись привязана к человеку. Чужой, просроченный
-и подделанный идентификатор неразличимы (одно и то же `404`). Принять результат можно раз на
-фазу (`failure`, `recovery`) — повтор не накручивает метрики.
+Две ручки: выдать сессию (идентификатор и список проб) и принять результат. **Данных TURN
+диагностика не выдаёт.** Срок учётных данных не ограничивает относящееся к ним выделение
+(`Allocate`): по RFC 8656 оно живёт 10 минут, а `--user-quota` coturn считает по имени
+пользователя, и каждое новое имя «срок:метка» открывает новую квоту. Поэтому пробы идут на
+данных, которые клиент уже получил как участник принятого звонка (`GET /calls/{id}/ice-servers`):
+диагностика ничего не прибавляет к его правам на relay. Диагностика до звонка (`CALL-019`)
+потребует отдельного пула TURN с запретом `CreatePermission`/`ChannelBind` — это другая работа.
 
-**Диагностические данные не превращают TURN в публичный relay**: выдаёт только
-аутентифицированному человеку, срок 45 секунд, не чаще шести сессий в час, назначение —
-проверка (малая квота у coturn на пользователя `diag:…`), а обычные данные звонка по-прежнему
-только участнику принятого звонка.
+Идентификатор — подписанный токен без хранилища: `{случайная часть}.{срок}.{подпись}`, где
+подпись привязана к человеку. Чужой, просроченный и подделанный идентификатор неразличимы
+(одно и то же `404`). Принять результат можно раз на фазу (`failure`, `recovery`) — повтор не
+накручивает метрики.
 """
 from __future__ import annotations
 
@@ -20,10 +22,9 @@ import logging
 import os
 import secrets
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from messenger.adapters.ratelimit import OnFailure, RateLimiter
-from messenger.adapters.turn import TurnProvider
 from messenger.domain import call as call_domain
 from messenger.domain import diagnostics as domain
 from messenger.domain.errors import Reason
@@ -38,9 +39,9 @@ log = logging.getLogger(__name__)
 def enabled() -> bool:
     """Выключатель диагностики: свой флаг **и** включённые звонки.
 
-    Диагностика выдаёт данные TURN вне живого звонка, поэтому она не вправе пережить выключатель
-    звонков (`CALLS_ENABLED`, ADR 0007) и включается отдельно: `NETWORK_DIAGNOSTICS_ENABLED`
-    (по умолчанию выключено) — вместе с готовностью защиты от злоупотреблений (`CALL-017`).
+    Диагностика — часть звонков, поэтому она не вправе пережить выключатель звонков
+    (`CALLS_ENABLED`, ADR 0007) и включается отдельно: `NETWORK_DIAGNOSTICS_ENABLED` (по
+    умолчанию выключено) — вместе с готовностью защиты от злоупотреблений (`CALL-017`).
     """
     flag = os.getenv("NETWORK_DIAGNOSTICS_ENABLED", "false").strip().lower()
     return calls_service.enabled() and flag in ("1", "true", "yes", "on")
@@ -98,16 +99,13 @@ def verify_id(secret: bytes, user_id: UserId, diagnostic_id: str, now: float) ->
 @dataclass(slots=True)
 class SessionResult:
     diagnostic_id: str = ""
-    ttl_seconds: int = 0
     report_within_seconds: int = 0
-    servers: list[dict[str, object]] = field(default_factory=list)
     rejection: Reason | None = None
     retry_after_seconds: int | None = None
 
 
 async def start_session(
     *,
-    turn: TurnProvider,
     limiter: RateLimiter,
     secret: bytes,
     user_id: UserId,
@@ -116,8 +114,8 @@ async def start_session(
     if not enabled():
         return SessionResult(rejection=Reason.CALLS_UNAVAILABLE)
     moment = now if now is not None else time.time()
-    # Fail-closed: данные TURN вне звонка дороже отказа. Упал счётчик — диагностики нет, а не
-    # неограниченная выдача relay-доступа любому аккаунту.
+    # Fail-closed: упал счётчик — диагностики нет. Данных TURN она не выдаёт, но не должна
+    # становиться бесконтрольным источником токенов и отчётов.
     decision = await limiter.take(
         f"diag-session:{subject(secret, user_id)}",
         limit=domain.SESSIONS_PER_HOUR,
@@ -128,15 +126,9 @@ async def start_session(
         return SessionResult(
             rejection=Reason.RATE_LIMITED, retry_after_seconds=decision.retry_after_seconds
         )
-    ttl = domain.SESSION_TTL_SECONDS
-    servers = await turn.ice_servers(
-        ttl_seconds=ttl, expires_at=int(moment) + ttl, subject=f"diag:{user_id}"
-    )
     return SessionResult(
         diagnostic_id=issue_id(secret, user_id, int(moment) + domain.REPORT_WINDOW_SECONDS),
-        ttl_seconds=ttl,
         report_within_seconds=domain.REPORT_WINDOW_SECONDS,
-        servers=[server.as_dict() for server in servers or []],
     )
 
 

@@ -394,7 +394,11 @@ export function CallsProvider({
     diagnosticsRef.current =
       ops.diagnostics === undefined
         ? null
-        : new CallDiagnostics(ops.diagnostics, browserProbeEnv(env, () => signalingUpRef.current))
+        : new CallDiagnostics(
+            ops.diagnostics,
+            browserProbeEnv(env, () => signalingUpRef.current),
+            () => engine.iceSnapshot(),
+          )
     void engine.start()
   }, [env, ops, apply, startKeepalive, acquireWakeLock, endLocally])
 

@@ -168,7 +168,7 @@ function ops() {
     session: async () => {
       sessions += 1
       if (value.fail === "session") throw new Error("429")
-      return { diagnosticId: "diag-1", ttlSeconds: 45, servers: SERVERS }
+      return { diagnosticId: "diag-1" }
     },
     report: async (id, report) => {
       if (value.fail === "report") throw new Error("500")
@@ -183,7 +183,7 @@ describe("CallDiagnostics: «до» и «после»", () => {
 
   it("до: пробы и отчёт failure; после: что спасло звонок", async () => {
     const o = ops()
-    const d = new CallDiagnostics(o.value, env(relayAll).probeEnv)
+    const d = new CallDiagnostics(o.value, env(relayAll).probeEnv, () => SERVERS)
     await d.begin("fallback_enabled", "timeout")
     await d.recovered("fallback_enabled", {
       mediaPath: "relay",
@@ -212,7 +212,7 @@ describe("CallDiagnostics: «до» и «после»", () => {
 
   it("одна диагностика на звонок: повторное begin пустое", async () => {
     const o = ops()
-    const d = new CallDiagnostics(o.value, env(relayAll).probeEnv)
+    const d = new CallDiagnostics(o.value, env(relayAll).probeEnv, () => SERVERS)
     await d.begin("ice_failed")
     await d.begin("setup_timeout")
     expect(o.sessions()).toBe(1)
@@ -220,37 +220,38 @@ describe("CallDiagnostics: «до» и «после»", () => {
 
   it("причина отказа уходит в отчёт", async () => {
     const o = ops()
-    const d = new CallDiagnostics(o.value, env(relayAll).probeEnv)
+    const d = new CallDiagnostics(o.value, env(relayAll).probeEnv, () => SERVERS)
     await d.begin("setup_timeout", "failed", "ice_connect_timeout")
     expect(o.reports[0].report.failureReason).toBe("ice_connect_timeout")
   })
 
-  it("быстрый fallback: «после» пришло раньше сессии — ждёт идентификатор и уходит с тем же", async () => {
+  it("быстрый fallback: «после» пришло раньше сессии — ждёт «до» и уходит с тем же идентификатором", async () => {
     const reports: Array<{ id: string; report: DiagnosticReport }> = []
-    let release: (value: { diagnosticId: string; ttlSeconds: number; servers: RTCIceServer[] }) => void = () => {}
+    let release: (value: { diagnosticId: string }) => void = () => {}
     const slow: DiagnosticsOps = {
       session: () => new Promise((resolve) => (release = resolve)),
       report: async (id, report) => {
         reports.push({ id, report })
       },
     }
-    const d = new CallDiagnostics(slow, env(relayAll).probeEnv)
+    const d = new CallDiagnostics(slow, env(relayAll).probeEnv, () => SERVERS)
     const begun = d.begin("fallback_enabled", "timeout")
     await d.recovered("fallback_enabled", { mediaPath: "relay", turnTransport: "tls" })
     expect(reports).toHaveLength(0)
-    release({ diagnosticId: "diag-7", ttlSeconds: 45, servers: SERVERS })
+    release({ diagnosticId: "diag-7" })
     await begun
+    // порядок «до» → «после» сохраняется, хотя звонок соединился раньше сессии
     expect(reports.map((r) => [r.id, r.report.phase])).toEqual([
-      ["diag-7", "recovery"],
       ["diag-7", "failure"],
+      ["diag-7", "recovery"],
     ])
-    expect(reports[0].report).toMatchObject({ selectedCandidate: "relay", selectedRelayProtocol: "tls" })
+    expect(reports[1].report).toMatchObject({ selectedCandidate: "relay", selectedRelayProtocol: "tls" })
   })
 
   it("сессия не открылась — отложенное «после» тихо отбрасывается", async () => {
     const o = ops()
     o.value.fail = "session"
-    const d = new CallDiagnostics(o.value, env(relayAll).probeEnv)
+    const d = new CallDiagnostics(o.value, env(relayAll).probeEnv, () => SERVERS)
     const begun = d.begin("fallback_enabled")
     await d.recovered("fallback_enabled", { mediaPath: "relay" })
     await begun
@@ -259,14 +260,14 @@ describe("CallDiagnostics: «до» и «после»", () => {
 
   it("«после» без «до» не отправляется", async () => {
     const o = ops()
-    const d = new CallDiagnostics(o.value, env(relayAll).probeEnv)
+    const d = new CallDiagnostics(o.value, env(relayAll).probeEnv, () => SERVERS)
     await d.recovered("fallback_enabled", { mediaPath: "relay" })
     expect(o.reports).toHaveLength(0)
   })
 
   it("«после» отправляется один раз", async () => {
     const o = ops()
-    const d = new CallDiagnostics(o.value, env(relayAll).probeEnv)
+    const d = new CallDiagnostics(o.value, env(relayAll).probeEnv, () => SERVERS)
     await d.begin("fallback_enabled")
     await d.recovered("fallback_enabled", { mediaPath: "relay" })
     await d.recovered("fallback_enabled", { mediaPath: "relay" })
@@ -276,10 +277,10 @@ describe("CallDiagnostics: «до» и «после»", () => {
   it("отказ сессии (лимит 429) и отчёта — тишина, исключений наружу нет", async () => {
     const a = ops()
     a.value.fail = "session"
-    await expect(new CallDiagnostics(a.value, env(relayAll).probeEnv).begin("ice_failed")).resolves.toBeUndefined()
+    await expect(new CallDiagnostics(a.value, env(relayAll).probeEnv, () => SERVERS).begin("ice_failed")).resolves.toBeUndefined()
     const b = ops()
     b.value.fail = "report"
-    const d = new CallDiagnostics(b.value, env(relayAll).probeEnv)
+    const d = new CallDiagnostics(b.value, env(relayAll).probeEnv, () => SERVERS)
     await expect(d.begin("ice_failed")).resolves.toBeUndefined()
     await expect(d.recovered("ice_failed", {})).resolves.toBeUndefined()
   })

@@ -212,15 +212,7 @@ const callsOperations: CallsOperations = {
   diagnostics: {
     session: async () => {
       const session = await diagnosticsApi.createNetworkDiagnosticSession();
-      return {
-        diagnosticId: session.diagnosticId,
-        ttlSeconds: session.ttlSeconds,
-        servers: session.iceServers.map((server) => ({
-          urls: server.urls,
-          ...(server.username === undefined ? {} : { username: server.username }),
-          ...(server.credential === undefined ? {} : { credential: server.credential }),
-        })),
-      };
+      return { diagnosticId: session.diagnosticId };
     },
     report: async (diagnosticId, report) => {
       await diagnosticsApi.reportNetworkDiagnostic({

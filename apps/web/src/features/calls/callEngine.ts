@@ -269,6 +269,7 @@ export class CallEngine {
   private profile: CallProfile = "normal"
   private directTimer: unknown = null
   private startedAt = 0
+  private knownServers: RTCIceServer[] = []
   private firstCandidateMs: number | null = null
 
   constructor(options: EngineOptions) {
@@ -330,6 +331,7 @@ export class CallEngine {
         ice = await this.opts.iceServers("normal")
       }
       this.startedAt = Date.now()
+      this.knownServers = ice.servers
       const policy = this.profile === "restricted" ? "relay" : this.opts.iceTransportPolicy
       const pc = this.opts.env.createPeer({
         iceServers: ice.servers,
@@ -361,6 +363,15 @@ export class CallEngine {
 
       if (this.opts.role === "caller") await this.offer(false)
     })
+  }
+
+  /**
+   * Данные ICE, которые этот звонок уже получил (`GET /calls/{id}/ice-servers`). Диагностика
+   * (`RES-012`) проверяет достижимость **на них**, а не на отдельных учётных данных: проверка
+   * не прибавляет клиенту прав на relay. Доступно и после завершения звонка.
+   */
+  iceSnapshot(): RTCIceServer[] {
+    return this.knownServers
   }
 
   /** Камера может быть закрыта, а звонок — состояться как аудио. */
@@ -445,6 +456,7 @@ export class CallEngine {
     try {
       const ice = await this.opts.iceServers(this.profile)
       if (this.closed) return
+      this.knownServers = ice.servers
       pc.setConfiguration({ ...pc.getConfiguration(), iceServers: ice.servers })
       this.scheduleRefresh(ice.ttlSeconds)
     } catch {
