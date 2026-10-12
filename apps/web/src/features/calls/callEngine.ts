@@ -270,6 +270,8 @@ export class CallEngine {
   private directTimer: unknown = null
   private startedAt = 0
   private knownServers: RTCIceServer[] = []
+  /** Последний полный (`normal`) список: стабильный набор для диагностики, не зависящий от профиля. */
+  private normalServers: RTCIceServer[] | null = null
   private firstCandidateMs: number | null = null
 
   constructor(options: EngineOptions) {
@@ -332,6 +334,7 @@ export class CallEngine {
       }
       this.startedAt = Date.now()
       this.knownServers = ice.servers
+      if (this.profile === "normal") this.normalServers = ice.servers
       const policy = this.profile === "restricted" ? "relay" : this.opts.iceTransportPolicy
       const pc = this.opts.env.createPeer({
         iceServers: ice.servers,
@@ -366,12 +369,21 @@ export class CallEngine {
   }
 
   /**
-   * Данные ICE, которые этот звонок уже получил (`GET /calls/{id}/ice-servers`). Диагностика
-   * (`RES-012`) проверяет достижимость **на них**, а не на отдельных учётных данных: проверка
-   * не прибавляет клиенту прав на relay. Доступно и после завершения звонка.
+   * Данные ICE для проб диагностики (`RES-012`): полный список звонка (STUN, UDP, TCP, TLS),
+   * а не то, что в этот момент действует. Набор проб не должен зависеть от того, в каком профиле
+   * и как давно идёт звонок. Данные — те же, что у звонка (`GET /calls/{id}/ice-servers`), и
+   * проверка не прибавляет клиенту прав на relay. Звонок начат в `restricted` и полного списка
+   * не знал — один запрос `normal`; не вышло (звонок уже завершён) — что есть.
    */
-  iceSnapshot(): RTCIceServer[] {
-    return this.knownServers
+  async diagnosticServers(): Promise<RTCIceServer[]> {
+    if (this.normalServers !== null) return this.normalServers
+    try {
+      const ice = await this.opts.iceServers("normal")
+      this.normalServers = ice.servers
+      return ice.servers
+    } catch {
+      return this.knownServers
+    }
   }
 
   /** Камера может быть закрыта, а звонок — состояться как аудио. */
@@ -457,6 +469,7 @@ export class CallEngine {
       const ice = await this.opts.iceServers(this.profile)
       if (this.closed) return
       this.knownServers = ice.servers
+      if (this.profile === "normal") this.normalServers = ice.servers
       pc.setConfiguration({ ...pc.getConfiguration(), iceServers: ice.servers })
       this.scheduleRefresh(ice.ttlSeconds)
     } catch {

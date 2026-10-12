@@ -301,6 +301,8 @@ export function CallsProvider({
   const endLocally = useCallback(
     (reason: CallEndReason, failureReason?: string) => {
       const callId = viewRef.current.callId
+      // Звонок определился (завершён): активные пробы диагностики теперь не мешают.
+      diagnosticsRef.current?.settle()
       apply({ type: "local-ended", reason })
       teardown()
       if (callId === null) return
@@ -371,6 +373,8 @@ export function CallsProvider({
         if (detail.profile !== undefined) {
           rememberProfile(browserProfileStorage(), detail.profile, Date.now())
         }
+        // Звонок определился: пробы диагностики могут занимать TURN.
+        diagnosticsRef.current?.settle()
         // Снимок «после»: что именно спасло звонок.
         if (detail.profile === "restricted") {
           void diagnosticsRef.current?.recovered("fallback_enabled", detail)
@@ -397,7 +401,7 @@ export function CallsProvider({
         : new CallDiagnostics(
             ops.diagnostics,
             browserProbeEnv(env, () => signalingUpRef.current),
-            () => engine.iceSnapshot(),
+            () => engine.diagnosticServers(),
           )
     void engine.start()
   }, [env, ops, apply, startKeepalive, acquireWakeLock, endLocally])

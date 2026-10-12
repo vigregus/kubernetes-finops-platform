@@ -104,12 +104,46 @@ async function gather(
   })
 }
 
+/** Пробы, которым не нужно выделение на TURN: HTTPS, реальное время, SSE, STUN. */
+export async function runBasicProbes(
+  env: ProbeEnv,
+  servers: readonly RTCIceServer[],
+  timeoutMs = PROBE_TIMEOUT_MS,
+): Promise<ProbeResult[]> {
+  const stunServers = servers
+    .map((server) => ({
+      ...server,
+      urls: (Array.isArray(server.urls) ? server.urls : [server.urls]).filter((url) =>
+        url.startsWith("stun"),
+      ),
+    }))
+    .filter((server) => server.urls.length > 0)
+  const websocket = env.websocketUp()
+  const [https, stun] = await Promise.all([
+    env.https().then(
+      (ok): ProbeVerdict => (ok ? "ok" : "failed"),
+      (): ProbeVerdict => "failed",
+    ),
+    stunServers.length === 0
+      ? Promise.resolve<ProbeVerdict>("skipped")
+      : gather(env, { iceServers: stunServers }, "srflx", timeoutMs),
+  ])
+  return [
+    { probe: "https", result: https },
+    { probe: "websocket", result: websocket === null ? "skipped" : websocket ? "ok" : "failed" },
+    { probe: "sse", result: "skipped" },
+    { probe: "stun", result: stun },
+  ]
+}
+
 /**
- * Прогоняет пробы параллельно. `turn_*` проверяют настоящий `Allocate` (кандидат `relay` под
- * `iceTransportPolicy=relay` появляется только после успешного выделения), а не «порт открыт».
- * `sse` пока `skipped`: запасных транспортов реального времени нет (`RES-001..003`).
+ * `turn_*` проверяют настоящий `Allocate` (кандидат `relay` под `iceTransportPolicy=relay`
+ * появляется только после успешного выделения), а не «порт открыт». **По одной**, а не
+ * параллельно: у coturn `--user-quota` на пользователя, и три одновременных выделения
+ * диагностики вместе с выделениями живого звонка могли бы выбрать квоту и изменить исход
+ * звонка, который диагностируют. Наблюдатель не вправе влиять на наблюдаемое.
  */
-export async function runProbes(
+export async function runTurnProbes(
   env: ProbeEnv,
   servers: readonly RTCIceServer[],
   timeoutMs = PROBE_TIMEOUT_MS,
@@ -121,37 +155,31 @@ export async function runProbes(
     if (filtered.length === 0) return Promise.resolve("skipped")
     return gather(env, { iceServers: filtered, iceTransportPolicy: "relay" }, "relay", timeoutMs)
   }
-  const stunServers = servers
-    .map((server) => ({
-      ...server,
-      urls: (Array.isArray(server.urls) ? server.urls : [server.urls]).filter((url) =>
-        url.startsWith("stun"),
-      ),
-    }))
-    .filter((server) => server.urls.length > 0)
-  const websocket = env.websocketUp()
-  const [https, stun, udp, tcp, tls] = await Promise.all([
-    env.https().then(
-      (ok): ProbeVerdict => (ok ? "ok" : "failed"),
-      (): ProbeVerdict => "failed",
-    ),
-    stunServers.length === 0
-      ? Promise.resolve<ProbeVerdict>("skipped")
-      : gather(env, { iceServers: stunServers }, "srflx", timeoutMs),
-    transport("udp"),
-    transport("tcp"),
-    transport("tls"),
-  ])
+  const out: ProbeResult[] = []
+  for (const [probe, name] of [
+    ["turn_udp", "udp"],
+    ["turn_tcp", "tcp"],
+    ["turn_tls", "tls"],
+  ] as const) {
+    out.push({ probe, result: await transport(name) })
+  }
+  return out
+}
+
+/** Все пробы: сначала базовые, затем TURN по одной. `sse` пока `skipped` (`RES-001..003`). */
+export async function runProbes(
+  env: ProbeEnv,
+  servers: readonly RTCIceServer[],
+  timeoutMs = PROBE_TIMEOUT_MS,
+): Promise<ProbeResult[]> {
   return [
-    { probe: "https", result: https },
-    { probe: "websocket", result: websocket === null ? "skipped" : websocket ? "ok" : "failed" },
-    { probe: "sse", result: "skipped" },
-    { probe: "stun", result: stun },
-    { probe: "turn_udp", result: udp },
-    { probe: "turn_tcp", result: tcp },
-    { probe: "turn_tls", result: tls },
+    ...(await runBasicProbes(env, servers, timeoutMs)),
+    ...(await runTurnProbes(env, servers, timeoutMs)),
   ]
 }
+
+/** Сколько ждать исхода звонка перед активными TURN-пробами, мс. */
+export const SETTLE_WAIT_MS = 60_000
 
 /**
  * Одна диагностика на звонок: «до» (`begin`) и «после» (`recovered`). Идентификатор сессии живёт
@@ -166,13 +194,36 @@ export class CallDiagnostics {
 
   private readonly ops: DiagnosticsOps
   private readonly env: ProbeEnv
-  private readonly servers: () => readonly RTCIceServer[]
+  private readonly servers: () => Promise<readonly RTCIceServer[]>
+  private settled: Promise<void>
+  private settleNow: () => void = () => {}
 
   /** `servers` — данные ICE текущего звонка: своих учётных данных диагностика не получает. */
-  constructor(ops: DiagnosticsOps, env: ProbeEnv, servers: () => readonly RTCIceServer[]) {
+  constructor(ops: DiagnosticsOps, env: ProbeEnv, servers: () => Promise<readonly RTCIceServer[]>) {
     this.ops = ops
     this.env = env
     this.servers = servers
+    this.settled = new Promise<void>((resolve) => {
+      this.settleNow = resolve
+    })
+  }
+
+  /**
+   * Звонок определился: соединился или окончательно завершён. До этого активные TURN-пробы не
+   * стартуют — реальный ICE restart имеет приоритет над диагностикой (квота TURN общая).
+   */
+  settle(): void {
+    this.settleNow()
+  }
+
+  private waitSettled(): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const timer = this.env.setTimeout(resolve, SETTLE_WAIT_MS)
+      void this.settled.then(() => {
+        this.env.clearTimeout(timer)
+        resolve()
+      })
+    })
   }
 
   /** Снимок «до»: пробы и отчёт `failure`. Повторный вызов на тот же звонок — пустой. */
@@ -186,7 +237,11 @@ export class CallDiagnostics {
     try {
       const session = await this.ops.session()
       this.id = session.diagnosticId
-      const probes = await runProbes(this.env, this.servers())
+      const servers = await this.servers()
+      // Базовые пробы (HTTPS, STUN) не занимают TURN и идут сразу; выделения — после исхода звонка.
+      const basic = await runBasicProbes(this.env, servers)
+      await this.waitSettled()
+      const probes = [...basic, ...(await runTurnProbes(this.env, servers))]
       await this.ops.report(session.diagnosticId, {
         phase: "failure",
         trigger,

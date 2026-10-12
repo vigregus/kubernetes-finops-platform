@@ -1042,12 +1042,28 @@ describe("профиль RESTRICTED (RES-011)", () => {
     expect(r.peer.offers).toHaveLength(1)
   })
 
-  it("снимок ICE (для диагностики): данные звонка доступны и после его завершения", async () => {
-    const r = profileRig()
-    expect(r.engine.iceSnapshot()).toEqual([])
+  it("серверы для диагностики: полный список звонка, стабильный при любом профиле", async () => {
+    const r = profileRig({ profile: "restricted" })
     await r.engine.start()
-    expect(r.engine.iceSnapshot()).toEqual(NORMAL)
+    // звонок начат в restricted и знает только turns:, но диагностике нужен полный набор
+    expect(await r.engine.diagnosticServers()).toEqual(NORMAL)
+    r.asked.length = 0
+    fire(r, 540_000) // обновление данных под restricted не подменяет полный список
+    await flush()
+    expect(await r.engine.diagnosticServers()).toEqual(NORMAL)
     r.engine.close()
-    expect(r.engine.iceSnapshot()).toEqual(NORMAL)
+    expect(await r.engine.diagnosticServers()).toEqual(NORMAL)
+  })
+
+  it("серверы для диагностики: не удалось получить полный список — что у звонка есть", async () => {
+    const r = rig({
+      profile: "restricted",
+      iceServers: async (profile) => {
+        if (profile === "normal") throw new Error("call ended")
+        return { servers: TLS, ttlSeconds: 600 }
+      },
+    })
+    await r.engine.start()
+    expect(await r.engine.diagnosticServers()).toEqual(TLS)
   })
 })
