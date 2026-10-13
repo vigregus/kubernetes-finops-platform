@@ -269,7 +269,7 @@ async def run() -> None:
             unknown = await call("GET", f"/calls/{call_id}/ice-servers?profile=turbo", a)
             check("RES-011: неизвестный профиль отвергнут (422)", unknown.status_code == 422,
                   f"{unknown.status_code}")
-            # RES-012: диагностика сети по событию — сессия, данные TURN на 45 с, результат.
+            # RES-012: диагностика сети по событию — сессия (без данных TURN), результат «до» и «после».
             diag = await call("POST", "/network-diagnostics/session", a)
             diag_body = diag.json() if diag.status_code == 201 else {}
             check("RES-012: сессия диагностики выдана, без кэширования",
