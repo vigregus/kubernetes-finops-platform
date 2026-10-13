@@ -12,6 +12,7 @@ import contextlib
 import os
 import secrets
 import sys
+import time
 import uuid
 
 import httpx
@@ -268,6 +269,40 @@ async def run() -> None:
             unknown = await call("GET", f"/calls/{call_id}/ice-servers?profile=turbo", a)
             check("RES-011: неизвестный профиль отвергнут (422)", unknown.status_code == 422,
                   f"{unknown.status_code}")
+            # RES-012: диагностика сети по событию — сессия (без данных TURN), результат «до» и «после».
+            diag = await call("POST", "/network-diagnostics/session", a)
+            diag_body = diag.json() if diag.status_code == 201 else {}
+            check("RES-012: сессия диагностики выдана, без кэширования",
+                  diag.status_code == 201 and diag.headers.get("cache-control") == "no-store"
+                  and bool(diag_body.get("diagnostic_id")), f"{diag.status_code} {diag.text[:120]}")
+            check("RES-012: диагностика не выдаёт данных TURN (relay-доступа не прибавляет)",
+                  diag_body.get("ice_servers") == [] and "credential" not in diag.text,
+                  diag.text[:120])
+            diag_id = diag_body.get("diagnostic_id", "")
+            failure_body = {
+                "phase": "failure", "trigger": "fallback_enabled", "setup_result": "timeout",
+                "probes": [{"probe": "turn_udp", "result": "timeout"},
+                           {"probe": "turn_tls", "result": "ok"}],
+                "ice_gathering_ms": 700, "failure_reason": "ice_connect_timeout"}
+            first = await call("POST", f"/network-diagnostics/{diag_id}/report", a, failure_body)
+            check("RES-012: результат «до» принят (204)", first.status_code == 204,
+                  f"{first.status_code} {first.text[:100]}")
+            second = await call("POST", f"/network-diagnostics/{diag_id}/report", a, failure_body)
+            check("RES-012: та же фаза второй раз — 409", second.status_code == 409,
+                  f"{second.status_code}")
+            recovery = await call("POST", f"/network-diagnostics/{diag_id}/report", a, {
+                "phase": "recovery", "trigger": "fallback_enabled", "setup_result": "connected",
+                "selected_candidate": "relay", "selected_relay_protocol": "tls",
+                "ice_connection_ms": 11000})
+            check("RES-012: результат «после» (что спасло звонок) принят", recovery.status_code == 204,
+                  f"{recovery.status_code} {recovery.text[:100]}")
+            foreign = await call("POST", f"/network-diagnostics/{diag_id}/report", b, failure_body)
+            check("RES-012: чужой идентификатор — 404 (неотличим от несуществующего)",
+                  foreign.status_code == 404, f"{foreign.status_code}")
+            bad = await call("POST", f"/network-diagnostics/{diag_id}/report", a,
+                             {**failure_body, "phase": "recovery", "ip": "203.0.113.5"})
+            check("RES-012: поле вне контракта (IP) отвергнуто (422)", bad.status_code == 422,
+                  f"{bad.status_code}")
             # Данные, выданные самим API, принимает настоящий coturn: цепочка
             # API → общий секрет → подпись → сервер замкнута, а не проверена по частям.
             host = os.environ.get("TURN_ADDRESS", "messenger-turn.messenger.svc.cluster.local")

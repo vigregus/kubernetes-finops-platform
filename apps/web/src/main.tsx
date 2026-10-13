@@ -6,6 +6,7 @@ import { createApiClient, withUnwrappedErrors } from "./api/client";
 import {
   AttachmentsApi,
   CallsApi,
+  DiagnosticsApi,
   PushApi,
   AuthApi,
   ConversationsApi,
@@ -60,6 +61,7 @@ const usersApi = withUnwrappedErrors(new UsersApi(client.configuration));
 const attachmentsApi = withUnwrappedErrors(new AttachmentsApi(client.configuration));
 const pushApi = withUnwrappedErrors(new PushApi(client.configuration));
 const callsApi = withUnwrappedErrors(new CallsApi(client.configuration));
+const diagnosticsApi = withUnwrappedErrors(new DiagnosticsApi(client.configuration));
 
 /**
  * G3-008, одна константа на приложение — тем же доводом, что у
@@ -207,6 +209,30 @@ const pushSubscriptionApi: PushSubscriptionApi = {
 const issueCallsTicket = createRealtimeTicketIssuer(client.configuration, "calls");
 
 const callsOperations: CallsOperations = {
+  diagnostics: {
+    session: async () => {
+      const session = await diagnosticsApi.createNetworkDiagnosticSession();
+      return { diagnosticId: session.diagnosticId };
+    },
+    report: async (diagnosticId, report) => {
+      await diagnosticsApi.reportNetworkDiagnostic({
+        diagnosticId,
+        networkDiagnosticReport: {
+          phase: report.phase,
+          trigger: report.trigger,
+          setupResult: report.setupResult,
+          ...(report.probes === undefined ? {} : { probes: [...report.probes] }),
+          ...(report.iceGatheringMs === undefined ? {} : { iceGatheringMs: report.iceGatheringMs }),
+          ...(report.iceConnectionMs === undefined ? {} : { iceConnectionMs: report.iceConnectionMs }),
+          ...(report.selectedCandidate === undefined ? {} : { selectedCandidate: report.selectedCandidate }),
+          ...(report.selectedRelayProtocol === undefined
+            ? {}
+            : { selectedRelayProtocol: report.selectedRelayProtocol }),
+          ...(report.failureReason === undefined ? {} : { failureReason: report.failureReason }),
+        },
+      });
+    },
+  },
   start: async (conversationId, kind) =>
     toCallView(await callsApi.startCall({ startCall: { conversationId, kind } })),
   current: async () => {

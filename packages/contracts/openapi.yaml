@@ -26,6 +26,7 @@ tags:
   - name: telemetry
   - name: push
   - name: calls
+  - name: diagnostics
 
 paths:
   /auth/callback:
@@ -481,6 +482,83 @@ paths:
           description: Слишком часто
           headers:
             Retry-After: { schema: { type: integer } }
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /network-diagnostics/session:
+    post:
+      tags: [diagnostics]
+      summary: Сессия диагностики сети по событию (RES-012)
+      description: |
+        Только по событию (медленный или неудавшийся ICE, отказ запасного пути, смена
+        сети), не при каждом открытии и не как сканирование. Возвращает `diagnostic_id`
+        (подписанный токен без хранилища, привязан к человеку) и список проб. **Данных TURN не
+        выдаёт**: срок учётных данных не ограничивает выделение (`Allocate` живёт до 10 минут по
+        RFC 8656), а квота coturn считается по имени пользователя, поэтому пробы идут на данных,
+        которые клиент уже получил как участник принятого звонка (`GET /calls/{id}/ice-servers`).
+        Не чаще шести раз в час (`429`; при недоступном счётчике — отказ).
+      operationId: createNetworkDiagnosticSession
+      responses:
+        '503':
+          description: Звонки или диагностика выключены (`calls_unavailable`)
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '201':
+          description: Сессия диагностики
+          headers:
+            Cache-Control: { schema: { type: string, enum: [no-store] } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NetworkDiagnosticSession' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429':
+          description: Слишком много сессий в час (`rate_limited`)
+          headers:
+            Retry-After: { schema: { type: integer } }
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /network-diagnostics/{diagnostic_id}/report:
+    post:
+      tags: [diagnostics]
+      summary: Технический результат диагностики (RES-012)
+      description: |
+        Только при включённой диагностике (`NETWORK_DIAGNOSTICS_ENABLED`) и включённых звонках, иначе `503 calls_unavailable`.
+        Клиент сообщает **только технический результат** в закрытых наборах: результаты
+        проб, `ice_gathering_ms`, `ice_connection_ms`, выбранный кандидат и протокол релея,
+        исход установки, причину отказа. IP, имён хостов и идентификаторов в теле нет, а сервер
+        их не сохраняет. Две связанные точки: `failure` («до») и `recovery` («после», что
+        спасло звонок); каждая принимается один раз (`409 diagnostic_reported`). Чужой,
+        просроченный и подделанный идентификатор неразличимы (`404`).
+      operationId: reportNetworkDiagnostic
+      parameters:
+        - name: diagnostic_id
+          in: path
+          required: true
+          schema: { type: string, maxLength: 200 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NetworkDiagnosticReport' }
+      responses:
+        '204': { description: Результат принят }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503':
+          description: Звонки или диагностика выключены (`calls_unavailable`)
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          description: Идентификатора нет, он чужой или просрочен — это неотличимо
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: Результат этой фазы уже принят (`diagnostic_reported`)
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
@@ -1340,6 +1418,79 @@ components:
               username: { type: string }
               credential: { type: string }
         ttl_seconds: { type: integer }
+
+    NetworkDiagnosticSession:
+      type: object
+      required: [diagnostic_id, ttl_seconds, report_within_seconds, probes, ice_servers]
+      properties:
+        diagnostic_id: { type: string, maxLength: 200 }
+        ttl_seconds:
+          type: integer
+          deprecated: true
+          description: 'Всегда 0. Поле сохранено ради совместимости (CTR-001), данных TURN у диагностики нет.'
+        report_within_seconds:
+          type: integer
+          description: Сколько после выдачи можно прислать результат («до» и «после»).
+        probes:
+          type: array
+          items: { $ref: '#/components/schemas/NetworkProbe' }
+        ice_servers:
+          type: array
+          deprecated: true
+          description: 'Всегда пуст. Поле сохранено ради совместимости (CTR-001), данные ICE берутся у звонка.'
+          items:
+            type: object
+            required: [urls]
+            properties:
+              urls: { type: array, items: { type: string } }
+              username: { type: string }
+              credential: { type: string }
+
+    NetworkProbe:
+      type: string
+      enum: [https, websocket, sse, stun, turn_udp, turn_tcp, turn_tls]
+
+    NetworkProbeResult:
+      type: object
+      additionalProperties: false
+      required: [probe, result]
+      properties:
+        probe: { $ref: '#/components/schemas/NetworkProbe' }
+        result: { type: string, enum: [ok, failed, timeout, skipped] }
+
+    NetworkDiagnosticReport:
+      type: object
+      additionalProperties: false
+      required: [phase, trigger, setup_result]
+      properties:
+        phase: { type: string, enum: [failure, recovery] }
+        trigger:
+          type: string
+          enum:
+            - ice_slow
+            - ice_failed
+            - allocation_timeout
+            - realtime_failed
+            - fallback_enabled
+            - network_change
+            - setup_timeout
+        setup_result: { type: string, enum: [connected, failed, timeout] }
+        probes:
+          type: array
+          maxItems: 10
+          items: { $ref: '#/components/schemas/NetworkProbeResult' }
+        ice_gathering_ms:
+          type: integer
+          minimum: 0
+          maximum: 120000
+          description: Время от создания соединения до **первого** кандидата, а не до конца сбора.
+        ice_connection_ms: { type: integer, minimum: 0, maximum: 120000 }
+        selected_candidate: { type: string, enum: [host, srflx, prflx, relay] }
+        selected_relay_protocol: { type: string, enum: [udp, tcp, tls] }
+        failure_reason:
+          type: string
+          maxLength: 40
+          description: Причина по таксономии отказов (часть 18, §8); неизвестная учитывается как `none`.
 
     CallSignal:
       type: object

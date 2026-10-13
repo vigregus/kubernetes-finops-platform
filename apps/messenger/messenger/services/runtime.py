@@ -24,6 +24,7 @@ import asyncpg
 
 from messenger.adapters import centrifugo, keycloak, object_store, oidc, ratelimit, turn
 from messenger.repositories import postgres
+from messenger.services import diagnostics
 from messenger.services.login import LoginSettings
 from messenger.telemetry import metrics
 
@@ -241,6 +242,7 @@ class Runtime:
     # Доступ к STUN/TURN для звонков (`adapters/turn.py`): всегда есть — без
     # настройки это пустой список, и звонок идёт напрямую.
     turn: turn.TurnProvider | None = None
+    diagnostics_secret: bytes | None = None
     backchannel_audience: str = field(
         default_factory=lambda: os.getenv("OIDC_BACKCHANNEL_AUDIENCE", "messenger-web")
     )
@@ -258,6 +260,8 @@ class Runtime:
             self.centrifugo = centrifugo_client_from_env()
         if self.turn is None:
             self.turn = turn.provider_from_env(observe=metrics.turn_endpoint)
+        if self.diagnostics_secret is None:
+            self.diagnostics_secret = diagnostics.secret_from_env()
         if self.object_store is None:
             store_settings = object_store.ObjectStoreSettings.from_env()
             if store_settings is not None:

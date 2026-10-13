@@ -333,7 +333,8 @@ describe("соединение и обрыв (CALL-011)", () => {
     ])
     r.peer.emitState("connected")
     await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(r.details).toEqual([{ mediaPath: "relay", turnTransport: "tls", profile: "normal" }])
+    expect(r.details).toMatchObject([{ mediaPath: "relay", turnTransport: "tls", profile: "normal" }])
+    expect(typeof r.details[0].setupMs).toBe("number")
   })
 
   it("прямой путь не несёт транспорта TURN, а чужая строка не становится значением", async () => {
@@ -1039,5 +1040,30 @@ describe("профиль RESTRICTED (RES-011)", () => {
     expect(r.events.some((e) => e.startsWith("failed"))).toBe(false)
     expect(r.peer.closed).toBe(false)
     expect(r.peer.offers).toHaveLength(1)
+  })
+
+  it("серверы для диагностики: полный список звонка, стабильный при любом профиле", async () => {
+    const r = profileRig({ profile: "restricted" })
+    await r.engine.start()
+    // звонок начат в restricted и знает только turns:, но диагностике нужен полный набор
+    expect(await r.engine.diagnosticServers()).toEqual(NORMAL)
+    r.asked.length = 0
+    fire(r, 540_000) // обновление данных под restricted не подменяет полный список
+    await flush()
+    expect(await r.engine.diagnosticServers()).toEqual(NORMAL)
+    r.engine.close()
+    expect(await r.engine.diagnosticServers()).toEqual(NORMAL)
+  })
+
+  it("серверы для диагностики: не удалось получить полный список — что у звонка есть", async () => {
+    const r = rig({
+      profile: "restricted",
+      iceServers: async (profile) => {
+        if (profile === "normal") throw new Error("call ended")
+        return { servers: TLS, ttlSeconds: 600 }
+      },
+    })
+    await r.engine.start()
+    expect(await r.engine.diagnosticServers()).toEqual(TLS)
   })
 })
